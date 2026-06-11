@@ -9,9 +9,10 @@
  *      └─ ffmpeg as MUXER ONLY (-c copy) → final .mp4
  */
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 import { parseEventLog } from "../schema/index.js";
@@ -46,8 +47,19 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     readFileSync(join(takeDir, "frames-index.json"), "utf8"),
   ) as FrameIndexEntry[];
 
-  // --bg: palette name, or a path to the user's own wallpaper image
-  const bgSpec = opts.background ?? "aurora";
+  // --bg: palette name, a bundled asset name (fuzzy-matched against assets/),
+  // or a path to the user's own wallpaper image
+  let bgSpec = opts.background ?? "aurora";
+  if (!existsSync(bgSpec)) {
+    const assetsDir = fileURLToPath(new URL("../../assets", import.meta.url));
+    if (existsSync(assetsDir)) {
+      const needle = bgSpec.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const hit = readdirSync(assetsDir).find((f) =>
+        f.toLowerCase().replace(/[^a-z0-9]/g, "").includes(needle),
+      );
+      if (hit) bgSpec = join(assetsDir, hit);
+    }
+  }
   const bgIsImage = existsSync(bgSpec) && statSync(bgSpec).isFile();
   const plan = buildRenderPlan(log, frameIndex, {
     background: bgIsImage

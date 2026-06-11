@@ -1,10 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { record } from "../src/capture/index.js";
+import { renderTake } from "../src/render/index.js";
 import { parseEventLog, parseRecipe, type Recipe } from "../src/schema/index.js";
 import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
+
+const exec = promisify(execFile);
 
 /**
  * Backbone E2E: record the fixture app for real (headless chromium,
@@ -105,7 +110,28 @@ describe("record E2E on fixture app", () => {
     expect(scheduledTimeline(join(out1, "events.json"))).toBe(
       scheduledTimeline(join(out2, "events.json")),
     );
-  }, 180_000);
+
+    // ---- render the take: full record→render pipeline proof ----
+    const mp4 = join(out1, "final.mp4");
+    const res = await renderTake({ takeDir: out1, outFile: mp4 });
+    expect(res.frames).toBeGreaterThan(120);
+    expect(statSync(mp4).size).toBeGreaterThan(100_000);
+
+    // container sanity: h264, 1080p60, duration matches the plan
+    const { stdout } = await exec("ffprobe", [
+      "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", mp4,
+    ]);
+    const probe = JSON.parse(stdout) as {
+      streams: { codec_name: string; width: number; height: number; avg_frame_rate: string }[];
+      format: { duration: string };
+    };
+    expect(probe.streams[0]).toMatchObject({
+      codec_name: "h264", width: 1920, height: 1080, avg_frame_rate: "60/1",
+    });
+    const expectedS = res.frames / 60;
+    expect(Number(probe.format.duration)).toBeGreaterThan(expectedS - 0.5);
+    expect(Number(probe.format.duration)).toBeLessThan(expectedS + 0.5);
+  }, 300_000);
 
   it("cascades failure: broken selector fails scene, dependent scene dies with it", async () => {
     const recipe = parseRecipe({

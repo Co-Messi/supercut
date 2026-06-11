@@ -56,16 +56,35 @@ async function main(): Promise<number> {
       );
       return res.aborted ? 1 : 0;
     }
-    case "generate":
     case "render": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          take: { type: "string" },
+          out: { type: "string" },
+        },
+      });
+      if (!values.take) {
+        console.error("usage: supercut render --take <take dir from record> [--out <file.mp4>]");
+        return 1;
+      }
+      const { renderTake } = await import("../render/index.js");
+      const outFile = values.out ?? "out/final.mp4";
+      console.log(`rendering take ${values.take} → ${outFile}`);
+      const res = await renderTake({ takeDir: values.take, outFile });
+      console.log(
+        `done in ${(res.wallMs / 1000).toFixed(1)}s — ${res.frames} frames, ` +
+          `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded → ${res.outFile}`,
+      );
+      return 0;
+    }
+    case "generate": {
       parseArgs({
         args: rest,
         options: {
           url: { type: "string" },
           repo: { type: "string" },
           config: { type: "string" },
-          video: { type: "string" },
-          events: { type: "string" },
         },
       });
       console.error(`supercut ${command}: not implemented yet (build in progress — see plan)`);

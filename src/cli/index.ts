@@ -27,17 +27,43 @@ async function main(): Promise<number> {
   switch (command) {
     case "doctor":
       return doctor();
+    case "record": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          recipe: { type: "string" },
+          out: { type: "string" },
+          seed: { type: "string" },
+        },
+      });
+      if (!values.recipe) {
+        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>]");
+        return 1;
+      }
+      const { readFileSync } = await import("node:fs");
+      const { parseRecipe } = await import("../schema/index.js");
+      const { record } = await import("../capture/index.js");
+
+      const recipe = parseRecipe(JSON.parse(readFileSync(values.recipe, "utf8")));
+      const outDir = values.out ?? "out/take";
+      console.log(`recording ${recipe.scenes.length} scene(s) from ${recipe.app_url} → ${outDir}`);
+      const t0 = Date.now();
+      const res = await record({ recipe, outDir, seed: values.seed ? Number(values.seed) : 1 });
+      console.log(
+        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames, ` +
+          `${res.eventLog.events.length} events` +
+          (res.failedScenes.length ? `, FAILED scenes: ${res.failedScenes.join(", ")}` : ""),
+      );
+      return res.aborted ? 1 : 0;
+    }
     case "generate":
-    case "record":
     case "render": {
-      // Parsed now so flags are validated from day one; stages land per build plan.
       parseArgs({
         args: rest,
         options: {
           url: { type: "string" },
           repo: { type: "string" },
           config: { type: "string" },
-          recipe: { type: "string" },
           video: { type: "string" },
           events: { type: "string" },
         },

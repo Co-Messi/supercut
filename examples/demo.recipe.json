@@ -1,0 +1,30 @@
+{
+  "version": 0,
+  "app_url": "http://127.0.0.1:4173",
+  "music_track": "institutional-01",
+  "scenes": [
+    {
+      "name": "landing-cta",
+      "priority": 1,
+      "entry": { "url": "http://127.0.0.1:4173/", "prelude": [] },
+      "depends_on": [],
+      "actions": [
+        { "kind": "click", "selector": "#cta", "duration_ms": 1800 },
+        { "kind": "type", "selector": "#email", "text": "ada@lumon.dev", "duration_ms": 2200 },
+        { "kind": "click", "selector": "#join", "duration_ms": 1400 }
+      ],
+      "hold_ms": 800
+    },
+    {
+      "name": "dashboard",
+      "priority": 2,
+      "entry": { "url": "http://127.0.0.1:4173/dash", "prelude": [] },
+      "depends_on": [],
+      "actions": [
+        { "kind": "hover", "selector": "#task-ship", "duration_ms": 1600 },
+        { "kind": "wait", "duration_ms": 1200 }
+      ],
+      "hold_ms": 600
+    }
+  ]
+}

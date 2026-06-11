@@ -130,46 +130,40 @@ async function main() {
     actx.setTransform(1, 0, 0, 1, 0, 0);
     actx.clearRect(0, 0, W, H);
 
-    // near-rest detection: if the window's corner moves < 0.8px across the
-    // shutter window, blur adds nothing but ghost edges — draw one sharp copy
-    const b0 = (f * SUB) * 3, b7 = (f * SUB + SUB - 1) * 3;
-    const disp = (() => {
-      const proj = (i) => {
-        const z = camera[i], fx = camera[i + 1], fy = camera[i + 2];
-        return [
-          z * C.x + fx * (1 - z) + (cx - fx) * (1 - 1 / z),
-          z * C.y + fy * (1 - z) + (cy - fy) * (1 - 1 / z),
-        ];
-      };
-      const a = proj(b0), b = proj(b7);
-      return Math.hypot(b[0] - a[0], b[1] - a[1]);
-    })();
-    const sharp = disp < 0.8;
-    const passes = sharp ? 1 : SUB;
-    if (!sharp) actx.globalCompositeOperation = "lighter";
-    actx.globalAlpha = sharp ? 1 : 1 / SUB;
+    // camera transform at fractional shutter position p ∈ [0,1] — lerped
+    // between the plan's subframe samples so pass count is decoupled from
+    // sample count
+    const camAt = (p) => {
+      const fi = p * (SUB - 1);
+      const i0 = Math.floor(fi), k = fi - i0;
+      const a = (f * SUB + i0) * 3;
+      const b = (f * SUB + Math.min(i0 + 1, SUB - 1)) * 3;
+      const z = camera[a] + (camera[b] - camera[a]) * k;
+      const fx = camera[a + 1] + (camera[b + 1] - camera[a + 1]) * k;
+      const fy = camera[a + 2] + (camera[b + 2] - camera[a + 2]) * k;
+      return [z, fx * (1 - z) + (cx - fx) * (1 - 1 / z), fy * (1 - z) + (cy - fy) * (1 - 1 / z)];
+    };
+
+    // adaptive blur: pass count scales with corner displacement across the
+    // shutter so ghost spacing stays ≲1px at any camera speed (the residual
+    // "weird border" rings Brayden still saw on v5 were 8 discrete copies of
+    // fast frames + 8 stacked shadows)
+    const [z0, ox0, oy0] = camAt(0);
+    const [z1, ox1, oy1] = camAt(1);
+    const disp = Math.hypot(
+      (z1 * C.x + ox1) - (z0 * C.x + ox0),
+      (z1 * C.y + oy1) - (z0 * C.y + oy0),
+    );
+    const passes = Math.max(1, Math.min(48, Math.ceil(disp / 1.0)));
+    if (passes > 1) actx.globalCompositeOperation = "lighter";
+    actx.globalAlpha = 1 / passes;
 
     const cur = cursor.slice(f * 3, f * 3 + 3);
     for (let s = 0; s < passes; s++) {
-      const base = (f * SUB + s) * 3;
-      const z = camera[base], fx = camera[base + 1], fy = camera[base + 2];
-      // q' = z(q − f) + f + (center − f)(1 − 1/z): identity at z=1,
-      // focus drifts toward canvas center as zoom deepens
-      const offX = fx * (1 - z) + (cx - fx) * (1 - 1 / z);
-      const offY = fy * (1 - z) + (cy - fy) * (1 - 1 / z);
+      const [z, offX, offY] = camAt(passes === 1 ? 0.5 : s / (passes - 1));
       actx.setTransform(z, 0, 0, z, offX, offY);
-
       actx.save();
-      // window shadow — large and soft, the "floating stage" look
-      // (lighter stages need a gentler shadow or it reads as a hole)
-      actx.shadowColor = background.light ? "rgba(0,0,0,0.30)" : "rgba(0,0,0,0.55)";
-      actx.shadowBlur = 72;
-      actx.shadowOffsetY = 30;
-      roundedPath(actx, C.x, C.y, C.w, C.h, layout.cornerRadius);
-      actx.fillStyle = "#000";
-      actx.fill();
-      actx.shadowColor = "transparent";
-      // content clipped to rounded window
+      // content clipped to rounded window — NO shadow in the blur loop
       roundedPath(actx, C.x, C.y, C.w, C.h, layout.cornerRadius);
       actx.clip();
       actx.drawImage(bmp, C.x, C.y, C.w, C.h);
@@ -208,6 +202,21 @@ async function main() {
         ctx.fillStyle = glow;
         ctx.fillRect(0, 0, W, H);
       }
+    }
+    // window shadow: drawn ONCE per frame at mid-shutter — it is already a
+    // 72px blur, so motion-blurring it is invisible, but stacking copies of
+    // it was the big concentric banding (QC round: v5 residual rings)
+    {
+      const [z, offX, offY] = camAt(0.5);
+      ctx.setTransform(z, 0, 0, z, offX, offY);
+      ctx.shadowColor = background.light ? "rgba(0,0,0,0.30)" : "rgba(0,0,0,0.55)";
+      ctx.shadowBlur = 72;
+      ctx.shadowOffsetY = 30;
+      roundedPath(ctx, C.x, C.y, C.w, C.h, layout.cornerRadius);
+      ctx.fillStyle = "#000";
+      ctx.fill();
+      ctx.shadowColor = "transparent";
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
     ctx.drawImage(accumCanvas, 0, 0);
     // vignette pulls the eye to the window — fades out as the camera zooms in

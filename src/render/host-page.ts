@@ -20,10 +20,16 @@ const log = (m) => console.log("[render] " + m);
 
 async function main() {
   const plan = await (await fetch("/take/render-plan.json")).json();
-  const { fps, frames, layout, sourceByFrame, camera, cursor, sourceFiles } = plan;
+  const { fps, frames, layout, background, sourceByFrame, camera, cursor, sourceFiles } = plan;
   const SUB = 8;
   const W = layout.canvasW, H = layout.canvasH;
   const C = layout.content;
+
+  // bring-your-own-wallpaper mode: served by the orchestrator at /take/bg
+  let bgImage = null;
+  if (background.kind === "image") {
+    bgImage = await createImageBitmap(await (await fetch("/take/bg")).blob());
+  }
 
   const canvas = new OffscreenCanvas(W, H);
   const ctx = canvas.getContext("2d");
@@ -137,7 +143,8 @@ async function main() {
 
       actx.save();
       // window shadow — large and soft, the "floating stage" look
-      actx.shadowColor = "rgba(0,0,0,0.55)";
+      // (lighter stages need a gentler shadow or it reads as a hole)
+      actx.shadowColor = background.light ? "rgba(0,0,0,0.30)" : "rgba(0,0,0,0.55)";
       actx.shadowBlur = 72;
       actx.shadowOffsetY = 30;
       roundedPath(actx, C.x, C.y, C.w, C.h, layout.cornerRadius);
@@ -151,28 +158,44 @@ async function main() {
       actx.restore();
     }
 
-    // 2) final composite: stage (gradient + key light + vignette), then the
-    //    averaged content layer
+    // 2) final composite: stage, then the averaged content layer
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const g = ctx.createLinearGradient(0, 0, W * 0.3, H);
-    g.addColorStop(0, "#222a4d");
-    g.addColorStop(0.55, "#161b33");
-    g.addColorStop(1, "#0d101e");
-    ctx.fillStyle = g;
+    ctx.fillStyle = background.base;
     ctx.fillRect(0, 0, W, H);
-    // soft key light from above
-    const glow = ctx.createRadialGradient(W / 2, -H * 0.35, 60, W / 2, -H * 0.35, H * 1.15);
-    glow.addColorStop(0, "rgba(122,150,255,0.16)");
-    glow.addColorStop(1, "rgba(122,150,255,0)");
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, W, H);
+    if (bgImage) {
+      // cover-fit the user's wallpaper
+      const s = Math.max(W / bgImage.width, H / bgImage.height);
+      const dw = bgImage.width * s, dh = bgImage.height * s;
+      ctx.drawImage(bgImage, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    } else {
+      // procedural mesh: large soft color clouds with very slow drift
+      // (the OpenAI-launch-video look, generated — no asset, no license)
+      const t = (f * 1000) / fps;
+      for (const b of background.blobs) {
+        const bx = b.cx + Math.sin(t * 0.00045 + b.phase) * b.amp;
+        const by = b.cy + Math.cos(t * 0.00032 + b.phase * 1.7) * b.amp;
+        const bg = ctx.createRadialGradient(bx, by, 0, bx, by, b.r);
+        bg.addColorStop(0, "rgba(" + b.color + ",0.6)");
+        bg.addColorStop(0.65, "rgba(" + b.color + ",0.22)");
+        bg.addColorStop(1, "rgba(" + b.color + ",0)");
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+      }
+      if (!background.light) {
+        // dark stages get a soft key light from above
+        const glow = ctx.createRadialGradient(W / 2, -H * 0.35, 60, W / 2, -H * 0.35, H * 1.15);
+        glow.addColorStop(0, "rgba(122,150,255,0.14)");
+        glow.addColorStop(1, "rgba(122,150,255,0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, W, H);
+      }
+    }
     ctx.drawImage(accumCanvas, 0, 0);
-    // gentle vignette pulls the eye to the window — fades out as the camera
-    // zooms in (a fixed vignette grays the corners of bright content at zoom,
-    // caught in QC round 3)
+    // vignette pulls the eye to the window — fades out as the camera zooms in
+    // (a fixed vignette grays the corners of bright content at zoom, QC round 3)
     const zNow = camera[(f * SUB + (SUB - 1)) * 3];
-    const vigA = Math.max(0, Math.min(1, (1.55 - zNow) / 0.55)) * 0.3;
+    const vigA = Math.max(0, Math.min(1, (1.55 - zNow) / 0.55)) * background.vignette;
     if (vigA > 0.01) {
       const vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.55, W / 2, H / 2, H * 1.05);
       vig.addColorStop(0, "rgba(0,0,0,0)");

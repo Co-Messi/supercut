@@ -9,7 +9,7 @@
  *      └─ ffmpeg as MUXER ONLY (-c copy) → final .mp4
  */
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -23,6 +23,8 @@ const exec = promisify(execFile);
 export interface RenderOptions {
   takeDir: string;
   outFile: string;
+  /** palette name (aurora|midnight|dusk|paper) or a path to a wallpaper image */
+  background?: string;
   /** ms; encoding 60s of footage measured ~36s in the spike — 5 min is generous */
   timeoutMs?: number;
 }
@@ -43,7 +45,15 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const frameIndex = JSON.parse(
     readFileSync(join(takeDir, "frames-index.json"), "utf8"),
   ) as FrameIndexEntry[];
-  const plan = buildRenderPlan(log, frameIndex);
+
+  // --bg: palette name, or a path to the user's own wallpaper image
+  const bgSpec = opts.background ?? "aurora";
+  const bgIsImage = existsSync(bgSpec) && statSync(bgSpec).isFile();
+  const plan = buildRenderPlan(log, frameIndex, {
+    background: bgIsImage
+      ? { kind: "image", base: "#101010", blobs: [], light: true, vignette: 0.16 }
+      : bgSpec,
+  });
   const planJson = JSON.stringify(plan);
 
   let resultBuf: Buffer | null = null;
@@ -68,6 +78,11 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         res.writeHead(404);
         res.end();
       }
+    } else if (url === "/take/bg" && bgIsImage) {
+      const ext = bgSpec.toLowerCase();
+      const mime = ext.endsWith(".png") ? "image/png" : ext.endsWith(".webp") ? "image/webp" : "image/jpeg";
+      res.writeHead(200, { "content-type": mime });
+      res.end(readFileSync(bgSpec));
     } else if (url === "/result" && req.method === "POST") {
       const parts: Buffer[] = [];
       req.on("data", (c: Buffer) => parts.push(c));

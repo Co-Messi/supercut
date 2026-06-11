@@ -62,16 +62,24 @@ async function main(): Promise<number> {
         options: {
           take: { type: "string" },
           out: { type: "string" },
+          bg: { type: "string" },
         },
       });
       if (!values.take) {
-        console.error("usage: supercut render --take <take dir from record> [--out <file.mp4>]");
+        console.error(
+          "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
+            "[--bg aurora|midnight|dusk|paper|<image path>]",
+        );
         return 1;
       }
       const { renderTake } = await import("../render/index.js");
       const outFile = values.out ?? "out/final.mp4";
       console.log(`rendering take ${values.take} → ${outFile}`);
-      const res = await renderTake({ takeDir: values.take, outFile });
+      const res = await renderTake({
+        takeDir: values.take,
+        outFile,
+        ...(values.bg ? { background: values.bg } : {}),
+      });
       console.log(
         `done in ${(res.wallMs / 1000).toFixed(1)}s — ${res.frames} frames, ` +
           `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded → ${res.outFile}`,

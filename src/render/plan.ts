@@ -18,6 +18,7 @@
  * compositor's output is CI-checkable (SSIM on pre-encode frames later).
  */
 import type { EventLog } from "../schema/index.js";
+import { makeRng } from "../capture/cursor.js";
 
 export const SUBFRAMES = 8;
 
@@ -34,10 +35,96 @@ export interface Layout {
   viewport: { width: number; height: number; dpr: number };
 }
 
+/** One soft color cloud of the procedural mesh background. */
+export interface MeshBlob {
+  color: string; // "r,g,b"
+  cx: number;
+  cy: number;
+  r: number;
+  phase: number;
+  amp: number; // drift amplitude px
+}
+
+export interface BackgroundStyle {
+  kind: "mesh" | "image";
+  /** base fill behind the blobs (mesh) / behind the image while loading */
+  base: string;
+  blobs: MeshBlob[];
+  /** light backgrounds get a soft vignette; dark ones a stronger one + key light */
+  light: boolean;
+  vignette: number;
+}
+
+/**
+ * Curated palettes. "aurora" is the default — the soft blurred
+ * pastel-mesh look of OpenAI-style launch videos (Brayden's reference,
+ * 2026-06-11). Apple wallpapers can't be bundled (copyright); users get the
+ * same vibe via --bg <their own image>.
+ */
+export const PALETTES: Record<string, { base: string; light: boolean; colors: string[] }> = {
+  aurora: {
+    base: "#f4ecf1",
+    light: true,
+    colors: ["244,164,201", "188,166,242", "247,205,168", "166,224,200", "228,168,238"],
+  },
+  midnight: {
+    base: "#10131f",
+    light: false,
+    colors: ["38,52,110", "72,48,120", "24,70,110", "50,40,96", "30,58,92"],
+  },
+  dusk: {
+    base: "#1d1426",
+    light: false,
+    colors: ["120,52,110", "180,86,60", "70,46,130", "150,60,90", "100,70,150"],
+  },
+  paper: {
+    base: "#f2f0ea",
+    light: true,
+    colors: ["228,222,208", "214,220,228", "232,226,214", "218,212,226", "226,230,220"],
+  },
+};
+
+export function buildBackground(palette: string, canvasW: number, canvasH: number): BackgroundStyle {
+  const p = PALETTES[palette];
+  if (!p) {
+    throw new Error(
+      `unknown background palette "${palette}" (have: ${Object.keys(PALETTES).join(", ")}, or pass an image file)`,
+    );
+  }
+  // seeded from palette name → deterministic layout per palette
+  let seed = 0;
+  for (const ch of palette) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+  const rng = makeRng(seed || 1);
+
+  const anchors: [number, number][] = [
+    [0.18, 0.22], [0.78, 0.16], [0.5, 0.62], [0.12, 0.82], [0.88, 0.78],
+  ];
+  const blobs: MeshBlob[] = p.colors.map((color, i) => {
+    const [ax, ay] = anchors[i % anchors.length]!;
+    return {
+      color,
+      cx: (ax + (rng() - 0.5) * 0.12) * canvasW,
+      cy: (ay + (rng() - 0.5) * 0.12) * canvasH,
+      r: (0.55 + rng() * 0.35) * canvasH,
+      phase: rng() * Math.PI * 2,
+      amp: 30 + rng() * 35,
+    };
+  });
+
+  return {
+    kind: "mesh",
+    base: p.base,
+    blobs,
+    light: p.light,
+    vignette: p.light ? 0.12 : 0.3,
+  };
+}
+
 export interface RenderPlan {
   fps: number;
   frames: number;
   layout: Layout;
+  background: BackgroundStyle;
   /** output frame → index into frameIndex (nearest-hold) */
   sourceByFrame: number[];
   /** flattened [z, fx, fy] per subframe: frames × SUBFRAMES × 3 (canvas coords) */
@@ -66,7 +153,7 @@ const OMEGA = 9;
 export function defaultLayout(viewport: EventLog["viewport"]): Layout {
   const canvasW = 1920;
   const canvasH = 1080;
-  const scale = 0.84;
+  const scale = 0.8;
   const w = Math.round(canvasW * scale);
   const h = Math.round((w / viewport.width) * viewport.height);
   return {
@@ -87,12 +174,16 @@ function toCanvas(layout: Layout, cssX: number, cssY: number): { x: number; y: n
 export function buildRenderPlan(
   log: EventLog,
   frameIndex: FrameIndexEntry[],
-  opts: { layout?: Layout } = {},
+  opts: { layout?: Layout; background?: string | BackgroundStyle } = {},
 ): RenderPlan {
   if (frameIndex.length === 0) throw new Error("render plan: empty frame index");
   const fps = log.fps;
   const frameMs = 1000 / fps;
   const layout = opts.layout ?? defaultLayout(log.viewport);
+  const background =
+    typeof opts.background === "object"
+      ? opts.background
+      : buildBackground(opts.background ?? "aurora", layout.canvasW, layout.canvasH);
   const center = { x: layout.canvasW / 2, y: layout.canvasH / 2 };
 
   // ---- duration ----
@@ -200,6 +291,7 @@ export function buildRenderPlan(
     fps,
     frames,
     layout,
+    background,
     sourceByFrame,
     camera,
     cursor,

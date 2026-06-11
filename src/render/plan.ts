@@ -142,13 +142,18 @@ interface CameraSegment {
   fy: number;
 }
 
-const ZOOM_TARGET = 1.55;
+const ZOOM_TARGET = 1.48;
 const ZOOM_LEAD_MS = 600;   // camera starts moving before the click lands
 const ZOOM_DWELL_MS = 1500; // stays on target after the event
+/** segments closer than this bridge into ONE held zoom — the camera glides
+ *  between targets instead of pumping out/in per click (Brayden: "everything
+ *  is just moving too much... the screen is kind of shaking", 2026-06-11) */
+const MERGE_GAP_MS = 2600;
 const TAIL_MS = 600;
 const PULSE_MS = 350;
-/** critically damped spring: ~settles in ≈ 4/OMEGA seconds */
-const OMEGA = 9;
+/** critically damped spring: ~settles in ≈ 4/OMEGA seconds — 6.5 is a calm,
+ *  stately glide; 9 read as restless */
+const OMEGA = 6.5;
 
 export function defaultLayout(viewport: EventLog["viewport"]): Layout {
   const canvasW = 1920;
@@ -223,6 +228,14 @@ export function buildRenderPlan(
   }
   segments.sort((a, b) => a.start - b.start);
 
+  // bridge nearby segments: hold the zoom across short gaps so the camera
+  // pans between targets instead of zooming out and back in
+  for (let i = 0; i < segments.length - 1; i++) {
+    const cur = segments[i]!;
+    const next = segments[i + 1]!;
+    if (next.start - cur.end < MERGE_GAP_MS) cur.end = next.start;
+  }
+
   const targetAt = (t: number): { z: number; fx: number; fy: number } => {
     let active: CameraSegment | undefined;
     for (const s of segments) {
@@ -233,13 +246,17 @@ export function buildRenderPlan(
   };
 
   // ---- spring integration at subframe resolution ----
-  const dt = frameMs / 1000 / SUBFRAMES;
+  // 180° shutter: integrate 2×SUBFRAMES steps per frame but RECORD only the
+  // first half — blur spans half the frame interval, halving ghost spacing
+  // (the "onion ring" edge artifact Brayden spotted, 2026-06-11)
+  const STEPS = SUBFRAMES * 2;
+  const dt = frameMs / 1000 / STEPS;
   const state = { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 };
   const camera = new Array<number>(frames * SUBFRAMES * 3);
   let w = 0;
   for (let f = 0; f < frames; f++) {
-    for (let s = 0; s < SUBFRAMES; s++) {
-      const t = f * frameMs + (s / SUBFRAMES) * frameMs;
+    for (let s = 0; s < STEPS; s++) {
+      const t = f * frameMs + (s / STEPS) * frameMs;
       const tgt = targetAt(t);
       // critically damped: a = ω²(target − x) − 2ω·v
       state.vz += (OMEGA * OMEGA * (tgt.z - state.z) - 2 * OMEGA * state.vz) * dt;
@@ -248,9 +265,11 @@ export function buildRenderPlan(
       state.z += state.vz * dt;
       state.fx += state.vfx * dt;
       state.fy += state.vfy * dt;
-      camera[w++] = state.z;
-      camera[w++] = state.fx;
-      camera[w++] = state.fy;
+      if (s < SUBFRAMES) {
+        camera[w++] = state.z;
+        camera[w++] = state.fx;
+        camera[w++] = state.fy;
+      }
     }
   }
 

@@ -129,10 +129,28 @@ async function main() {
     actx.globalCompositeOperation = "source-over";
     actx.setTransform(1, 0, 0, 1, 0, 0);
     actx.clearRect(0, 0, W, H);
-    actx.globalCompositeOperation = "lighter";
-    actx.globalAlpha = 1 / SUB;
+
+    // near-rest detection: if the window's corner moves < 0.8px across the
+    // shutter window, blur adds nothing but ghost edges — draw one sharp copy
+    const b0 = (f * SUB) * 3, b7 = (f * SUB + SUB - 1) * 3;
+    const disp = (() => {
+      const proj = (i) => {
+        const z = camera[i], fx = camera[i + 1], fy = camera[i + 2];
+        return [
+          z * C.x + fx * (1 - z) + (cx - fx) * (1 - 1 / z),
+          z * C.y + fy * (1 - z) + (cy - fy) * (1 - 1 / z),
+        ];
+      };
+      const a = proj(b0), b = proj(b7);
+      return Math.hypot(b[0] - a[0], b[1] - a[1]);
+    })();
+    const sharp = disp < 0.8;
+    const passes = sharp ? 1 : SUB;
+    if (!sharp) actx.globalCompositeOperation = "lighter";
+    actx.globalAlpha = sharp ? 1 : 1 / SUB;
+
     const cur = cursor.slice(f * 3, f * 3 + 3);
-    for (let s = 0; s < SUB; s++) {
+    for (let s = 0; s < passes; s++) {
       const base = (f * SUB + s) * 3;
       const z = camera[base], fx = camera[base + 1], fy = camera[base + 2];
       // q' = z(q − f) + f + (center − f)(1 − 1/z): identity at z=1,

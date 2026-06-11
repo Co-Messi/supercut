@@ -32,7 +32,9 @@ export function makeRng(seed: number): () => number {
 
 /** Fitts's law movement time in ms, before clamping. */
 export function fittsMs(distancePx: number, targetWidthPx: number): number {
-  const a = 120, b = 110; // tuned for "confident demo presenter" feel
+  // tuned 2026-06-11 after Brayden's v0 verdict: "cursor moving is a little
+  // bit too fast" — slower, deliberate presenter pace
+  const a = 220, b = 170;
   return a + b * Math.log2(distancePx / Math.max(targetWidthPx, 8) + 1);
 }
 

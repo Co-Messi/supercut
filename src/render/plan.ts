@@ -73,7 +73,7 @@ export function defaultLayout(viewport: EventLog["viewport"]): Layout {
     canvasW,
     canvasH,
     content: { x: Math.round((canvasW - w) / 2), y: Math.round((canvasH - h) / 2) - 8, w, h },
-    cornerRadius: 18,
+    cornerRadius: 22,
     viewport,
   };
 }

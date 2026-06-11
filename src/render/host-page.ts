@@ -73,24 +73,41 @@ async function main() {
     c.closePath();
   }
 
-  // macOS-style arrow cursor, tip at (0,0), ~19px tall in canvas units
+  // macOS pointer, redrawn properly (v0's hand-sketched arrow read as cheap —
+  // Brayden: "the cursor is a bit cringe"). Accurate proportions, rounded
+  // joins, soft drop shadow, micro-squeeze on click. Tip at (0,0).
   function drawCursor(c, x, y, pulse) {
     c.save();
     c.translate(x, y);
     if (pulse > 0) {
+      // understated click ring — expands and fades
       c.beginPath();
-      c.arc(0, 0, 16 + 22 * (1 - pulse), 0, Math.PI * 2);
-      c.fillStyle = "rgba(37,99,235," + (0.28 * pulse).toFixed(3) + ")";
-      c.fill();
+      c.arc(2, 2, 13 + 20 * (1 - pulse), 0, Math.PI * 2);
+      c.strokeStyle = "rgba(120,150,255," + (0.35 * pulse).toFixed(3) + ")";
+      c.lineWidth = 2;
+      c.stroke();
     }
+    const squeeze = 1 - 0.1 * pulse; // presses in slightly on click
+    c.scale(1.3 * squeeze, 1.3 * squeeze);
+    c.shadowColor = "rgba(0,0,0,0.38)";
+    c.shadowBlur = 5;
+    c.shadowOffsetY = 1.5;
+    c.lineJoin = "round";
     c.beginPath();
-    c.moveTo(0, 0); c.lineTo(0, 16.5); c.lineTo(3.8, 13);
-    c.lineTo(6.4, 19); c.lineTo(9.1, 17.8); c.lineTo(6.5, 12);
-    c.lineTo(11.5, 11.7); c.closePath();
-    c.fillStyle = "#0b0b0f";
-    c.strokeStyle = "rgba(255,255,255,.92)";
-    c.lineWidth = 1.6;
-    c.fill(); c.stroke();
+    c.moveTo(0, 0);
+    c.lineTo(0, 17.2);
+    c.lineTo(4.1, 13.4);
+    c.lineTo(7.0, 20.1);
+    c.lineTo(9.7, 18.9);
+    c.lineTo(6.9, 12.4);
+    c.lineTo(12.4, 12.1);
+    c.closePath();
+    c.fillStyle = "#1a1a1f";
+    c.fill();
+    c.shadowColor = "transparent";
+    c.strokeStyle = "rgba(255,255,255,.95)";
+    c.lineWidth = 1.4;
+    c.stroke();
     c.restore();
   }
 
@@ -119,10 +136,10 @@ async function main() {
       actx.setTransform(z, 0, 0, z, offX, offY);
 
       actx.save();
-      // window shadow
-      actx.shadowColor = "rgba(0,0,0,0.5)";
-      actx.shadowBlur = 48;
-      actx.shadowOffsetY = 22;
+      // window shadow — large and soft, the "floating stage" look
+      actx.shadowColor = "rgba(0,0,0,0.55)";
+      actx.shadowBlur = 72;
+      actx.shadowOffsetY = 30;
       roundedPath(actx, C.x, C.y, C.w, C.h, layout.cornerRadius);
       actx.fillStyle = "#000";
       actx.fill();
@@ -134,15 +151,35 @@ async function main() {
       actx.restore();
     }
 
-    // 2) final composite: background plate, then the averaged content layer
+    // 2) final composite: stage (gradient + key light + vignette), then the
+    //    averaged content layer
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const g = ctx.createLinearGradient(0, 0, W, H);
-    g.addColorStop(0, "#1c2233");
-    g.addColorStop(1, "#10131c");
+    const g = ctx.createLinearGradient(0, 0, W * 0.3, H);
+    g.addColorStop(0, "#222a4d");
+    g.addColorStop(0.55, "#161b33");
+    g.addColorStop(1, "#0d101e");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
+    // soft key light from above
+    const glow = ctx.createRadialGradient(W / 2, -H * 0.35, 60, W / 2, -H * 0.35, H * 1.15);
+    glow.addColorStop(0, "rgba(122,150,255,0.16)");
+    glow.addColorStop(1, "rgba(122,150,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
     ctx.drawImage(accumCanvas, 0, 0);
+    // gentle vignette pulls the eye to the window — fades out as the camera
+    // zooms in (a fixed vignette grays the corners of bright content at zoom,
+    // caught in QC round 3)
+    const zNow = camera[(f * SUB + (SUB - 1)) * 3];
+    const vigA = Math.max(0, Math.min(1, (1.55 - zNow) / 0.55)) * 0.3;
+    if (vigA > 0.01) {
+      const vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.55, W / 2, H / 2, H * 1.05);
+      vig.addColorStop(0, "rgba(0,0,0,0)");
+      vig.addColorStop(1, "rgba(0,0,0," + vigA.toFixed(3) + ")");
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, W, H);
+    }
 
     // 3) cursor: drawn SHARP on the final composite (dark pixels vanish in the
     //    additive blur layer — found in QC round 2). It still tracks the camera:

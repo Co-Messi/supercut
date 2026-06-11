@@ -141,7 +141,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         if (!a.selector) throw new Error(`${a.kind} action requires selector`);
         const box = await targetBox(a.selector);
         const target = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
-        const travelBudget = Math.max(120, a.duration_ms * 0.5);
+        const travelBudget = Math.max(250, a.duration_ms * 0.7);
         const points = cursorPath({
           from: { ...cursor }, to: target, targetWidth: box.w,
           maxDurationMs: travelBudget, rng,

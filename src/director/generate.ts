@@ -33,7 +33,11 @@ export interface GenerateOptions {
   repoPath?: string;
   background?: string;
   seed?: number;
-  /** skip vision QC (deterministic checks still run) */
+  /** model can see images: drives screenshot capture, analyze images, and the
+   *  vision-QC pass. Off for text-only models (e.g. deepseek-chat) — the
+   *  director then reads the DOM/inventory and QC uses deterministic checks. */
+  vision?: boolean;
+  /** @deprecated use vision:false */
   noVision?: boolean;
   log?: (msg: string) => void;
 }
@@ -83,13 +87,14 @@ function repoNotes(repoPath: string): string | undefined {
 
 export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   const log = opts.log ?? ((m: string) => console.log(`[generate] ${m}`));
+  const vision = opts.vision !== undefined ? opts.vision : !(opts.noVision ?? false);
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
   await preflight(opts.url);
 
-  log("① analyze: crawling app…");
-  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3 });
+  log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
+  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3, screenshots: vision });
   log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
 
   const notes = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
@@ -120,7 +125,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
     log("④ qc: deterministic checks…");
     const verdicts = deterministicChecks(result);
-    if (!opts.noVision) {
+    if (vision) {
       log("④ qc: vision pass…");
       verdicts.push(...await visionQc(opts.llm, takeDir, result.eventLog));
     }

@@ -102,28 +102,34 @@ async function main(): Promise<number> {
       if (!values.url) {
         console.error(
           "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-            "[--bg <stage>] [--seed <n>] [--model <openrouter id>] [--no-vision]",
+            "[--bg <stage>] [--seed <n>] [--model <id>] [--no-vision]",
         );
         return 1;
       }
-      const apiKey = process.env.OPENROUTER_API_KEY ?? process.env.SUPERCUT_API_KEY ?? "";
-      if (!apiKey) {
+      const { loadDotEnv, resolveProvider } = await import("../director/config.js");
+      const { generate } = await import("../director/generate.js");
+      loadDotEnv(); // read .env at repo root (DEEPSEEK_API_KEY etc.)
+      if (values.model) process.env.SUPERCUT_MODEL = values.model; // --model overrides .env
+      let provider;
+      try {
+        provider = resolveProvider();
+      } catch (err) {
         console.error(
-          "generate needs an LLM: set OPENROUTER_API_KEY (one key, many models — https://openrouter.ai/keys).\n" +
+          `${err instanceof Error ? err.message : err}\n` +
             "No key? `supercut record` + `supercut render` work fully without one.",
         );
         return 1;
       }
-      const { OpenRouterClient } = await import("../director/llm.js");
-      const { generate } = await import("../director/generate.js");
+      console.log(`director: ${provider.summary}`);
       const res = await generate({
-        llm: new OpenRouterClient({ apiKey, ...(values.model ? { model: values.model } : {}) }),
+        llm: provider.client,
         url: values.url,
         outDir: values.out ?? "out/generate",
+        // --no-vision forces off; otherwise follow the provider's capability
+        vision: values["no-vision"] ? false : provider.vision,
         ...(values.repo ? { repoPath: values.repo } : {}),
         ...(values.bg ? { background: values.bg } : {}),
         ...(values.seed ? { seed: Number(values.seed) } : {}),
-        ...(values["no-vision"] ? { noVision: true } : {}),
       });
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;

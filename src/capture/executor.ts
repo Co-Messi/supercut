@@ -114,6 +114,19 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   async function targetBox(selector: string): Promise<{ x: number; y: number; w: number; h: number }> {
     const loc = page.locator(selector).first();
     await loc.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    // scroll the element INTO the viewport before targeting it. Without this,
+    // boundingBox returns document coordinates for below/above-fold elements
+    // (e.g. y=6549 or y=-3883), the cursor + camera then aim off-frame and the
+    // shot is pure background. Scrolling is also how a single-viewport recording
+    // reveals different parts of a long page. (Found on the first live run.)
+    const pre = await loc.boundingBox();
+    const alreadyInView =
+      !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
+    await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS });
+    // settle ONLY when a scroll actually happened — an unconditional sleep adds
+    // wall-time to every action, tipping in-view actions into the overrun path
+    // and breaking the scheduled-timeline determinism contract on fixtures
+    if (!alreadyInView) await sleep(350);
     const box = await loc.boundingBox();
     if (!box) throw new Error(`selector "${selector}" has no bounding box`);
     return { x: box.x, y: box.y, w: box.width, h: box.height };

@@ -240,7 +240,12 @@ export function buildRenderPlan(
   for (const e of log.events) {
     if (e.type !== "click" && e.type !== "hover" && e.type !== "type") continue;
     const [bx, by, bw, bh] = e.bbox;
-    const focus = toCanvas(layout, bx + bw / 2, by + bh / 2);
+    // defense in depth: clamp the focus point to the viewport so a stray
+    // off-frame bbox can never fly the camera off into empty background
+    // (the capture stage now scrolls targets in-view, but never trust a bbox)
+    const cssX = Math.min(Math.max(bx + bw / 2, 0), layout.viewport.width);
+    const cssY = Math.min(Math.max(by + bh / 2, 0), layout.viewport.height);
+    const focus = toCanvas(layout, cssX, cssY);
     segments.push({
       start: e.t - ZOOM_LEAD_MS,
       end: e.t + ZOOM_DWELL_MS,

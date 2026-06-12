@@ -6,3 +6,7 @@ out/
 *.mp4
 *.raw
 test/.tmp/
+
+# secrets — never commit
+.env
+.env.local

@@ -29,6 +29,18 @@ export interface PageDigest {
 
 const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
 
+// links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
+// and non-http protocols. Navigating to a PDF triggers a download that crashes
+// page.goto (found on a real run, 2026-06-12).
+const NON_HTML_EXT =
+  /\.(pdf|zip|tar|gz|dmg|exe|pkg|csv|xlsx?|docx?|pptx?|png|jpe?g|gif|svg|webp|mp4|mov|webm|mp3|wav|woff2?|ttf)$/i;
+
+function isCrawlable(u: URL): boolean {
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  if (NON_HTML_EXT.test(u.pathname)) return false;
+  return true;
+}
+
 async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDigest> {
   const title = await page.title();
 
@@ -136,6 +148,18 @@ export async function crawlApp(
     const digests: PageDigest[] = [];
     const visited = new Set<string>();
 
+    // block downloads outright so a stray file link can't hang/crash the crawl
+    const ctx = page.context();
+    await ctx.route("**/*", async (route) => {
+      const u = route.request().url();
+      try {
+        if (route.request().isNavigationRequest() && NON_HTML_EXT.test(new URL(u).pathname)) {
+          return route.abort();
+        }
+      } catch { /* fall through */ }
+      return route.continue();
+    });
+
     const queue = [appUrl];
     while (queue.length > 0 && digests.length < maxPages) {
       const target = queue.shift()!;
@@ -147,8 +171,15 @@ export async function crawlApp(
       if (visited.has(key)) continue;
       visited.add(key);
 
-      await page.goto(target, { timeout: 15_000, waitUntil: "load" });
-      await page.waitForTimeout(400); // settle: load ≠ ready
+      // a single bad page (download, timeout, redirect off-origin) must not
+      // kill the whole crawl — skip it and keep going
+      try {
+        await page.goto(target, { timeout: 15_000, waitUntil: "load" });
+        await page.waitForTimeout(400); // settle: load ≠ ready
+      } catch (err) {
+        if (digests.length === 0 && queue.length === 0) throw err; // start page must load
+        continue;
+      }
       const digest = await digestPage(page, screenshots);
       digests.push(digest);
 
@@ -156,7 +187,7 @@ export async function crawlApp(
         if (!item.href) continue;
         try {
           const linked = new URL(item.href, target);
-          if (linked.origin === origin && !visited.has(linked.pathname + linked.search)) {
+          if (linked.origin === origin && isCrawlable(linked) && !visited.has(linked.pathname + linked.search)) {
             queue.push(linked.href);
           }
         } catch {

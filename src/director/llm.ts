@@ -63,21 +63,37 @@ export class OpenRouterClient implements LlmClient {
     };
 
     let lastErr = "";
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${this.apiKey}`,
-          "content-type": "application/json",
-          "x-title": "supercut",
-        },
-        body: JSON.stringify(body),
-      });
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let res: Response;
+      try {
+        // explicit 4-min timeout so a stalled connection (proxy half-open,
+        // slow reasoning model) fails cleanly instead of hanging forever
+        res = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${this.apiKey}`,
+            "content-type": "application/json",
+            "x-title": "supercut",
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(240_000),
+        });
+      } catch (err) {
+        // network-level throw ("fetch failed", timeout, proxy reset) — transient,
+        // retry with backoff. Surface the underlying cause for diagnosis.
+        const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
+        lastErr = `network: ${cause?.code ?? ""} ${cause?.message ?? (err instanceof Error ? err.message : String(err))}`.trim();
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        continue;
+      }
       if (res.ok) {
         const data = (await res.json()) as {
-          choices?: { message?: { content?: string } }[];
+          choices?: { message?: { content?: string; reasoning_content?: string } }[];
         };
-        const text = data.choices?.[0]?.message?.content;
+        const msg = data.choices?.[0]?.message;
+        // reasoning models (deepseek-v4) may put the answer in content; fall
+        // back to reasoning_content only if content is empty
+        const text = msg?.content || msg?.reasoning_content;
         if (!text) throw new Error(`LLM returned an empty response (${this.label})`);
         return text;
       }
@@ -85,7 +101,7 @@ export class OpenRouterClient implements LlmClient {
       // auth/config errors fail FAST and clear (fail-fast preflight rule);
       // only rate limits and server errors retry
       if (res.status === 401 || res.status === 403) {
-        throw new Error(`LLM auth failed (${res.status}) — check OPENROUTER_API_KEY. ${snippet}`);
+        throw new Error(`LLM auth failed (${res.status}, ${this.label}) — check your API key. ${snippet}`);
       }
       if (res.status !== 429 && res.status < 500) {
         throw new Error(`LLM request rejected (${res.status}, ${this.label}): ${snippet}`);
@@ -93,7 +109,7 @@ export class OpenRouterClient implements LlmClient {
       lastErr = `${res.status}: ${snippet}`;
       await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
     }
-    throw new Error(`LLM unavailable after 3 attempts (${this.label}): ${lastErr}`);
+    throw new Error(`LLM unavailable after 4 attempts (${this.label}): ${lastErr}`);
   }
 }
 

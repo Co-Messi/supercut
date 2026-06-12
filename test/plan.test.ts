@@ -89,3 +89,38 @@ describe("buildRenderPlan", () => {
     expect(() => buildRenderPlan(clickLog, [])).toThrow(/empty frame index/);
   });
 });
+
+describe("plan input bounds (PR #1 review)", () => {
+  it("throws on a corrupt huge timestamp instead of allocating the moon", () => {
+    const evil = makeLog([
+      { t: 99_999_999, type: "scene", name: "x", priority: 1 },
+    ]);
+    expect(() => buildRenderPlan(evil, frameIndex)).toThrow(/cap/);
+  });
+
+  it("throws on a non-monotonic frame index", () => {
+    const bad = [
+      { file: "frames/000000.png", t_source: 0 },
+      { file: "frames/000001.png", t_source: 500 },
+      { file: "frames/000002.png", t_source: 100 },
+    ];
+    expect(() => buildRenderPlan(clickLog, bad)).toThrow(/monotonic/);
+  });
+
+  it("throws on malformed frame-index entries", () => {
+    const bad = [{ file: "", t_source: 0 }];
+    expect(() => buildRenderPlan(clickLog, bad)).toThrow(/malformed/);
+  });
+
+  it("merges multiple cursor_path events in time order", () => {
+    const twoPaths = makeLog([
+      { t: 500, type: "cursor_path", points: [[600, 500, 500], [900, 700, 700]] },
+      { t: 0, type: "cursor_path", points: [[0, 100, 100], [400, 400, 400]] },
+    ]);
+    const plan = buildRenderPlan(twoPaths, frameIndex);
+    // frame at t≈500ms must sit between the two segments' positions (~500-700 css px mapped)
+    const x30 = plan.cursor[30 * 3]!;
+    const x50 = plan.cursor[50 * 3]!;
+    expect(x50).toBeGreaterThan(x30); // continues along the merged, sorted track
+  });
+});

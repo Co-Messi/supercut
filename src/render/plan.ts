@@ -182,7 +182,22 @@ export function buildRenderPlan(
   opts: { layout?: Layout; background?: string | BackgroundStyle } = {},
 ): RenderPlan {
   if (frameIndex.length === 0) throw new Error("render plan: empty frame index");
+  // frame index is external input — one malformed entry can otherwise request
+  // absurd allocations or break the nearest-hold walk (review: P1 bounds)
+  let prevT = -1;
+  for (const [i, e] of frameIndex.entries()) {
+    if (typeof e?.file !== "string" || e.file.length === 0 || typeof e?.t_source !== "number") {
+      throw new Error(`render plan: frames-index entry ${i} is malformed`);
+    }
+    if (!Number.isFinite(e.t_source) || e.t_source < 0 || e.t_source < prevT) {
+      throw new Error(`render plan: frames-index t_source not finite/monotonic at entry ${i}`);
+    }
+    prevT = e.t_source;
+  }
   const fps = log.fps;
+  if (!Number.isInteger(fps) || fps < 1 || fps > 240) {
+    throw new Error(`render plan: unreasonable fps ${fps}`);
+  }
   const frameMs = 1000 / fps;
   const layout = opts.layout ?? defaultLayout(log.viewport);
   const background =
@@ -202,6 +217,14 @@ export function buildRenderPlan(
     }
   }
   const frames = Math.ceil((lastT + TAIL_MS) / frameMs);
+  // hard ceiling: product max is 60s; 2 min of slack covers overruns — beyond
+  // that a corrupt timestamp is asking us to allocate the moon (review: P1)
+  const MAX_TAKE_MS = 120_000;
+  if (lastT > MAX_TAKE_MS) {
+    throw new Error(
+      `render plan: take spans ${Math.round(lastT)}ms > ${MAX_TAKE_MS}ms cap — corrupt timestamp in events.json or frames-index.json?`,
+    );
+  }
 
   // ---- source mapping (nearest-hold per Event-Log Schema v0) ----
   const sourceByFrame = new Array<number>(frames);
@@ -274,9 +297,10 @@ export function buildRenderPlan(
   }
 
   // ---- cursor track + click pulses ----
-  const pathEvent = log.events.find((e) => e.type === "cursor_path");
-  const points: [number, number, number][] =
-    pathEvent && pathEvent.type === "cursor_path" ? pathEvent.points : [];
+  // merge ALL cursor_path events (third-party recorders may emit segments)
+  const points: [number, number, number][] = log.events
+    .flatMap((e) => (e.type === "cursor_path" ? e.points : []))
+    .sort((a, b) => a[0] - b[0]);
   const clicks = log.events.filter((e) => e.type === "click").map((e) => e.t);
 
   const cursor = new Array<number>(frames * 3);

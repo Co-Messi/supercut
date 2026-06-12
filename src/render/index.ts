@@ -9,9 +9,10 @@
  *      └─ ffmpeg as MUXER ONLY (-c copy) → final .mp4
  */
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
@@ -42,10 +43,12 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const timeoutMs = opts.timeoutMs ?? 300_000;
   const t0 = Date.now();
 
+  // fail BEFORE the expensive work: output dir + take shape (review: P2)
+  mkdirSync(dirname(outFile), { recursive: true });
   const log = parseEventLog(JSON.parse(readFileSync(join(takeDir, "events.json"), "utf8")));
-  const frameIndex = JSON.parse(
-    readFileSync(join(takeDir, "frames-index.json"), "utf8"),
-  ) as FrameIndexEntry[];
+  const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
+  if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
+  const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
 
   // --bg: palette name, a bundled asset name (fuzzy-matched against assets/),
   // or a path to the user's own wallpaper image
@@ -68,12 +71,13 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   });
   const planJson = JSON.stringify(plan);
 
+  const token = randomBytes(16).toString("hex");
   let resultBuf: Buffer | null = null;
   let resolveResult!: () => void;
   const resultReceived = new Promise<void>((r) => (resolveResult = r));
 
   const server = createServer((req, res) => {
-    const url = req.url ?? "/";
+    const url = (req.url ?? "/").split("?")[0]!;
     if (url === "/" || url === "/host.html") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(HOST_PAGE);
@@ -96,8 +100,24 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       res.writeHead(200, { "content-type": mime });
       res.end(readFileSync(bgSpec));
     } else if (url === "/result" && req.method === "POST") {
+      // only OUR page may deliver the result (token minted per render),
+      // and a runaway encoder can't OOM Node (size cap)
+      if (req.headers["x-render-token"] !== token) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
+      const MAX_RESULT_BYTES = 1.5e9;
+      let received = 0;
       const parts: Buffer[] = [];
-      req.on("data", (c: Buffer) => parts.push(c));
+      req.on("data", (c: Buffer) => {
+        received += c.length;
+        if (received > MAX_RESULT_BYTES) {
+          req.destroy(new Error("encoded result exceeds 1.5GB cap"));
+          return;
+        }
+        parts.push(c);
+      });
       req.on("end", () => {
         resultBuf = Buffer.concat(parts);
         res.writeHead(200);
@@ -124,7 +144,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         else if (process.env.SUPERCUT_VERBOSE) console.log(text);
       }
     });
-    await page.goto(`http://127.0.0.1:${port}/`);
+    await page.goto(`http://127.0.0.1:${port}/?t=${token}`);
 
     await Promise.race([
       resultReceived,
@@ -142,7 +162,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     ]);
   } finally {
     await browser.close();
-    server.close();
+    await new Promise<void>((r) => server.close(() => r()));
   }
 
   if (!resultBuf || (resultBuf as Buffer).length === 0) {

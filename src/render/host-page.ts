@@ -19,7 +19,18 @@ export const HOST_PAGE = `<!doctype html>
 const log = (m) => console.log("[render] " + m);
 
 async function main() {
-  const plan = await (await fetch("/take/render-plan.json")).json();
+  const TOKEN = new URLSearchParams(location.search).get("t") || "";
+  const fetchOk = async (u) => {
+    const r = await fetch(u);
+    if (!r.ok) throw new Error("fetch " + u + " failed: HTTP " + r.status);
+    return r;
+  };
+
+  if (typeof VideoEncoder === "undefined") {
+    throw new Error("WebCodecs unavailable — render requires full Chromium on a secure (localhost) origin");
+  }
+
+  const plan = await (await fetchOk("/take/render-plan.json")).json();
   const { fps, frames, layout, background, sourceByFrame, camera, cursor, sourceFiles } = plan;
   const SUB = 8;
   const W = layout.canvasW, H = layout.canvasH;
@@ -28,7 +39,7 @@ async function main() {
   // bring-your-own-wallpaper mode: served by the orchestrator at /take/bg
   let bgImage = null;
   if (background.kind === "image") {
-    bgImage = await createImageBitmap(await (await fetch("/take/bg")).blob());
+    bgImage = await createImageBitmap(await (await fetchOk("/take/bg")).blob());
   }
 
   const canvas = new OffscreenCanvas(W, H);
@@ -50,19 +61,26 @@ async function main() {
     },
     error: (e) => { encodeError = e; },
   });
-  encoder.configure({
+  const encoderConfig = {
     codec: "avc1.640028",
     width: W, height: H,
     framerate: fps,
     bitrate: 10_000_000,
     avc: { format: "annexb" },
-  });
+  };
+  // probe BEFORE configuring: a clear one-line failure beats a cryptic
+  // mid-render encoder error (adversarial review: no capability probing)
+  const support = await VideoEncoder.isConfigSupported(encoderConfig);
+  if (!support.supported) {
+    throw new Error("H.264 (avc1.640028) encoding not supported by this Chromium — cannot render");
+  }
+  encoder.configure(encoderConfig);
 
   // --- sequential source-frame cache (frames are consumed in order) ---
   let cachedIdx = -1, cachedBmp = null;
   async function sourceBitmap(idx) {
     if (idx === cachedIdx) return cachedBmp;
-    const resp = await fetch("/take/" + sourceFiles[idx]);
+    const resp = await fetchOk("/take/" + sourceFiles[idx]);
     const bmp = await createImageBitmap(await resp.blob());
     if (cachedBmp) cachedBmp.close();
     cachedIdx = idx; cachedBmp = bmp;
@@ -241,7 +259,11 @@ async function main() {
       const offY = fy * (1 - z) + (cy - fy) * (1 - 1 / z);
       ctx.save();
       ctx.translate(z * cur[0] + offX, z * cur[1] + offY);
-      ctx.scale(z, z);
+      // damped scale (sqrt z): full proportional growth read as distracting
+      // (PR #1 review) but a fully fixed cursor detaches from the content —
+      // sqrt keeps it cohesive while barely growing (~1.2x at max zoom)
+      const cs = Math.sqrt(z);
+      ctx.scale(cs, cs);
       drawCursor(ctx, 0, 0, cur[2]);
       ctx.restore();
     }
@@ -250,12 +272,19 @@ async function main() {
     encoder.encode(vf, { keyFrame: f % 120 === 0 });
     vf.close();
     if (encodeError) throw encodeError;
-    if (encoder.encodeQueueSize > 8) await new Promise((r) => setTimeout(r, 3));
+    // real backpressure: DRAIN the queue, don't nap once and hope (review: P2)
+    while (encoder.encodeQueueSize > 4) {
+      await new Promise((r) => setTimeout(r, 8));
+      if (encodeError) throw encodeError;
+    }
     if (f % 120 === 0) log("frame " + f + "/" + frames);
   }
 
   await encoder.flush();
   if (encodeError) throw encodeError;
+  encoder.close();
+  if (cachedBmp) cachedBmp.close();
+  if (bgImage) bgImage.close();
 
   const total = chunks.reduce((a, c) => a + c.length, 0);
   const out = new Uint8Array(total);
@@ -264,7 +293,11 @@ async function main() {
   log("encoded " + frames + " frames, " + (total / 1048576).toFixed(1) + "MB in " +
       ((performance.now() - t0) / 1000).toFixed(1) + "s");
 
-  const resp = await fetch("/result", { method: "POST", body: out });
+  const resp = await fetch("/result", {
+    method: "POST",
+    headers: { "x-render-token": TOKEN },
+    body: out,
+  });
   if (!resp.ok) throw new Error("result upload failed: " + resp.status);
   log("DONE");
 }

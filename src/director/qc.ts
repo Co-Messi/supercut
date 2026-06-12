@@ -42,7 +42,13 @@ export function deterministicChecks(result: RecordResult): SceneVerdict[] {
     verdicts.push({ scene: name, verdict: "cut", reason: "scene failed at capture (timeout/missing selector)" });
   }
 
-  // dead air: >4s between consecutive interaction events inside a scene
+  // dead air: >4s between consecutive interaction events inside a scene.
+  // PR #2 review: this is INFORMATIONAL only (verdict "ok" + reason). hold_ms
+  // adds time at the END of a scene — it cannot compress a MID-scene gap, so
+  // patching it was a no-op that just lengthened the scene. Mid-scene dead air
+  // comes from observed overrun on a slow app, and no frozen-surface lever
+  // (hold/zoom/cut) fixes it, nor does re-recording. We surface it in the
+  // report; the right lever is shorter scripted durations, owned upstream.
   const log = result.eventLog;
   const scenes = log.events.filter((e) => e.type === "scene");
   for (let i = 0; i < scenes.length; i++) {
@@ -57,9 +63,8 @@ export function deterministicChecks(result: RecordResult): SceneVerdict[] {
       if (inScene[j]! - inScene[j - 1]! > 4000) {
         verdicts.push({
           scene: s.name,
-          verdict: "patch",
-          reason: `dead air: ${Math.round(inScene[j]! - inScene[j - 1]!)}ms between events`,
-          patch: { hold_ms: 400 },
+          verdict: "ok",
+          reason: `note: ${Math.round(inScene[j]! - inScene[j - 1]!)}ms dead air between events (slow app; not auto-fixable within the patch surface)`,
         });
         break;
       }

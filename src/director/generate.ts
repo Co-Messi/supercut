@@ -134,8 +134,15 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
     const applied = applyVerdicts(recipe, verdicts);
     if (!applied.changed || retakes >= MAX_RETAKES) {
-      if (retakes >= MAX_RETAKES) log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with current take`);
-      recipe = applied.recipe;
+      if (retakes >= MAX_RETAKES) {
+        log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
+      }
+      // PR #2 review: do NOT adopt the patched recipe here. `takeDir` was
+      // recorded from the CURRENT `recipe`; writing applied.recipe would make
+      // recipe.json/report describe scenes/holds that were never filmed (and
+      // for cuts, omit a scene that is still in the rendered video). The
+      // artifact must match the take. Render keys off events.json + frame
+      // index, so the video is whatever was recorded regardless.
       break;
     }
     recipe = applied.recipe;

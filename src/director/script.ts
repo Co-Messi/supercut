@@ -50,9 +50,14 @@ export async function writeRecipe(
   digests: PageDigest[],
   appUrl: string,
 ): Promise<ScriptResult> {
-  const whitelist = new Set<string>();
+  // per-page whitelist (PR #2 review): a global set would let a /dash selector
+  // pass validation in a / scene, then capture waits forever for an element
+  // that page can never show. Validate each scene's selectors against the
+  // inventory of ITS entry.url page. (v1 caveat: a mid-scene `goto` to another
+  // page is not modeled — selectors validate against entry.url only.)
   const pageUrls = new Set<string>(digests.map((d) => d.url));
-  for (const d of digests) for (const i of d.inventory) whitelist.add(i.selector);
+  const byPage = new Map<string, Set<string>>();
+  for (const d of digests) byPage.set(d.url, new Set(d.inventory.map((i) => i.selector)));
 
   const inventoryText = digests
     .map(
@@ -89,9 +94,13 @@ export async function writeRecipe(
         if (!pageUrls.has(scene.entry.url)) {
           throw new Error(`scene "${scene.name}" entry.url "${scene.entry.url}" is not a crawled page (allowed: ${[...pageUrls].join(", ")})`);
         }
+        const pageSelectors = byPage.get(scene.entry.url)!;
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
-          if (a.selector && !whitelist.has(a.selector)) {
-            throw new Error(`selector "${a.selector}" is not in the element inventory — copy selectors exactly`);
+          if (a.selector && !pageSelectors.has(a.selector)) {
+            throw new Error(
+              `selector "${a.selector}" in scene "${scene.name}" is not on its entry page ${scene.entry.url} — ` +
+                `use only selectors listed under that page in the inventory`,
+            );
           }
         }
       }

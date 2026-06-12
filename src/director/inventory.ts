@@ -81,18 +81,20 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
     if (matches === 0) continue;
     if (matches > 1) {
       if (!box) continue; // can't disambiguate a hidden duplicate — skip, don't guess
-      let nth = 1;
-      let disambiguated = "";
+      // pick the CLOSEST nth-match (PR #2 review: a strict ±2px test can miss
+      // on sub-pixel rendering and silently fall back to nth=1 = wrong element).
+      // Cap the accepted distance so we never inventory a wildly-off element.
+      const MAX_OFFSET_PX = 20;
+      let bestNth = -1;
+      let bestDist = Infinity;
       for (let k = 1; k <= matches; k++) {
-        const candidate = `:nth-match(${selector}, ${k})`;
-        const b = await page.locator(candidate).boundingBox().catch(() => null);
-        if (b && Math.abs(b.x - box.x) < 2 && Math.abs(b.y - box.y) < 2) {
-          nth = k;
-          disambiguated = candidate;
-          break;
-        }
+        const b = await page.locator(`:nth-match(${selector}, ${k})`).boundingBox().catch(() => null);
+        if (!b) continue;
+        const d = Math.hypot(b.x - box.x, b.y - box.y);
+        if (d < bestDist) { bestDist = d; bestNth = k; }
       }
-      selector = disambiguated || `:nth-match(${selector}, ${nth})`;
+      if (bestNth < 0 || bestDist > MAX_OFFSET_PX) continue; // no confident match — skip
+      selector = `:nth-match(${selector}, ${bestNth})`;
     }
 
     if (seen.has(selector)) continue;
@@ -137,7 +139,11 @@ export async function crawlApp(
     const queue = [appUrl];
     while (queue.length > 0 && digests.length < maxPages) {
       const target = queue.shift()!;
-      const key = new URL(target).pathname;
+      // pathname + search (PR #2 review): pathname-only collapses query-routed
+      // pages (/search?q=a vs ?q=b) and SPA filter/detail views, so the crawler
+      // would skip real money-moment pages. Hash is excluded (same document).
+      const u = new URL(target);
+      const key = u.pathname + u.search;
       if (visited.has(key)) continue;
       visited.add(key);
 
@@ -149,8 +155,10 @@ export async function crawlApp(
       for (const item of digest.inventory) {
         if (!item.href) continue;
         try {
-          const u = new URL(item.href, target);
-          if (u.origin === origin && !visited.has(u.pathname)) queue.push(u.href);
+          const linked = new URL(item.href, target);
+          if (linked.origin === origin && !visited.has(linked.pathname + linked.search)) {
+            queue.push(linked.href);
+          }
         } catch {
           /* invalid href — skip */
         }

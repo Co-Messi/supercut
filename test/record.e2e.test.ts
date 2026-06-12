@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { record } from "../src/capture/index.js";
+import { deterministicChecks } from "../src/director/qc.js";
 import { renderTake } from "../src/render/index.js";
 import { parseEventLog, parseRecipe, type Recipe } from "../src/schema/index.js";
 import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
@@ -184,5 +185,37 @@ describe("record E2E on fixture app", () => {
     expect(res.failedScenes).toContain("child-of-broken");
     // 2 of 3 scenes lost → >50% → abort
     expect(res.aborted).toBe(true);
+  }, 120_000);
+
+  it("partial failure does NOT abort and feeds a cut to QC (defends the failedScenes branch)", async () => {
+    // PR #2 review: a Codex comment claimed deterministicChecks' failedScenes
+    // branch is dead because record always aborts. It does NOT — one non-first
+    // scene failing under the 50% threshold keeps the take alive. Prove it:
+    // 1 of 3 scenes fails (no dependents) → not aborted → QC cuts just it.
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        { name: "intro", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "click", selector: "#cta", duration_ms: 800 }], hold_ms: 0 },
+        { name: "bad-mid", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "click", selector: "#nonexistent-control", duration_ms: 800 }], hold_ms: 0 },
+        { name: "outro", priority: 3, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 800 }], hold_ms: 0 },
+      ],
+    });
+
+    const out = mkdtempSync(join(tmpdir(), "supercut-partial-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false });
+
+    expect(res.aborted).toBe(false); // 1 of 3 ≤ 50% → take survives
+    expect(res.failedScenes).toEqual(["bad-mid"]);
+
+    const verdicts = deterministicChecks(res);
+    expect(verdicts).toContainEqual(
+      expect.objectContaining({ scene: "bad-mid", verdict: "cut" }),
+    );
   }, 120_000);
 });

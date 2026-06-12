@@ -30,6 +30,14 @@ const digests: PageDigest[] = [
       { selector: "#email", tag: "input", text: "you@company.com", bbox: { x: 600, y: 500, w: 360, h: 48 } },
     ],
   },
+  {
+    url: "http://127.0.0.1:9999/dash",
+    title: "Dashboard",
+    headings: ["Live Dashboard"],
+    inventory: [
+      { selector: "#task-ship", tag: "li", text: "Ship weekly digest", bbox: { x: 100, y: 200, w: 800, h: 60 } },
+    ],
+  },
 ];
 
 const analysis: AppAnalysis = {
@@ -86,7 +94,7 @@ describe("script stage — the anti-hallucination gates", () => {
     // retry prompt carried the exact rejection reason
     const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
     expect(retryText).toContain("#signup-button-fake");
-    expect(retryText).toContain("not in the element inventory");
+    expect(retryText).toContain("not on its entry page");
   });
 
   it("rejects entry URLs that were never crawled", async () => {
@@ -103,6 +111,20 @@ describe("script stage — the anti-hallucination gates", () => {
     await expect(writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999")).rejects.toThrow(
       /failed recipe validation 4 times/,
     );
+  });
+
+  it("rejects a selector that exists on another page but not the scene's entry page", async () => {
+    // #task-ship is real — but only on /dash. Using it in a scene whose
+    // entry.url is "/" must fail per-page validation (PR #2 review).
+    const crossPage = JSON.parse(validRecipeJson("#cta")) as {
+      scenes: { entry: { url: string }; actions: { selector: string }[] }[];
+    };
+    crossPage.scenes[0]!.actions[0]!.selector = "#task-ship"; // wrong page for entry "/"
+    const llm = new StubLlm([JSON.stringify(crossPage), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("not on its entry page");
   });
 });
 

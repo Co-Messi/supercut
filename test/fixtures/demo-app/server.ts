@@ -31,7 +31,7 @@ const LANDING = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon M
           font-size:16px; font-weight:600; cursor:pointer }
   #joined { display:none; margin-top:16px; color:var(--accent); font-weight:600 }
 </style></head><body>
-  <nav><div>Lumon <span>Metrics</span></div><div>Docs · Pricing</div></nav>
+  <nav><div>Lumon <span>Metrics</span></div><div><a id="nav-dash" href="/dash" style="color:inherit;text-decoration:none">Live dashboard</a> · Pricing</div></nav>
   <main>
     <h1>Numbers your team<br>actually reads.</h1>
     <p class="sub">One dashboard for every metric that matters. Set up in two minutes, no SQL required.</p>

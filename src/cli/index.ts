@@ -87,16 +87,46 @@ async function main(): Promise<number> {
       return 0;
     }
     case "generate": {
-      parseArgs({
+      const { values } = parseArgs({
         args: rest,
         options: {
           url: { type: "string" },
           repo: { type: "string" },
-          config: { type: "string" },
+          out: { type: "string" },
+          bg: { type: "string" },
+          seed: { type: "string" },
+          model: { type: "string" },
+          "no-vision": { type: "boolean" },
         },
       });
-      console.error(`supercut ${command}: not implemented yet (build in progress — see plan)`);
-      return 1;
+      if (!values.url) {
+        console.error(
+          "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
+            "[--bg <stage>] [--seed <n>] [--model <openrouter id>] [--no-vision]",
+        );
+        return 1;
+      }
+      const apiKey = process.env.OPENROUTER_API_KEY ?? process.env.SUPERCUT_API_KEY ?? "";
+      if (!apiKey) {
+        console.error(
+          "generate needs an LLM: set OPENROUTER_API_KEY (one key, many models — https://openrouter.ai/keys).\n" +
+            "No key? `supercut record` + `supercut render` work fully without one.",
+        );
+        return 1;
+      }
+      const { OpenRouterClient } = await import("../director/llm.js");
+      const { generate } = await import("../director/generate.js");
+      const res = await generate({
+        llm: new OpenRouterClient({ apiKey, ...(values.model ? { model: values.model } : {}) }),
+        url: values.url,
+        outDir: values.out ?? "out/generate",
+        ...(values.repo ? { repoPath: values.repo } : {}),
+        ...(values.bg ? { background: values.bg } : {}),
+        ...(values.seed ? { seed: Number(values.seed) } : {}),
+        ...(values["no-vision"] ? { noVision: true } : {}),
+      });
+      console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
+      return 0;
     }
     case undefined:
     case "--help":

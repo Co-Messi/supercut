@@ -163,3 +163,43 @@ describe("recipe schema", () => {
     expect(() => parseRecipe(dup)).toThrow(/duplicate scene name/);
   });
 });
+
+describe("recipe hardening (PR #1 review)", () => {
+  it("rejects non-http(s) URL schemes everywhere", () => {
+    for (const url of ["file:///etc/passwd", "javascript:alert(1)", "ftp://x.com/a"]) {
+      expect(() => parseRecipe(makeRecipe({ app_url: url }))).toThrow(/http/);
+    }
+  });
+
+  it("rejects a click action without a selector", () => {
+    const r = makeRecipe();
+    (r as { scenes: { actions: Record<string, unknown>[] }[] }).scenes[0]!.actions = [
+      { kind: "click", duration_ms: 1000 },
+    ];
+    expect(() => parseRecipe(r)).toThrow(/requires a selector/);
+  });
+
+  it("rejects a goto action without a url", () => {
+    const r = makeRecipe();
+    (r as { scenes: { actions: Record<string, unknown>[] }[] }).scenes[0]!.actions = [
+      { kind: "goto", duration_ms: 1000 },
+    ];
+    expect(() => parseRecipe(r)).toThrow(/requires a url/);
+  });
+
+  it("rejects a type action without text", () => {
+    const r = makeRecipe();
+    (r as { scenes: { actions: Record<string, unknown>[] }[] }).scenes[0]!.actions = [
+      { kind: "type", selector: "#email", duration_ms: 1000 },
+    ];
+    expect(() => parseRecipe(r)).toThrow(/requires text/);
+  });
+
+  it("rejects sub-200ms action durations (cursor travel floor)", () => {
+    const r = makeRecipe();
+    (r as { scenes: { actions: Record<string, unknown>[] }[] }).scenes[0]!.actions = [
+      { kind: "click", selector: "#cta", duration_ms: 50 },
+    ];
+    expect(() => parseRecipe(r)).toThrow();
+  });
+});

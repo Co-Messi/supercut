@@ -18,26 +18,49 @@ import { z } from "zod";
  */
 
 export const MAX_BUDGET_MS = 60_000;
+/** below this an action can't even complete its cursor travel */
+export const MIN_ACTION_MS = 200;
 
-export const action = z.object({
-  kind: z.enum(["goto", "click", "type", "scroll", "hover", "wait"]),
-  selector: z.string().optional(),
-  url: z.string().url().optional(),
-  text: z.string().optional(),
-  /** Scheduled duration for this action, ms. The scheduler may re-place
-   *  actions on the beat grid but never invents durations. */
-  duration_ms: z.number().int().positive(),
-  /** Where the camera should look during this action (CSS px bbox).
-   *  PATCHABLE by QC. */
-  zoom: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
-});
+/** recipes drive a real local browser — never allow file:/javascript:/etc. */
+const httpUrl = z
+  .string()
+  .url()
+  .refine((u) => u.startsWith("http://") || u.startsWith("https://"), {
+    message: "only http:// and https:// URLs are allowed in recipes",
+  });
+
+export const action = z
+  .object({
+    kind: z.enum(["goto", "click", "type", "scroll", "hover", "wait"]),
+    selector: z.string().min(1).optional(),
+    url: httpUrl.optional(),
+    text: z.string().optional(),
+    /** Scheduled duration for this action, ms. The scheduler may re-place
+     *  actions on the beat grid but never invents durations. */
+    duration_ms: z.number().int().min(MIN_ACTION_MS),
+    /** Where the camera should look during this action (CSS px bbox).
+     *  PATCHABLE by QC. */
+    zoom: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+  })
+  .superRefine((a, ctx) => {
+    // per-kind requirements — fail at parse time, never mid-capture
+    if ((a.kind === "click" || a.kind === "hover" || a.kind === "type") && !a.selector) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${a.kind} action requires a selector` });
+    }
+    if (a.kind === "goto" && !a.url) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "goto action requires a url" });
+    }
+    if (a.kind === "type" && a.text === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "type action requires text" });
+    }
+  });
 
 export const scene = z.object({
   name: z.string().min(1),
   priority: z.number().int().min(1), // 1 = most important, cut last
   /** Entry navigation: every scene must be independently reachable. */
   entry: z.object({
-    url: z.string().url(),
+    url: httpUrl,
     prelude: z.array(action).default([]),
   }),
   depends_on: z.array(z.string()).default([]),
@@ -48,7 +71,7 @@ export const scene = z.object({
 
 export const recipe = z.object({
   version: z.literal(0),
-  app_url: z.string().url(),
+  app_url: httpUrl,
   music_track: z.string().min(1),
   scenes: z.array(scene).min(1),
 });

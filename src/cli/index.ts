@@ -6,8 +6,8 @@ import { doctor } from "./doctor.js";
  * supercut — point it at your app, get the supercut.
  *
  *   supercut generate --url <app> [--repo <path>] [--config <file>]   full pipeline
- *   supercut record   --recipe <file>                                  stage 3 only
- *   supercut render   --video <file> --events <file>                   stage 5 only
+ *   supercut record   --recipe <file> [--out <dir>] [--seed <n>]       stage 3 only
+ *   supercut render   --take <dir> [--out <mp4>] [--bg <stage>]        stage 5 only
  *   supercut doctor                                                    check deps
  */
 
@@ -15,8 +15,8 @@ const HELP = `supercut — institutional-grade 60s launch videos from your real 
 
 Usage:
   supercut generate --url <running app URL> [--repo <path>] [--config <file>]
-  supercut record   --recipe <recipe.json>
-  supercut render   --video <footage> --events <events.json>
+  supercut record   --recipe <recipe.json> [--out <dir>] [--seed <n>]
+  supercut render   --take <dir> [--out <file.mp4>] [--bg aurora|midnight|dusk|paper|<asset>|<image>]
   supercut doctor
 
 Run any command with --help for details.`;

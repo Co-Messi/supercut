@@ -38,7 +38,18 @@ const checks: Check[] = [
     },
   },
   {
-    name: "playwright chromium",
+    name: "ffprobe on PATH",
+    run: async () => {
+      try {
+        const { stdout } = await exec("ffprobe", ["-version"]);
+        return { ok: true, detail: stdout.split("\n")[0] ?? "found" };
+      } catch {
+        return { ok: false, detail: "not found — ships with ffmpeg; reinstall ffmpeg" };
+      }
+    },
+  },
+  {
+    name: "playwright chromium (capture)",
     run: async () => {
       try {
         const { chromium } = await import("playwright");
@@ -48,6 +59,22 @@ const checks: Check[] = [
           : { ok: false, detail: "run `npx playwright install chromium`" };
       } catch {
         return { ok: false, detail: "playwright not installed — run `npm install`" };
+      }
+    },
+  },
+  {
+    // render needs the FULL chromium channel (the headless shell has no
+    // WebCodecs) — a doctor that only checks the shell passes while render
+    // cannot launch (review: P2)
+    name: "full chromium (render)",
+    run: async () => {
+      try {
+        const { chromium } = await import("playwright");
+        const browser = await chromium.launch({ headless: true, channel: "chromium", timeout: 20_000 });
+        await browser.close();
+        return { ok: true, detail: "launches (WebCodecs verified at render time)" };
+      } catch {
+        return { ok: false, detail: "cannot launch — run `npx playwright install chromium` (installs both)" };
       }
     },
   },

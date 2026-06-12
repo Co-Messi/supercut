@@ -33,6 +33,9 @@ const FPS = 60;
 const FRAME_MS = 1000 / FPS;
 const ACTION_TIMEOUT_MS = 10_000;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
+/** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
+ *  a settle pause before the schedule continues */
+const SETTLE_MS = 400;
 
 export interface RecordOptions {
   recipe: Recipe;
@@ -69,29 +72,23 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
+  // launch is the only setup outside try/finally; everything else (newPage,
+  // CDP session) lives inside so a setup failure can't leak the browser
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DPR });
-  const cdp: CDPSession = await page.context().newCDPSession(page);
 
   const events: KnownEvent[] = [];
   const pathPoints: [number, number, number][] = []; // [t, x, y] global cursor track
   const frameIndex: FrameIndexEntry[] = [];
-  const pendingWrites: Promise<unknown>[] = [];
   let firstFrameStamp = -1;
   let frameCounter = 0;
+  let writeErrors = 0;
+  let lastWrite: Promise<void> = Promise.resolve();
+  let signalFirstFrame: () => void = () => {};
+  const firstFrameSeen = new Promise<void>((r) => (signalFirstFrame = r));
 
-  if (captureFrames) {
-    cdp.on("Page.screencastFrame", (ev) => {
-      const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
-      if (firstFrameStamp < 0) firstFrameStamp = stampMs;
-      const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
-      frameIndex.push({ file, t_source: stampMs - firstFrameStamp });
-      pendingWrites.push(
-        writeFile(join(outDir, file), Buffer.from(ev.data, "base64")),
-      );
-      cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
-    });
-  }
+  // assigned inside try (so failures can't leak the browser); helpers close over them
+  let page!: Page;
+  let cdp!: CDPSession;
 
   /** scheduled clock (canonical `t`) and wall anchor for observed_t */
   let clock = 0;
@@ -178,7 +175,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           events.push({
             t: scheduledT, observed_t: observedNow(), type: "type",
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
-            textLen: text.length,
+            textLen: [...text].length, // code points, matching the for...of insertion
           });
         }
         break;
@@ -214,10 +211,38 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   }
 
   try {
+    page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DPR });
+    cdp = await page.context().newCDPSession(page);
+
+    if (captureFrames) {
+      // ack-AFTER-write: Chromium won't send the next frame until we ack, so
+      // awaiting the disk write before acking gives true backpressure (one
+      // write in flight) and a failed write can never be silently indexed
+      cdp.on("Page.screencastFrame", (ev) => {
+        lastWrite = (async () => {
+          const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
+          if (firstFrameStamp < 0) {
+            firstFrameStamp = stampMs;
+            signalFirstFrame();
+          }
+          const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
+          try {
+            await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
+            frameIndex.push({ file, t_source: stampMs - firstFrameStamp });
+          } catch {
+            writeErrors++;
+          } finally {
+            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+          }
+        })();
+      });
+    }
+
     // navigate to first scene's entry before starting capture, so frame 0 is content
     const firstScene = recipe.scenes[0];
     if (!firstScene) throw new Error("recipe has no scenes");
     await page.goto(firstScene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+    await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
     if (captureFrames) {
       await cdp.send("Page.startScreencast", {
@@ -226,6 +251,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         maxHeight: VIEWPORT.height * DPR,
         everyNthFrame: 1,
       });
+      // actions must not start before footage exists (frame-0 race)
+      await Promise.race([firstFrameSeen, sleep(3000)]);
+      if (firstFrameStamp < 0) console.error("warning: no screencast frame within 3s — page may be fully static");
     }
     wallStart = Date.now();
 
@@ -250,13 +278,28 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await page.goto(scene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+          await sleep(SETTLE_MS);
+          // timestamp canon (PR #1 review): when nav finishes EARLY, dwell out
+          // the unused allowance in WALL time so pixels and schedule stay in
+          // lockstep — advancing only the clock made the footage run ~1s ahead
+          // of every logged event after a fast local navigation
           const navEnd = observedNow();
-          clock = navEnd > clock + ENTRY_NAV_ALLOWANCE_MS
-            ? roundToFrame(navEnd)
-            : clock + ENTRY_NAV_ALLOWANCE_MS;
+          const target = clock + ENTRY_NAV_ALLOWANCE_MS;
+          if (navEnd < target) {
+            await sleep(target - navEnd);
+            clock = target;
+          } else {
+            clock = roundToFrame(navEnd);
+          }
         }
         for (const a of scene.entry.prelude) await runAction(a);
         for (const a of scene.actions) await runAction(a);
+        // hold the scene's final frame (PR #1 review: was validated + budgeted
+        // by the schema but never executed)
+        if (scene.hold_ms > 0) {
+          await sleep(scene.hold_ms);
+          clock += scene.hold_ms;
+        }
       } catch (err) {
         failedScenes.push(scene.name);
         const failedWithDeps = failedScenes.length;
@@ -269,11 +312,17 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       }
     }
   } finally {
-    if (captureFrames) {
+    if (captureFrames && cdp) {
       await cdp.send("Page.stopScreencast").catch(() => {});
     }
-    await Promise.allSettled(pendingWrites);
+    await lastWrite.catch(() => {});
     await browser.close();
+  }
+
+  if (writeErrors > 0) {
+    throw new Error(
+      `${writeErrors} frame write(s) failed — take is incomplete, refusing to emit a corrupt index`,
+    );
   }
 
   if (pathPoints.length > 0) {

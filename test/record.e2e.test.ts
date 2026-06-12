@@ -111,6 +111,15 @@ describe("record E2E on fixture app", () => {
       scheduledTimeline(join(out2, "events.json")),
     );
 
+    // timing canon (PR #1 review): scene 2 may not start before scene 1's
+    // full budget (actions 4600 + hold 400), and its first action must sit
+    // at least the nav allowance after the scene marker
+    const sceneEvents = log.events.filter((e) => e.type === "scene");
+    const scene2T = sceneEvents[1]!.t;
+    expect(scene2T).toBeGreaterThanOrEqual(5000);
+    const hoverEvent = log.events.find((e) => e.type === "hover")!;
+    expect(hoverEvent.t).toBeGreaterThanOrEqual(scene2T + 1000);
+
     // ---- render the take: full record→render pipeline proof ----
     const mp4 = join(out1, "final.mp4");
     const res = await renderTake({ takeDir: out1, outFile: mp4 });

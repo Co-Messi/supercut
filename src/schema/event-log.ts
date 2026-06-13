@@ -16,10 +16,17 @@ const baseEvent = {
   observed_t: finite.nonnegative().optional(),
 };
 
+/** Optional camera target: the result region this action produced (a graph, a
+ *  results panel). When present, the renderer frames THIS instead of the
+ *  interaction bbox — the cursor stays on the control, the camera holds on the
+ *  payoff. Resolved at capture time, so it reflects the post-action layout. */
+const focusBbox = { focus_bbox: bbox.optional() };
+
 export const clickEvent = z.object({
   ...baseEvent,
   type: z.literal("click"),
   bbox,
+  ...focusBbox,
   selector: z.string(),
   point,
 }).strict();
@@ -28,6 +35,7 @@ export const typeEvent = z.object({
   ...baseEvent,
   type: z.literal("type"),
   bbox,
+  ...focusBbox,
   selector: z.string(),
   textLen: z.number().int().nonnegative(),
 }).strict();
@@ -43,6 +51,7 @@ export const hoverEvent = z.object({
   ...baseEvent,
   type: z.literal("hover"),
   bbox,
+  ...focusBbox,
   selector: z.string(),
 }).strict();
 

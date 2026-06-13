@@ -86,7 +86,9 @@ export async function analyzeApp(
     const user: ChatPart[] = feedback
       ? [...parts, { type: "text", text: `Your previous response was invalid: ${feedback}. Return corrected JSON only.` }]
       : parts;
-    const raw = await llm.chat({ system: SYSTEM, user, json: true });
+    // generous budget: a richer source-seeded crawl (many pages) means a bigger
+    // prompt AND a bigger response; 4k truncated mid-JSON on real apps
+    const raw = await llm.chat({ system: SYSTEM, user, json: true, maxTokens: 8000 });
     try {
       return validateAnalysis(extractJson(raw), digests);
     } catch (err) {

@@ -23,6 +23,7 @@ import type { LlmClient } from "./llm.js";
 import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
 import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
 const MAX_RETAKES = 3;
@@ -31,7 +32,12 @@ export interface GenerateOptions {
   llm: LlmClient;
   url: string;
   outDir: string;
+  /** path to the app's source. When given, supercut reads its routes/page
+   *  components to understand the product and SEEDS the crawl with real routes
+   *  so the director can drive into functional panels, not just the landing. */
   repoPath?: string;
+  /** scope source-reading to one app in a monorepo (path-segment match) */
+  appName?: string;
   background?: string;
   seed?: number;
   /** model can see images: drives screenshot capture, analyze images, and the
@@ -100,11 +106,36 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   log("preflight…");
   await preflight(opts.url, opts.allowPrivateNetwork ?? true);
 
+  // read the app's source FIRST: derive real routes (seed the crawl so
+  // functional panels enter the inventory) + a product summary for the director
+  let seedUrls: string[] = [];
+  let sourceNotes: string | undefined;
+  if (opts.repoPath) {
+    const routes = extractAppRoutes(opts.repoPath, opts.appName ? { appName: opts.appName } : {});
+    if (routes.length > 0) {
+      const sn = routesToSeedAndNotes(routes, opts.url);
+      seedUrls = sn.seedUrls;
+      sourceNotes = sn.notes;
+      log(`   source: ${routes.length} route(s) found, seeding ${seedUrls.length} into the crawl`);
+    } else {
+      log(`   source: no routes detected at ${opts.repoPath} (crawling links only)`);
+    }
+  }
+
   log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
-  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3, screenshots: vision, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
+  // crawl the start page + every seeded route + a few link-discovered pages
+  const maxPages = Math.min(3 + seedUrls.length, 12);
+  const digests: PageDigest[] = await crawlApp(opts.url, {
+    maxPages,
+    screenshots: vision,
+    allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
+    seedUrls,
+  });
   log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
 
-  const notes = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
+  // analyze notes = source routes/summary + README/package.json
+  const readme = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
+  const notes = [sourceNotes, readme].filter(Boolean).join("\n\n") || undefined;
   const analysis = await analyzeApp(opts.llm, digests, notes);
   log(`   product: ${analysis.product_summary.slice(0, 100)}`);
   for (const m of analysis.money_moments) log(`   moment: ${m.title}`);

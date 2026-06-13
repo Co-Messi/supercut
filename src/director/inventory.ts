@@ -19,11 +19,25 @@ export interface InventoryItem {
   hidden?: boolean;
 }
 
+/** A large, stable container the camera can FRAME to show a result (a graph,
+ *  a results list, a detail panel). Not part of the interactable whitelist —
+ *  these are camera targets (focus_selector), not click targets. The payoff of
+ *  most apps appears INSIDE one of these after an action, so framing it is how
+ *  the video holds on the result instead of the input box that produced it. */
+export interface RegionItem {
+  selector: string;
+  tag: string;
+  text: string;
+  bbox: { x: number; y: number; w: number; h: number };
+}
+
 export interface PageDigest {
   url: string;
   title: string;
   headings: string[];
   inventory: InventoryItem[];
+  /** framable result/content regions (focus_selector candidates) */
+  regions: RegionItem[];
   /** viewport screenshot for the analyze stage's vision pass */
   screenshotB64?: string;
 }
@@ -40,6 +54,49 @@ function isCrawlable(u: URL): boolean {
   if (u.protocol !== "http:" && u.protocol !== "https:") return false;
   if (NON_HTML_EXT.test(u.pathname)) return false;
   return true;
+}
+
+/**
+ * Collect framable result/content regions: large, visible containers (a chart
+ * area, a results list, the main panel) the camera can hold on to show a
+ * payoff. These are NOT click targets — they widen the director's camera
+ * vocabulary so a scene can frame the RESULT, not the input that produced it.
+ */
+async function collectRegions(page: Page): Promise<RegionItem[]> {
+  // id'd containers come first (stable selector); then structural landmarks and
+  // visual surfaces (svg/canvas) where charts/maps/graphs render.
+  const els = page.locator(
+    "main, [role=main], [role=region], section[id], [id] > svg, svg[id], canvas, " +
+      "div[id]",
+  );
+  const count = Math.min(await els.count(), 40);
+  const out: RegionItem[] = [];
+  const seen = new Set<string>();
+  // a region must be a meaningful share of the viewport to be worth framing
+  const MIN_AREA = 1280 * 800 * 0.12;
+  for (let i = 0; i < count; i++) {
+    const el = els.nth(i);
+    const box = await el.boundingBox().catch(() => null);
+    if (!box || box.width * box.height < MIN_AREA) continue;
+    const tag = (await el.evaluate((n) => n.tagName).catch(() => "")).toLowerCase();
+    if (!tag) continue;
+    const id = await el.getAttribute("id").catch(() => null);
+    const role = await el.getAttribute("role").catch(() => null);
+    let selector: string;
+    if (id) selector = `#${id}`;
+    else if (tag === "main") selector = "main";
+    else if (role) selector = `[role="${cssEscape(role)}"]`;
+    else continue; // no stable handle — skip
+    if (seen.has(selector)) continue;
+    // must resolve uniquely so the camera frames the right box at capture time
+    const matches = await page.locator(selector).count().catch(() => 0);
+    if (matches !== 1) continue;
+    seen.add(selector);
+    const text = (await el.innerText().catch(() => "")).trim().replace(/\s+/g, " ").slice(0, 60);
+    out.push({ selector, tag, text, bbox: { x: box.x, y: box.y, w: box.width, h: box.height } });
+  }
+  // biggest first — the dominant content area is usually the intended payoff
+  return out.sort((a, b) => b.bbox.w * b.bbox.h - a.bbox.w * a.bbox.h).slice(0, 6);
 }
 
 async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDigest> {
@@ -122,13 +179,15 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
     });
   }
 
+  const regions = await collectRegions(page);
+
   let screenshotB64: string | undefined;
   if (withScreenshot) {
     const shot = await page.screenshot({ type: "jpeg", quality: 60 }).catch(() => null);
     if (shot) screenshotB64 = shot.toString("base64");
   }
 
-  return { url: page.url(), title, headings, inventory, ...(screenshotB64 ? { screenshotB64 } : {}) };
+  return { url: page.url(), title, headings, inventory, regions, ...(screenshotB64 ? { screenshotB64 } : {}) };
 }
 
 /**
@@ -137,7 +196,14 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
  */
 export async function crawlApp(
   appUrl: string,
-  opts: { maxPages?: number; screenshots?: boolean; allowPrivateNetwork?: boolean } = {},
+  opts: {
+    maxPages?: number;
+    screenshots?: boolean;
+    allowPrivateNetwork?: boolean;
+    /** source-derived routes to crawl FIRST (so real panels enter the
+     *  inventory even when no link points to them) — see sourceRoutes.ts */
+    seedUrls?: string[];
+  } = {},
 ): Promise<PageDigest[]> {
   const maxPages = opts.maxPages ?? 3;
   const screenshots = opts.screenshots ?? true;
@@ -163,7 +229,12 @@ export async function crawlApp(
       return route.continue();
     });
 
-    const queue = [appUrl];
+    // start page first, then source-derived routes (same-origin only), then
+    // link-discovered pages. Seeds ensure functional panels get crawled even
+    // when no <a href> points to them.
+    const queue = [appUrl, ...(opts.seedUrls ?? []).filter((u) => {
+      try { return new URL(u).origin === origin; } catch { return false; }
+    })];
     while (queue.length > 0 && digests.length < maxPages) {
       const target = queue.shift()!;
       // Pathname + search: pathname-only collapses query-routed

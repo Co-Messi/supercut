@@ -145,6 +145,12 @@ interface CameraSegment {
 const ZOOM_TARGET = 1.48;
 const ZOOM_LEAD_MS = 600;   // camera starts moving before the click lands
 const ZOOM_DWELL_MS = 1500; // stays on target after the event
+/** a framed RESULT (focus_bbox) is the payoff — hold on it longer than a plain
+ *  interaction so the viewer reads the graph/results before the camera moves */
+const FOCUS_DWELL_MS = 4200;
+/** a result region should FILL the frame, not be punched-into and cropped:
+ *  fit it to this fraction of the viewport (the rest is breathing room) */
+const FOCUS_FILL = 0.88;
 /** segments closer than this bridge into ONE held zoom — the camera glides
  *  between targets instead of pumping out/in per click. */
 const MERGE_GAP_MS = 2600;
@@ -238,17 +244,30 @@ export function buildRenderPlan(
   const segments: CameraSegment[] = [];
   for (const e of log.events) {
     if (e.type !== "click" && e.type !== "hover" && e.type !== "type") continue;
-    const [bx, by, bw, bh] = e.bbox;
+    // 4b: prefer the result region (focus_bbox) when the action named one — the
+    // camera holds on the payoff (graph/results), not the input that made it.
+    const framed = e.focus_bbox ?? e.bbox;
+    const [bx, by, bw, bh] = framed;
     // defense in depth: clamp the focus point to the viewport so a stray
     // off-frame bbox can never fly the camera off into empty background
     // (the capture stage now scrolls targets in-view, but never trust a bbox)
     const cssX = Math.min(Math.max(bx + bw / 2, 0), layout.viewport.width);
     const cssY = Math.min(Math.max(by + bh / 2, 0), layout.viewport.height);
     const focus = toCanvas(layout, cssX, cssY);
+    // a small control gets the fixed punch-in; a large result region gets a
+    // FIT zoom so it fills the frame (FOCUS_FILL) instead of being cropped.
+    let z = ZOOM_TARGET;
+    let dwell = ZOOM_DWELL_MS;
+    if (e.focus_bbox) {
+      const fitW = (FOCUS_FILL * layout.viewport.width) / Math.max(bw, 1);
+      const fitH = (FOCUS_FILL * layout.viewport.height) / Math.max(bh, 1);
+      z = Math.max(1, Math.min(ZOOM_TARGET, fitW, fitH));
+      dwell = FOCUS_DWELL_MS;
+    }
     segments.push({
       start: e.t - ZOOM_LEAD_MS,
-      end: e.t + ZOOM_DWELL_MS,
-      z: ZOOM_TARGET,
+      end: e.t + dwell,
+      z,
       fx: focus.x,
       fy: focus.y,
     });

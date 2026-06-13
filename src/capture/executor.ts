@@ -68,6 +68,19 @@ function roundToFrame(ms: number): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
+// from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
+// 10s budget blew on a page whose `load` only fired at ~12s, even though the DOM
+// was interactive almost immediately. So: resolve on "domcontentloaded" (DOM parsed
+// + scripts available), then give the full `load` a best-effort grace window but
+// never fail on it. SETTLE_MS after this lets first paints land. Returns the nav
+// response so callers can re-check the final URL against the SSRF policy.
+async function gotoReady(page: Page, url: string) {
+  const response = await page.goto(url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("load", { timeout: 2_000 }).catch(() => {});
+  return response;
+}
+
 async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork: boolean): Promise<void> {
   for (const scene of recipe.scenes) {
     await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
@@ -157,7 +170,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
-        const response = await page.goto(a.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+        const response = await gotoReady(page, a.url);
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
@@ -209,6 +222,26 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
             textLen: [...text].length, // code points, matching the for...of insertion
           });
+          if (a.submit) {
+            // Many query inputs only reveal their payoff on submit (a form's
+            // submit handler / an Enter keydown). Typing alone leaves the app in
+            // its idle state — the video would show a filled box and no result.
+            await page.keyboard.press("Enter");
+          }
+        }
+        // 4b — frame the result, not the cursor: if this action names a result
+        // region, resolve its box AFTER the action (and a settle for the payoff
+        // to render) and attach it to the event. The renderer prefers it over
+        // the interaction bbox, so the camera holds on the graph/results the
+        // action produced — not the input box. Unresolvable → silently skip.
+        if (a.focus_selector) {
+          await sleep(SETTLE_MS);
+          const fb = await page.locator(a.focus_selector).first().boundingBox().catch(() => null);
+          const ev = events[events.length - 1];
+          if (fb && fb.width > 4 && fb.height > 4 && ev &&
+              (ev.type === "click" || ev.type === "type" || ev.type === "hover")) {
+            ev.focus_bbox = [fb.x, fb.y, fb.width, fb.height];
+          }
         }
         break;
       }
@@ -274,7 +307,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     const firstScene = recipe.scenes[0];
     if (!firstScene) throw new Error("recipe has no scenes");
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork });
-    const firstResponse = await page.goto(firstScene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+    const firstResponse = await gotoReady(page, firstScene.entry.url);
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
     await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
@@ -312,7 +345,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
-          const response = await page.goto(scene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+          const response = await gotoReady(page, scene.entry.url);
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
           await sleep(SETTLE_MS);
           // Timestamp canon: when nav finishes early, dwell out

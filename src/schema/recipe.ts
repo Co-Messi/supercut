@@ -38,6 +38,15 @@ export const action = z
     selector: z.string().min(1).optional(),
     url: httpUrl.optional(),
     text: z.string().optional(),
+    /** type only: press Enter after typing. Many query/search inputs reveal
+     *  their payoff (results, a graph, a detail panel) only on submit — without
+     *  this the robot types into a box and the product never actually runs. */
+    submit: z.boolean().optional(),
+    /** Camera target: a result region (from the page's framable regions) that
+     *  this action produces. The renderer holds the camera HERE instead of on
+     *  the interaction bbox — cursor on the control, frame on the payoff.
+     *  Resolved at capture time; ignored if it doesn't resolve. */
+    focus_selector: z.string().min(1).optional(),
     /** Scheduled duration for this action, ms. The scheduler may re-place
      *  actions on the beat grid but never invents durations. */
     duration_ms: z.number().int().min(MIN_ACTION_MS),

@@ -25,7 +25,7 @@ const SYSTEM = `You write filming scripts ("recipes") for supercut, which record
     "priority": 1..N (1 = most important, cut last),
     "entry": { "url": one of the crawled page URLs, "prelude": [] },
     "depends_on": [],
-    "actions": [{ "kind": "click"|"type"|"hover"|"scroll"|"wait", "selector": string, "text": string (type only), "duration_ms": int }],
+    "actions": [{ "kind": "click"|"type"|"hover"|"scroll"|"wait", "selector": string, "text": string (type only), "submit": boolean (type only), "focus_selector": string (optional), "duration_ms": int }],
     "hold_ms": int
   }]
 }
@@ -36,9 +36,11 @@ HARD RULES:
 - Create EXACTLY one scene per STORYBOARD beat, in the same order. Do not add a generic site-tour scene.
 - Each scene's entry.url must equal that beat's page_url and must include at least one of that beat's money selectors.
 - Do not use mid-scene "goto" actions; each scene starts from its entry.url so selector validation and capture stay coherent.
+- SHOW THE PAYOFF. A product video that types into a box but never reveals the result is worthless. When a "type" goes into a search/query/command field that runs on Enter, set "submit": true so the app actually produces its output (results, a graph, a detail view).
+- FRAME THE RESULT. When an action produces a visible result, set "focus_selector" to the FRAMABLE REGION where that result appears (from the page's regions list). The camera then holds on the payoff (the graph/results), not the input box. Use a region selector ONLY in focus_selector, never as an action "selector".
 - 2-4 scenes, 2-4 actions each, action duration_ms 1200-4000, hold_ms 600-1400.
 - total of all durations + holds ≤ 50000 (one minute video with headroom).
-- "type" actions need realistic short text (an email, a search term — match the field).
+- "type" actions need realistic short text (an email, a search term — match the field). For a search/query field, PREFER a value the app itself suggests — a placeholder example, an example hint near the field, or a visible chip/tag label — so the query is one the product recognizes and actually returns a result for. Do not invent an exotic value the demo may not have data for.
 - Order scenes as a Screen-Studio story: hook → proof/depth → payoff. End on the most visual screen.
 - depends_on only when a later scene NEEDS an earlier scene's state.
 - (HIDDEN until revealed) elements: only use them AFTER an earlier action in the SAME scene reveals them (e.g. click the button that opens the form, then type into its field).`;
@@ -62,6 +64,10 @@ export async function writeRecipe(
   const pageUrls = new Set<string>(digests.map((d) => d.url));
   const byPage = new Map<string, Set<string>>();
   for (const d of digests) byPage.set(d.url, new Set(d.inventory.map((i) => i.selector)));
+  // framable result regions per page — valid ONLY as focus_selector (camera
+  // target), never as an action selector (they aren't click targets)
+  const byPageRegions = new Map<string, Set<string>>();
+  for (const d of digests) byPageRegions.set(d.url, new Set((d.regions ?? []).map((r) => r.selector)));
   const storyboard = analysis.money_moments.map((m, index) => ({
     index: index + 1,
     title: m.title,
@@ -70,11 +76,16 @@ export async function writeRecipe(
   }));
 
   const inventoryText = digests
-    .map(
-      (d) =>
-        `PAGE ${d.url}\n` +
-        d.inventory.map((i) => `  ${i.selector}  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`).join("\n"),
-    )
+    .map((d) => {
+      const els = d.inventory
+        .map((i) => `  ${i.selector}  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
+        .join("\n");
+      const regions = (d.regions ?? []).length
+        ? `\n  FRAMABLE REGIONS (focus_selector only — hold the camera here to show a result):\n` +
+          d.regions.map((r) => `    ${r.selector}  [${r.tag}] "${redactForPrompt(r.text)}"`).join("\n")
+        : "";
+      return `PAGE ${d.url}\n${els}${regions}`;
+    })
     .join("\n\n");
 
   const base: ChatPart[] = [
@@ -98,7 +109,7 @@ export async function writeRecipe(
     const user: ChatPart[] = feedback
       ? [...base, { type: "text", text: `Your previous recipe was rejected: ${feedback}\nReturn a corrected JSON recipe only.` }]
       : base;
-    const raw = await llm.chat({ system: SYSTEM, user, json: true, maxTokens: 6000 });
+    const raw = await llm.chat({ system: SYSTEM, user, json: true, maxTokens: 8000 });
 
     try {
       const recipe = parseRecipe(extractJson(raw));
@@ -122,6 +133,7 @@ export async function writeRecipe(
           throw new Error(`scene "${scene.name}" entry.url "${scene.entry.url}" is not a crawled page (allowed: ${[...pageUrls].join(", ")})`);
         }
         const pageSelectors = byPage.get(scene.entry.url)!;
+        const pageRegions = byPageRegions.get(scene.entry.url) ?? new Set<string>();
         let usesMoneySelector = false;
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
           if (a.kind === "goto") {
@@ -131,6 +143,14 @@ export async function writeRecipe(
             throw new Error(
               `selector "${a.selector}" in scene "${scene.name}" is not on its entry page ${scene.entry.url} — ` +
                 `use only selectors listed under that page in the inventory`,
+            );
+          }
+          // focus_selector is a camera hint: it must be a real crawled selector
+          // (a framable region, or any interactable) on this page — never invented.
+          if (a.focus_selector && !pageRegions.has(a.focus_selector) && !pageSelectors.has(a.focus_selector)) {
+            throw new Error(
+              `focus_selector "${a.focus_selector}" in scene "${scene.name}" is not a framable region or ` +
+                `inventory selector on ${scene.entry.url} — use one listed under FRAMABLE REGIONS for that page`,
             );
           }
           if (a.selector && beat.selectors.has(a.selector)) usesMoneySelector = true;

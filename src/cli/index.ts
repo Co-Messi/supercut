@@ -99,6 +99,7 @@ async function main(): Promise<number> {
         options: {
           url: { type: "string" },
           repo: { type: "string" },
+          app: { type: "string" },
           out: { type: "string" },
           bg: { type: "string" },
           seed: { type: "string" },
@@ -157,6 +158,7 @@ async function main(): Promise<number> {
         // --no-vision forces off; otherwise follow the provider's capability
         vision: values["no-vision"] ? false : provider.vision,
         ...(values.repo ? { repoPath: values.repo } : {}),
+        ...(values.app ? { appName: values.app } : {}),
         ...(values.bg ? { background: values.bg } : {}),
         ...(seed !== undefined ? { seed } : {}),
         // default ALLOW; only --block-private-network engages the SSRF guard

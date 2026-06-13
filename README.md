@@ -80,6 +80,9 @@ SUPERCUT_MODEL=anthropic/claude-sonnet-4.6
 SUPERCUT_VISION=true
 ```
 
+For `SUPERCUT_PROVIDER=custom`, set both `SUPERCUT_LLM_BASE_URL` and
+`SUPERCUT_MODEL`; Supercut will not guess an OpenRouter model for your endpoint.
+
 If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly.
 Ambiguous provider configuration fails loudly rather than guessing.
 

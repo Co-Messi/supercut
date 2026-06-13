@@ -52,7 +52,14 @@ function digestText(d: PageDigest): string {
   return `PAGE ${d.url}\ntitle: ${d.title}\nheadings: ${d.headings.join(" | ")}\nelements:\n${inv}`;
 }
 
-const SYSTEM = `You are the director of a 60-second product launch video. You study a web product and pick the 2-4 "money moments" — the interactions that make a viewer instantly understand why this product is good. Prefer moments with visible payoff (something appears, changes, or completes). Respond ONLY with a JSON object matching:
+const SYSTEM = `You are the director of a 60-second Screen-Studio-style product launch video, not a random website tour. You study a web product and pick the 2-4 "money moments" — the interactions that make a viewer instantly understand why this product is good.
+
+Order money_moments as the exact video storyboard:
+1. hook: the clearest landing/first-impression value moment
+2. proof/depth: the core workflow or differentiator
+3. payoff: the most visual result, completion, dashboard, or CTA
+
+Prefer moments with visible payoff (something appears, changes, or completes). Do not order by crawl order unless that is also the best viewer story. Respond ONLY with a JSON object matching:
 { "product_summary": string, "money_moments": [{ "title": string, "why": string, "page_url": string (one of the crawled page URLs), "elements": [selector strings COPIED EXACTLY from the element inventory] }] }`;
 
 export async function analyzeApp(

@@ -92,8 +92,10 @@ export function resolveProvider(
   if (!baseUrl) throw new Error("SUPERCUT_LLM_BASE_URL is required when SUPERCUT_PROVIDER=custom");
 
   const model = overrides.model ?? env.SUPERCUT_MODEL ?? (
-    provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_OPENROUTER_MODEL
+    provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL :
+    provider === "openrouter" ? DEFAULT_OPENROUTER_MODEL : ""
   );
+  if (!model) throw new Error("SUPERCUT_MODEL is required when SUPERCUT_PROVIDER=custom");
 
   const envVision = parseVision(env.SUPERCUT_VISION);
   const vision = overrides.vision ?? envVision ?? (provider !== "deepseek");

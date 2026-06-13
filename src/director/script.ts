@@ -33,10 +33,13 @@ const SYSTEM = `You write filming scripts ("recipes") for supercut, which record
 HARD RULES:
 - selectors: COPY EXACTLY from the provided element inventory. Never invent or modify one.
 - entry.url: only crawled page URLs.
-- 2-4 scenes, 2-4 actions each, action duration_ms 1200-4000, hold_ms 400-1200.
+- Create EXACTLY one scene per STORYBOARD beat, in the same order. Do not add a generic site-tour scene.
+- Each scene's entry.url must equal that beat's page_url and must include at least one of that beat's money selectors.
+- Do not use mid-scene "goto" actions; each scene starts from its entry.url so selector validation and capture stay coherent.
+- 2-4 scenes, 2-4 actions each, action duration_ms 1200-4000, hold_ms 600-1400.
 - total of all durations + holds ≤ 50000 (one minute video with headroom).
 - "type" actions need realistic short text (an email, a search term — match the field).
-- Order scenes as a story: hook → depth → payoff. End on the most visual screen.
+- Order scenes as a Screen-Studio story: hook → proof/depth → payoff. End on the most visual screen.
 - depends_on only when a later scene NEEDS an earlier scene's state.
 - (HIDDEN until revealed) elements: only use them AFTER an earlier action in the SAME scene reveals them (e.g. click the button that opens the form, then type into its field).`;
 
@@ -59,6 +62,12 @@ export async function writeRecipe(
   const pageUrls = new Set<string>(digests.map((d) => d.url));
   const byPage = new Map<string, Set<string>>();
   for (const d of digests) byPage.set(d.url, new Set(d.inventory.map((i) => i.selector)));
+  const storyboard = analysis.money_moments.map((m, index) => ({
+    index: index + 1,
+    title: m.title,
+    pageUrl: m.page_url,
+    selectors: new Set(m.elements),
+  }));
 
   const inventoryText = digests
     .map(
@@ -76,6 +85,10 @@ export async function writeRecipe(
         analysis.money_moments
           .map((m) => `- ${m.title} (${m.page_url}): ${m.why} — elements: ${m.elements.join(", ")}`)
           .join("\n") +
+        `\n\nSTORYBOARD (mandatory; output exactly these beats in this order, one scene per beat):\n` +
+        analysis.money_moments
+          .map((m, i) => `${i + 1}. ${i === 0 ? "HOOK" : i === analysis.money_moments.length - 1 ? "PAYOFF" : "PROOF"} — ${m.title} @ ${m.page_url}; scene must use one of: ${m.elements.join(", ")}`)
+          .join("\n") +
         `\n\nELEMENT INVENTORY (the ONLY selectors you may use):\n${inventoryText}`,
     },
   ];
@@ -89,20 +102,44 @@ export async function writeRecipe(
 
     try {
       const recipe = parseRecipe(extractJson(raw));
+      if (recipe.scenes.length !== storyboard.length) {
+        throw new Error(
+          `recipe has ${recipe.scenes.length} scene(s), but storyboard requires exactly ${storyboard.length} scene(s) ` +
+            `(one per money moment, in order)`,
+        );
+      }
 
       // whitelist gates — the anti-hallucination contract
-      for (const scene of recipe.scenes) {
+      for (const [i, scene] of recipe.scenes.entries()) {
+        const beat = storyboard[i]!;
+        if (scene.entry.url !== beat.pageUrl) {
+          throw new Error(
+            `scene ${i + 1} "${scene.name}" entry.url "${scene.entry.url}" does not match storyboard beat ` +
+              `"${beat.title}" page_url "${beat.pageUrl}"`,
+          );
+        }
         if (!pageUrls.has(scene.entry.url)) {
           throw new Error(`scene "${scene.name}" entry.url "${scene.entry.url}" is not a crawled page (allowed: ${[...pageUrls].join(", ")})`);
         }
         const pageSelectors = byPage.get(scene.entry.url)!;
+        let usesMoneySelector = false;
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
+          if (a.kind === "goto") {
+            throw new Error(`scene "${scene.name}" uses a mid-scene goto; use a new scene entry.url instead`);
+          }
           if (a.selector && !pageSelectors.has(a.selector)) {
             throw new Error(
               `selector "${a.selector}" in scene "${scene.name}" is not on its entry page ${scene.entry.url} — ` +
                 `use only selectors listed under that page in the inventory`,
             );
           }
+          if (a.selector && beat.selectors.has(a.selector)) usesMoneySelector = true;
+        }
+        if (!usesMoneySelector) {
+          throw new Error(
+            `scene ${i + 1} "${scene.name}" does not film storyboard beat "${beat.title}" — ` +
+              `include at least one of: ${[...beat.selectors].join(", ")}`,
+          );
         }
       }
       return { recipe, attempts: attempt };

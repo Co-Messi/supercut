@@ -11,6 +11,11 @@ describe("navigation URL policy", () => {
     await expect(assertSafeNavigationUrl("http://127.0.0.1:3000/", { allowPrivateNetwork: true })).resolves.toBeUndefined();
   });
 
+  it("blocks bracketed IPv6 localhost and ULA literals by default", async () => {
+    await expect(assertSafeNavigationUrl("http://[::1]:3000/")).rejects.toThrow(/private network/i);
+    await expect(assertSafeNavigationUrl("http://[fd00::1]/")).rejects.toThrow(/private network/i);
+  });
+
   it("rejects redirects to private networks", async () => {
     await expect(
       assertSafeNavigationUrl("https://example.com/start", {

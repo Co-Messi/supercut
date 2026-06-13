@@ -62,6 +62,14 @@ function validRecipeJson(selector: string): string {
         actions: [{ kind: "click", selector, duration_ms: 1500 }],
         hold_ms: 400,
       },
+      {
+        name: "email-payoff",
+        priority: 2,
+        entry: { url: "http://127.0.0.1:9999/", prelude: [] },
+        depends_on: [],
+        actions: [{ kind: "type", selector: "#email", text: "founder@example.com", duration_ms: 1500 }],
+        hold_ms: 600,
+      },
     ],
   });
 }
@@ -103,6 +111,40 @@ describe("script stage — the anti-hallucination gates", () => {
     const llm = new StubLlm([JSON.stringify(evil), validRecipeJson("#cta")]);
     const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
     expect(attempts).toBe(2);
+  });
+
+  it("rejects recipes that skip storyboard beats", async () => {
+    const oneScene = JSON.parse(validRecipeJson("#cta")) as { scenes: unknown[] };
+    oneScene.scenes = oneScene.scenes.slice(0, 1);
+    const llm = new StubLlm([JSON.stringify(oneScene), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("one per money moment");
+  });
+
+  it("rejects scenes that ignore the ordered money moment selector", async () => {
+    const wrongBeat = JSON.parse(validRecipeJson("#cta")) as {
+      scenes: { actions: { selector: string; kind: string; text?: string }[] }[];
+    };
+    wrongBeat.scenes[1]!.actions[0] = { kind: "click", selector: "#cta", duration_ms: 1500 };
+    const llm = new StubLlm([JSON.stringify(wrongBeat), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("does not film storyboard beat");
+  });
+
+  it("rejects mid-scene goto actions that make the footage a random tour", async () => {
+    const withGoto = JSON.parse(validRecipeJson("#cta")) as {
+      scenes: { actions: { kind: string; url?: string; duration_ms: number; selector?: string; text?: string }[] }[];
+    };
+    withGoto.scenes[0]!.actions.unshift({ kind: "goto", url: "http://127.0.0.1:9999/dash", duration_ms: 1200 });
+    const llm = new StubLlm([JSON.stringify(withGoto), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("mid-scene goto");
   });
 
   it("gives up loudly after 4 failed attempts", async () => {

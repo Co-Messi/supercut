@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -122,13 +123,17 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       if (!requireToken()) return;
       const MAX_RESULT_BYTES = 1.5e9;
       let received = 0;
-      req.on("data", (c: Buffer) => {
-        received += c.length;
-        if (received > MAX_RESULT_BYTES) {
-          req.destroy(new Error("encoded result exceeds 1.5GB cap"));
+      const sizeLimiter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          received += chunk.length;
+          if (received > MAX_RESULT_BYTES) {
+            callback(new Error("encoded result exceeds 1.5GB cap"));
+            return;
+          }
+          callback(null, chunk);
         }
       });
-      pipeline(req, createWriteStream(rawPath))
+      pipeline(req, sizeLimiter, createWriteStream(rawPath))
         .then(() => {
           encodedBytes = received;
           resultReady = true;

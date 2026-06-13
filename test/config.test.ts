@@ -52,4 +52,22 @@ describe("provider resolution", () => {
     expect(p.model).toBe("deepseek-v4-flash");
     expect(process.env.SUPERCUT_MODEL).toBe("original");
   });
+
+  it("requires an explicit model for custom OpenAI-compatible endpoints", () => {
+    expect(() =>
+      resolved({
+        SUPERCUT_PROVIDER: "custom",
+        SUPERCUT_API_KEY: "custom-key",
+        SUPERCUT_LLM_BASE_URL: "https://llm.example.com/v1",
+      }),
+    ).toThrow(/SUPERCUT_MODEL.*custom/i);
+
+    const p = resolved({
+      SUPERCUT_PROVIDER: "custom",
+      SUPERCUT_API_KEY: "custom-key",
+      SUPERCUT_LLM_BASE_URL: "https://llm.example.com/v1",
+      SUPERCUT_MODEL: "local-model",
+    });
+    expect(p.model).toBe("local-model");
+  });
 });

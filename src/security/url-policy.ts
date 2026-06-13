@@ -21,7 +21,7 @@ function inCidr(ip: string, base: string, bits: number): boolean {
 }
 
 function isPrivateHostname(hostname: string): boolean {
-  const h = hostname.toLowerCase();
+  const h = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "");
   if (h === "localhost" || h.endsWith(".localhost")) return true;
   if (h === "0.0.0.0") return true;
   if (isIP(h) === 6) return h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:");

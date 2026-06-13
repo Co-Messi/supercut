@@ -1,0 +1,29 @@
+{
+  "version": 0,
+  "app_url": "http://127.0.0.1:8455",
+  "music_track": "institutional-01",
+  "scenes": [
+    {
+      "name": "trace-one-company",
+      "priority": 1,
+      "entry": { "url": "http://127.0.0.1:8455/", "prelude": [] },
+      "depends_on": [],
+      "actions": [
+        { "kind": "click", "selector": "#ticker", "duration_ms": 1000 },
+        { "kind": "type", "selector": "#ticker", "text": "NVDA", "submit": true, "focus_selector": "#graph", "duration_ms": 1600 }
+      ],
+      "hold_ms": 2600
+    },
+    {
+      "name": "expose-the-illusion",
+      "priority": 2,
+      "entry": { "url": "http://127.0.0.1:8455/", "prelude": [] },
+      "depends_on": [],
+      "actions": [
+        { "kind": "click", "selector": "#ticker", "duration_ms": 1000 },
+        { "kind": "type", "selector": "#ticker", "text": "SEMICONDUCTOR", "submit": true, "focus_selector": "#graph", "duration_ms": 2400 }
+      ],
+      "hold_ms": 3000
+    }
+  ]
+}

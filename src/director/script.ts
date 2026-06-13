@@ -12,6 +12,7 @@ import { parseRecipe, type Recipe } from "../schema/index.js";
 import { extractJson, type ChatPart, type LlmClient } from "./llm.js";
 import type { AppAnalysis } from "./analyze.js";
 import type { PageDigest } from "./inventory.js";
+import { redactForPrompt } from "../security/redaction.js";
 
 const SYSTEM = `You write filming scripts ("recipes") for supercut, which records a REAL web app with a browser robot and renders a cinematic 60-second launch video. Respond ONLY with a JSON recipe:
 
@@ -50,7 +51,7 @@ export async function writeRecipe(
   digests: PageDigest[],
   appUrl: string,
 ): Promise<ScriptResult> {
-  // per-page whitelist (PR #2 review): a global set would let a /dash selector
+  // Per-page whitelist: a global set would let a /dash selector
   // pass validation in a / scene, then capture waits forever for an element
   // that page can never show. Validate each scene's selectors against the
   // inventory of ITS entry.url page. (v1 caveat: a mid-scene `goto` to another
@@ -63,7 +64,7 @@ export async function writeRecipe(
     .map(
       (d) =>
         `PAGE ${d.url}\n` +
-        d.inventory.map((i) => `  ${i.selector}  [${i.tag}] "${i.text}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`).join("\n"),
+        d.inventory.map((i) => `  ${i.selector}  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`).join("\n"),
     )
     .join("\n\n");
 

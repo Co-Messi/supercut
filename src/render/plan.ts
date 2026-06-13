@@ -57,8 +57,8 @@ export interface BackgroundStyle {
 
 /**
  * Curated palettes. "aurora" is the default — the soft blurred
- * pastel-mesh look of OpenAI-style launch videos (Brayden's reference,
- * 2026-06-11). Apple wallpapers can't be bundled (copyright); users get the
+ * pastel-mesh look of modern launch videos. Apple wallpapers cannot be
+ * bundled (copyright); users get the
  * same vibe via --bg <their own image>.
  */
 export const PALETTES: Record<string, { base: string; light: boolean; colors: string[] }> = {
@@ -146,8 +146,7 @@ const ZOOM_TARGET = 1.48;
 const ZOOM_LEAD_MS = 600;   // camera starts moving before the click lands
 const ZOOM_DWELL_MS = 1500; // stays on target after the event
 /** segments closer than this bridge into ONE held zoom — the camera glides
- *  between targets instead of pumping out/in per click (Brayden: "everything
- *  is just moving too much... the screen is kind of shaking", 2026-06-11) */
+ *  between targets instead of pumping out/in per click. */
 const MERGE_GAP_MS = 2600;
 const TAIL_MS = 600;
 const PULSE_MS = 350;
@@ -183,7 +182,7 @@ export function buildRenderPlan(
 ): RenderPlan {
   if (frameIndex.length === 0) throw new Error("render plan: empty frame index");
   // frame index is external input — one malformed entry can otherwise request
-  // absurd allocations or break the nearest-hold walk (review: P1 bounds)
+  // absurd allocations or break the nearest-hold walk.
   let prevT = -1;
   for (const [i, e] of frameIndex.entries()) {
     if (typeof e?.file !== "string" || e.file.length === 0 || typeof e?.t_source !== "number") {
@@ -218,7 +217,7 @@ export function buildRenderPlan(
   }
   const frames = Math.ceil((lastT + TAIL_MS) / frameMs);
   // hard ceiling: product max is 60s; 2 min of slack covers overruns — beyond
-  // that a corrupt timestamp is asking us to allocate the moon (review: P1)
+  // that a corrupt timestamp is asking us to allocate the moon.
   const MAX_TAKE_MS = 120_000;
   if (lastT > MAX_TAKE_MS) {
     throw new Error(
@@ -276,7 +275,7 @@ export function buildRenderPlan(
   // ---- spring integration at subframe resolution ----
   // 180° shutter: integrate 2×SUBFRAMES steps per frame but RECORD only the
   // first half — blur spans half the frame interval, halving ghost spacing
-  // (the "onion ring" edge artifact Brayden spotted, 2026-06-11)
+  // (prevents onion-ring edge artifacts)
   const STEPS = SUBFRAMES * 2;
   const dt = frameMs / 1000 / STEPS;
   const state = { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 };

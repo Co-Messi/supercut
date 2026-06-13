@@ -10,8 +10,9 @@
  */
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
+import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -27,7 +28,7 @@ export interface RenderOptions {
   outFile: string;
   /** palette name (aurora|midnight|dusk|paper) or a path to a wallpaper image */
   background?: string;
-  /** ms; encoding 60s of footage measured ~36s in the spike — 5 min is generous */
+  /** ms; encoding 60s of footage is expected to finish well within 5 min */
   timeoutMs?: number;
 }
 
@@ -43,7 +44,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const timeoutMs = opts.timeoutMs ?? 300_000;
   const t0 = Date.now();
 
-  // fail BEFORE the expensive work: output dir + take shape (review: P2)
+  // Fail before expensive work: output dir + take shape.
   mkdirSync(dirname(outFile), { recursive: true });
   const log = parseEventLog(JSON.parse(readFileSync(join(takeDir, "events.json"), "utf8")));
   const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
@@ -56,10 +57,11 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   if (!existsSync(bgSpec)) {
     const assetsDir = fileURLToPath(new URL("../../assets", import.meta.url));
     if (existsSync(assetsDir)) {
-      const needle = bgSpec.toLowerCase().replace(/[^a-z0-9]/g, "");
-      const hit = readdirSync(assetsDir).find((f) =>
-        f.toLowerCase().replace(/[^a-z0-9]/g, "").includes(needle),
-      );
+      const requested = bgSpec.toLowerCase().replace(/\.[a-z0-9]+$/, "");
+      const hit = readdirSync(assetsDir).find((f) => {
+        const lower = f.toLowerCase();
+        return lower === bgSpec.toLowerCase() || lower.replace(/\.[a-z0-9]+$/, "") === requested;
+      });
       if (hit) bgSpec = join(assetsDir, hit);
     }
   }
@@ -72,19 +74,33 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const planJson = JSON.stringify(plan);
 
   const token = randomBytes(16).toString("hex");
-  let resultBuf: Buffer | null = null;
+  const rawPath = join(takeDir, "encoded.h264");
+  let encodedBytes = 0;
+  let resultReady = false;
+  let rejectResult!: (err: Error) => void;
   let resolveResult!: () => void;
-  const resultReceived = new Promise<void>((r) => (resolveResult = r));
+  const resultReceived = new Promise<void>((r, rej) => { resolveResult = r; rejectResult = rej; });
 
   const server = createServer((req, res) => {
-    const url = (req.url ?? "/").split("?")[0]!;
+    const rawUrl = req.url ?? "/";
+    const parsedUrl = new URL(rawUrl, "http://127.0.0.1");
+    const url = parsedUrl.pathname;
+    const authorized = parsedUrl.searchParams.get("t") === token || req.headers["x-render-token"] === token;
+    const requireToken = (): boolean => {
+      if (authorized) return true;
+      res.writeHead(403);
+      res.end();
+      return false;
+    };
     if (url === "/" || url === "/host.html") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(HOST_PAGE);
     } else if (url === "/take/render-plan.json") {
+      if (!requireToken()) return;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(planJson);
     } else if (url.startsWith("/take/frames/")) {
+      if (!requireToken()) return;
       try {
         const name = url.slice("/take/frames/".length).replace(/[^0-9a-zA-Z._-]/g, "");
         const buf = readFileSync(join(takeDir, "frames", name));
@@ -95,6 +111,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         res.end();
       }
     } else if (url === "/take/bg" && bgIsImage) {
+      if (!requireToken()) return;
       const ext = bgSpec.toLowerCase();
       const mime = ext.endsWith(".png") ? "image/png" : ext.endsWith(".webp") ? "image/webp" : "image/jpeg";
       res.writeHead(200, { "content-type": mime });
@@ -102,28 +119,29 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     } else if (url === "/result" && req.method === "POST") {
       // only OUR page may deliver the result (token minted per render),
       // and a runaway encoder can't OOM Node (size cap)
-      if (req.headers["x-render-token"] !== token) {
-        res.writeHead(403);
-        res.end();
-        return;
-      }
+      if (!requireToken()) return;
       const MAX_RESULT_BYTES = 1.5e9;
       let received = 0;
-      const parts: Buffer[] = [];
       req.on("data", (c: Buffer) => {
         received += c.length;
         if (received > MAX_RESULT_BYTES) {
           req.destroy(new Error("encoded result exceeds 1.5GB cap"));
-          return;
         }
-        parts.push(c);
       });
-      req.on("end", () => {
-        resultBuf = Buffer.concat(parts);
-        res.writeHead(200);
-        res.end("ok");
-        resolveResult();
-      });
+      pipeline(req, createWriteStream(rawPath))
+        .then(() => {
+          encodedBytes = received;
+          resultReady = true;
+          res.writeHead(200);
+          res.end("ok");
+          resolveResult();
+        })
+        .catch((err) => {
+          const e = err instanceof Error ? err : new Error(String(err));
+          res.writeHead(500);
+          res.end(e.message);
+          rejectResult(e);
+        });
     } else {
       res.writeHead(404);
       res.end();
@@ -132,7 +150,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
 
-  // full Chromium: the stripped headless shell has no WebCodecs (spike gotcha #2)
+  // Full Chromium: the stripped headless shell has no WebCodecs.
   const browser = await chromium.launch({ headless: true, channel: "chromium" });
   try {
     const page = await browser.newPage();
@@ -156,7 +174,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         for (;;) {
           await new Promise((r) => setTimeout(r, 500));
           if (fatal) throw new Error(fatal);
-          if (resultBuf) return;
+          if (resultReady) return;
         }
       })(),
     ]);
@@ -165,16 +183,13 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     await new Promise<void>((r) => server.close(() => r()));
   }
 
-  if (!resultBuf || (resultBuf as Buffer).length === 0) {
+  if (!resultReady || encodedBytes === 0) {
     throw new Error("render produced no encoded output");
   }
-  const encoded: Buffer = resultBuf;
 
   // mux raw annexb H.264 → MP4. ffmpeg is a muxer here, never an effects engine.
-  const rawPath = join(takeDir, "encoded.h264");
-  writeFileSync(rawPath, encoded);
   // -r BEFORE -i: raw annexb has no timestamps; this assigns them at 60fps.
-  // (-framerate alone misparses → 120fps/wrong duration, found 2026-06-11.)
+  // (-framerate alone can misparse to the wrong duration.)
   await exec("ffmpeg", [
     "-y",
     "-f", "h264",
@@ -188,7 +203,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   return {
     outFile,
     frames: plan.frames,
-    encodedBytes: encoded.length,
+    encodedBytes,
     wallMs: Date.now() - t0,
   };
 }

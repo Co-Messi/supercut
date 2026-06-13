@@ -5,6 +5,7 @@
  * construction: it fails the whitelist check and bounces back for retry.
  */
 import { chromium, type Browser, type Page } from "playwright";
+import { assertSafeNavigationUrl } from "../security/url-policy.js";
 
 export interface InventoryItem {
   /** Playwright-compatible selector, verified to resolve on the page */
@@ -31,7 +32,7 @@ const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
-// page.goto (found on a real run, 2026-06-12).
+// page.goto.
 const NON_HTML_EXT =
   /\.(pdf|zip|tar|gz|dmg|exe|pkg|csv|xlsx?|docx?|pptx?|png|jpe?g|gif|svg|webp|mp4|mov|webm|mp3|wav|woff2?|ttf)$/i;
 
@@ -93,7 +94,7 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
     if (matches === 0) continue;
     if (matches > 1) {
       if (!box) continue; // can't disambiguate a hidden duplicate — skip, don't guess
-      // pick the CLOSEST nth-match (PR #2 review: a strict ±2px test can miss
+      // Pick the closest nth-match; a strict ±2px test can miss
       // on sub-pixel rendering and silently fall back to nth=1 = wrong element).
       // Cap the accepted distance so we never inventory a wildly-off element.
       const MAX_OFFSET_PX = 20;
@@ -136,11 +137,13 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
  */
 export async function crawlApp(
   appUrl: string,
-  opts: { maxPages?: number; screenshots?: boolean } = {},
+  opts: { maxPages?: number; screenshots?: boolean; allowPrivateNetwork?: boolean } = {},
 ): Promise<PageDigest[]> {
   const maxPages = opts.maxPages ?? 3;
   const screenshots = opts.screenshots ?? true;
   const origin = new URL(appUrl).origin;
+  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
+  await assertSafeNavigationUrl(appUrl, { allowPrivateNetwork });
 
   const browser: Browser = await chromium.launch({ headless: true });
   try {
@@ -163,7 +166,7 @@ export async function crawlApp(
     const queue = [appUrl];
     while (queue.length > 0 && digests.length < maxPages) {
       const target = queue.shift()!;
-      // pathname + search (PR #2 review): pathname-only collapses query-routed
+      // Pathname + search: pathname-only collapses query-routed
       // pages (/search?q=a vs ?q=b) and SPA filter/detail views, so the crawler
       // would skip real money-moment pages. Hash is excluded (same document).
       const u = new URL(target);
@@ -174,7 +177,9 @@ export async function crawlApp(
       // a single bad page (download, timeout, redirect off-origin) must not
       // kill the whole crawl — skip it and keep going
       try {
-        await page.goto(target, { timeout: 15_000, waitUntil: "load" });
+        await assertSafeNavigationUrl(target, { allowPrivateNetwork });
+        const response = await page.goto(target, { timeout: 15_000, waitUntil: "load" });
+        await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         await page.waitForTimeout(400); // settle: load ≠ ready
       } catch (err) {
         if (digests.length === 0 && queue.length === 0) throw err; // start page must load
@@ -188,6 +193,7 @@ export async function crawlApp(
         try {
           const linked = new URL(item.href, target);
           if (linked.origin === origin && isCrawlable(linked) && !visited.has(linked.pathname + linked.search)) {
+            await assertSafeNavigationUrl(linked.href, { allowPrivateNetwork });
             queue.push(linked.href);
           }
         } catch {

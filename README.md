@@ -4,27 +4,127 @@
 
 Institutional-grade, max-60-second launch videos generated from your **real**
 product — not an HTML mockup. A scripted browser performs your app on camera;
-a cinematic renderer adds the Screen Studio look (spring zoom-to-cursor,
-motion blur, padded background, music on the beat grid); an AI director writes
-the script and quality-checks the footage.
+a cinematic renderer adds the Screen Studio look: spring zoom-to-cursor,
+motion blur, padded background, and a polished final export.
 
-**Status: pre-release, under active construction.** The design doc and build
-plan are complete; stages are landing in order. Nothing to install yet.
+**Status: pre-release.** The core record/render/generate pipeline exists, but
+it is still being hardened. Use it on trusted apps and trusted recipes.
 
+```text
+ your app URL ──▶ ① analyze   pick the 2-4 money moments (LLM)
+                  ② script    write the filming recipe (LLM, schema-validated)
+                  ③ record    deterministic browser executor performs it
+                  ④ qc        deterministic + optional vision checks, bounded retakes
+                  ⑤ render    cinematic compositing ──▶ final.mp4 (≤60s target)
 ```
- your app URL ──▶ ① analyze   pick the 3-4 money moments (LLM)
-                  ② script    write the filming recipe, beat-aligned (LLM, schema-validated)
-                  ③ record    a deterministic browser executor performs it (pure code)
-                  ④ qc        vision checks the footage, refilms what's bad (bounded loop)
-                  ⑤ render    cinematic compositing + music ──▶ launch.mp4 (≤60s, 1080p60)
+
+## Install for local development
+
+```bash
+npm install
+npm run typecheck
+npm run test:fast
 ```
 
-- Real footage only — no fake UI renders, ever
-- The event-log JSON between recorder and renderer is a public contract; any
-  recorder can feed it
-- Stages ③ and ⑤ run standalone with zero API key (`supercut record`,
-  `supercut render`)
-- MIT, CC0-only bundled music, macOS + Linux
+For browser/video tests you also need Chromium + ffmpeg:
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```
+
+## CLI
+
+```bash
+npm run build
+node dist/cli/index.js doctor
+node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take --seed 1
+node dist/cli/index.js render --take out/take --out out/final.mp4
+node dist/cli/index.js generate --url https://your-app.example --out out/generate --yes
+```
+
+### Private/local apps
+
+`generate` blocks localhost, RFC1918, link-local, and cloud metadata addresses
+by default. If you intentionally want to film a local development app, opt in:
+
+```bash
+node dist/cli/index.js generate --url http://127.0.0.1:3000 --allow-private-network --yes
+```
+
+Do not use recipes or URLs you do not trust. They drive real browser navigation.
+
+## LLM provider setup
+
+Copy `.env.example` to `.env` or pass `--env-file <file>`.
+
+```bash
+cp .env.example .env
+```
+
+DeepSeek is text-only in this project, so Supercut disables screenshots and
+vision QC for DeepSeek by default:
+
+```env
+SUPERCUT_PROVIDER=deepseek
+DEEPSEEK_API_KEY=...
+SUPERCUT_MODEL=deepseek-v4-pro
+```
+
+OpenRouter/custom OpenAI-compatible providers can use vision-capable models:
+
+```env
+SUPERCUT_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+SUPERCUT_MODEL=anthropic/claude-sonnet-4.6
+SUPERCUT_VISION=true
+```
+
+If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly.
+Ambiguous provider configuration fails loudly rather than guessing.
+
+## Privacy warning
+
+`supercut generate` may send crawled DOM text, element labels/selectors,
+optional screenshots, and optional repo notes (`--repo`) to the configured LLM
+provider. It can also persist sensitive frames, recipes, and director reports in
+`out/`. Review those artifacts before sharing them.
+
+Use `record` + `render` for a no-LLM workflow.
+
+## Event-log contract
+
+The public boundary is:
+
+```text
+recipe.json ──▶ record ──▶ take directory
+                         ├─ events.json
+                         ├─ frames-index.json
+                         └─ frames/*.png
+
+take directory ──▶ render ──▶ final.mp4
+```
+
+Schemas reject unsupported URL schemes, malformed known events, non-monotonic
+timelines, oversized event logs, and impossible camera/zoom boxes.
+
+## Project principles
+
+- Real product footage beats mockups.
+- The event log is a public contract.
+- Non-AI recorder/render paths must remain useful without an API key.
+- Defaults should fail loudly on unsafe or ambiguous config.
+
+## Contributing
+
+```bash
+npm run typecheck
+npm run test:fast
+npm run test:e2e
+npm audit --audit-level=moderate
+```
+
+Keep PRs focused and add tests for behavior changes.
 
 ## License
 

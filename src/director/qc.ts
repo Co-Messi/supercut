@@ -43,8 +43,8 @@ export function deterministicChecks(result: RecordResult): SceneVerdict[] {
   }
 
   // dead air: >4s between consecutive interaction events inside a scene.
-  // PR #2 review: this is INFORMATIONAL only (verdict "ok" + reason). hold_ms
-  // adds time at the END of a scene — it cannot compress a MID-scene gap, so
+  // Informational only: hold_ms adds time at the END of a scene and cannot
+  // compress a MID-scene gap, so
   // patching it was a no-op that just lengthened the scene. Mid-scene dead air
   // comes from observed overrun on a slow app, and no frozen-surface lever
   // (hold/zoom/cut) fixes it, nor does re-recording. We surface it in the

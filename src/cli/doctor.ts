@@ -65,7 +65,7 @@ const checks: Check[] = [
   {
     // render needs the FULL chromium channel (the headless shell has no
     // WebCodecs) — a doctor that only checks the shell passes while render
-    // cannot launch (review: P2)
+    // cannot launch
     name: "full chromium (render)",
     run: async () => {
       try {

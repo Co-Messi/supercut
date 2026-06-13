@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { extractJson, type ChatPart, type LlmClient } from "./llm.js";
 import type { PageDigest } from "./inventory.js";
+import { redactForPrompt } from "../security/redaction.js";
 
 export const appAnalysis = z.object({
   product_summary: z.string().min(10).max(600),
@@ -27,9 +28,26 @@ export const appAnalysis = z.object({
 
 export type AppAnalysis = z.infer<typeof appAnalysis>;
 
+export function validateAnalysis(raw: unknown, digests: PageDigest[]): AppAnalysis {
+  const parsed = appAnalysis.parse(raw);
+  const byPage = new Map(digests.map((d) => [d.url, new Set(d.inventory.map((i) => i.selector))]));
+  for (const moment of parsed.money_moments) {
+    const selectors = byPage.get(moment.page_url);
+    if (!selectors) {
+      throw new Error(`money moment "${moment.title}" page_url "${moment.page_url}" is not a crawled page`);
+    }
+    for (const selector of moment.elements) {
+      if (!selectors.has(selector)) {
+        throw new Error(`money moment "${moment.title}" selector "${selector}" is not in the inventory for ${moment.page_url}`);
+      }
+    }
+  }
+  return parsed;
+}
+
 function digestText(d: PageDigest): string {
   const inv = d.inventory
-    .map((i) => `  ${i.selector}  [${i.tag}] "${i.text}"${i.href ? ` → ${i.href}` : ""}${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
+    .map((i) => `  ${i.selector}  [${i.tag}] "${redactForPrompt(i.text)}"${i.href ? ` → ${redactForPrompt(i.href)}` : ""}${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
     .join("\n");
   return `PAGE ${d.url}\ntitle: ${d.title}\nheadings: ${d.headings.join(" | ")}\nelements:\n${inv}`;
 }
@@ -63,7 +81,7 @@ export async function analyzeApp(
       : parts;
     const raw = await llm.chat({ system: SYSTEM, user, json: true });
     try {
-      return appAnalysis.parse(extractJson(raw));
+      return validateAnalysis(extractJson(raw), digests);
     } catch (err) {
       feedback = err instanceof Error ? err.message.slice(0, 500) : String(err);
     }

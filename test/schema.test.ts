@@ -203,3 +203,50 @@ describe("recipe hardening (PR #1 review)", () => {
     expect(() => parseRecipe(r)).toThrow();
   });
 });
+
+describe("schema hardening", () => {
+  it("rejects unknown recipe fields instead of silently dropping hallucinated keys", () => {
+    const raw = makeRecipe();
+    (raw.scenes[0] as unknown as Record<string, unknown>).voiceover = "this field is not supported";
+    expect(() => parseRecipe(raw)).toThrow();
+  });
+
+  it("rejects invalid zoom boxes", () => {
+    const raw = makeRecipe();
+    raw.scenes[0]!.actions[0]!.zoom = [-10, 0, -1, 0];
+    expect(() => parseRecipe(raw)).toThrow(/zoom/i);
+  });
+
+  it("rejects event logs with too many events", () => {
+    const events = Array.from({ length: 5001 }, (_, i) => ({ type: "scene", t: i, name: `s${i}`, priority: 1 }));
+    expect(() => parseEventLog({ version: 0, viewport: { width: 1920, height: 1080, dpr: 2 }, fps: 60, events })).toThrow(
+      /too many events/i,
+    );
+  });
+
+  it("rejects cursor paths with too many points", () => {
+    const points = Array.from({ length: 20001 }, (_, i) => [i, 1, 1]);
+    expect(() =>
+      parseEventLog({
+        version: 0,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [{ type: "cursor_path", t: 0, points }],
+      }),
+    ).toThrow(/too many cursor points/i);
+  });
+
+  it("rejects known events that go backwards in time", () => {
+    expect(() =>
+      parseEventLog({
+        version: 0,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [
+          { type: "scene", t: 100, name: "a", priority: 1 },
+          { type: "click", t: 50, bbox: [0, 0, 10, 10], selector: "#x", point: [5, 5] },
+        ],
+      }),
+    ).toThrow(/monotonic/i);
+  });
+});

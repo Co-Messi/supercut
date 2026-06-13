@@ -17,7 +17,7 @@
  * are canonical (design doc, stage 3). On a local fixture nothing overruns,
  * so the scheduled timeline is byte-identical across runs.
  *
- * Capture path per spike verdict (spikes/RESULTS.md): CDP screencast PNG at
+ * Capture path: CDP screencast PNG at
  * 2x DPR, ack-throttled, frames streamed straight to disk.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
+import { assertSafeNavigationUrl } from "../security/url-policy.js";
 
 const VIEWPORT = { width: 1920, height: 1080 };
 const DPR = 2;
@@ -43,6 +44,8 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
+  /** allow localhost/RFC1918/cloud-metadata navigation; off by default for safety */
+  allowPrivateNetwork?: boolean;
 }
 
 export interface RecordResult {
@@ -65,10 +68,24 @@ function roundToFrame(ms: number): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork: boolean): Promise<void> {
+  for (const scene of recipe.scenes) {
+    await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
+    for (const action of [...scene.entry.prelude, ...scene.actions]) {
+      if (action.kind === "goto" && action.url) {
+        await assertSafeNavigationUrl(action.url, { allowPrivateNetwork });
+      }
+    }
+  }
+}
+
 export async function record(opts: RecordOptions): Promise<RecordResult> {
   const { recipe, outDir } = opts;
   const captureFrames = opts.captureFrames ?? true;
+  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   const rng = makeRng(opts.seed ?? 1);
+
+  await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork);
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
@@ -139,7 +156,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     switch (a.kind) {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
-        await page.goto(a.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+        await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
+        const response = await page.goto(a.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+        await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
       case "wait":
@@ -254,7 +273,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // navigate to first scene's entry before starting capture, so frame 0 is content
     const firstScene = recipe.scenes[0];
     if (!firstScene) throw new Error("recipe has no scenes");
-    await page.goto(firstScene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+    await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork });
+    const firstResponse = await page.goto(firstScene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+    await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
     await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
     if (captureFrames) {
@@ -290,9 +311,11 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
       try {
         if (i > 0) {
-          await page.goto(scene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+          await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
+          const response = await page.goto(scene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+          await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
           await sleep(SETTLE_MS);
-          // timestamp canon (PR #1 review): when nav finishes EARLY, dwell out
+          // Timestamp canon: when nav finishes early, dwell out
           // the unused allowance in WALL time so pixels and schedule stay in
           // lockstep — advancing only the clock made the footage run ~1s ahead
           // of every logged event after a fast local navigation
@@ -307,8 +330,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         }
         for (const a of scene.entry.prelude) await runAction(a);
         for (const a of scene.actions) await runAction(a);
-        // hold the scene's final frame (PR #1 review: was validated + budgeted
-        // by the schema but never executed)
+        // Hold the scene's final frame; it is validated and budgeted by the schema.
         if (scene.hold_ms > 0) {
           await sleep(scene.hold_ms);
           clock += scene.hold_ms;
@@ -350,6 +372,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   };
 
   writeFileSync(join(outDir, "events.json"), JSON.stringify(eventLog, null, 2));
+  // CDP screencast timestamps can arrive/write with tiny ordering jitter across
+  // platforms. The renderer consumes by source timestamp, not filename order,
+  // so persist a monotonic index instead of failing later in render.
+  frameIndex.sort((a, b) => a.t_source - b.t_source);
   writeFileSync(join(outDir, "frames-index.json"), JSON.stringify(frameIndex));
 
   return { eventLog, frameCount: frameIndex.length, failedScenes, aborted, outDir };

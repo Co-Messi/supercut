@@ -41,7 +41,7 @@ afterAll(async () => {
 
 describe("inventory crawler on the fixture app", () => {
   it("extracts real, resolvable selectors and follows same-origin links", async () => {
-    const digests = await crawlApp(app.url, { maxPages: 3, screenshots: false });
+    const digests = await crawlApp(app.url, { maxPages: 3, screenshots: false, allowPrivateNetwork: true });
     expect(digests.length).toBeGreaterThanOrEqual(1);
     const selectors = digests[0]!.inventory.map((i) => i.selector);
     expect(selectors).toContain("#cta");
@@ -112,6 +112,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
       url: app.url,
       outDir,
       seed: 7,
+      allowPrivateNetwork: true,
       log: () => {},
     });
 
@@ -128,7 +129,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
   it("fails fast on an unreachable app URL (before any LLM call)", async () => {
     const llm = new ScriptedLlm(() => []);
     await expect(
-      generate({ llm, url: "http://127.0.0.1:1", outDir: mkdtempSync(join(tmpdir(), "supercut-dead-")), log: () => {} }),
+      generate({ llm, url: "http://127.0.0.1:1", outDir: mkdtempSync(join(tmpdir(), "supercut-dead-")), allowPrivateNetwork: true, log: () => {} }),
     ).rejects.toThrow(/cannot reach/);
     expect(llm.calls).toBe(0);
   }, 30_000);

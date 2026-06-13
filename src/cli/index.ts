@@ -34,10 +34,11 @@ async function main(): Promise<number> {
           recipe: { type: "string" },
           out: { type: "string" },
           seed: { type: "string" },
+          "allow-private-network": { type: "boolean" },
         },
       });
       if (!values.recipe) {
-        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>]");
+        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--allow-private-network]");
         return 1;
       }
       const { readFileSync } = await import("node:fs");
@@ -48,7 +49,12 @@ async function main(): Promise<number> {
       const outDir = values.out ?? "out/take";
       console.log(`recording ${recipe.scenes.length} scene(s) from ${recipe.app_url} → ${outDir}`);
       const t0 = Date.now();
-      const res = await record({ recipe, outDir, seed: values.seed ? Number(values.seed) : 1 });
+      const seed = values.seed === undefined ? 1 : Number(values.seed);
+      if (!Number.isInteger(seed) || seed < 0) {
+        console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
+        return 1;
+      }
+      const res = await record({ recipe, outDir, seed, ...(values["allow-private-network"] ? { allowPrivateNetwork: true } : {}) });
       console.log(
         `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames, ` +
           `${res.eventLog.events.length} events` +
@@ -97,22 +103,37 @@ async function main(): Promise<number> {
           seed: { type: "string" },
           model: { type: "string" },
           "no-vision": { type: "boolean" },
+          "env-file": { type: "string" },
+          "allow-private-network": { type: "boolean" },
+          yes: { type: "boolean" },
         },
       });
       if (!values.url) {
         console.error(
           "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-            "[--bg <stage>] [--seed <n>] [--model <id>] [--no-vision]",
+            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--allow-private-network] [--yes] [--no-vision]",
         );
         return 1;
       }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { generate } = await import("../director/generate.js");
-      loadDotEnv(); // read .env at repo root (DEEPSEEK_API_KEY etc.)
-      if (values.model) process.env.SUPERCUT_MODEL = values.model; // --model overrides .env
+      const envLoad = loadDotEnv(values["env-file"] ?? ".env");
+      if (process.env.SUPERCUT_VERBOSE && envLoad.reason) console.error(`env: ${envLoad.path} ${envLoad.reason}`);
+      const seed = values.seed === undefined ? undefined : Number(values.seed);
+      if (seed !== undefined && (!Number.isInteger(seed) || seed < 0)) {
+        console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
+        return 1;
+      }
+      if (!values.yes) {
+        console.error(
+          "generate sends crawled DOM text, optional screenshots, and optional repo notes to the configured LLM provider. " +
+            "Re-run with --yes to acknowledge, or use record/render without an LLM.",
+        );
+        return 1;
+      }
       let provider;
       try {
-        provider = resolveProvider();
+        provider = resolveProvider(process.env, { ...(values.model ? { model: values.model } : {}) });
       } catch (err) {
         console.error(
           `${err instanceof Error ? err.message : err}\n` +
@@ -129,7 +150,8 @@ async function main(): Promise<number> {
         vision: values["no-vision"] ? false : provider.vision,
         ...(values.repo ? { repoPath: values.repo } : {}),
         ...(values.bg ? { background: values.bg } : {}),
-        ...(values.seed ? { seed: Number(values.seed) } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        ...(values["allow-private-network"] ? { allowPrivateNetwork: true } : {}),
       });
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;

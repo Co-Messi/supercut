@@ -22,6 +22,7 @@ import { crawlApp, type PageDigest } from "./inventory.js";
 import type { LlmClient } from "./llm.js";
 import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
+import { assertSafeNavigationUrl } from "../security/url-policy.js";
 
 const exec = promisify(execFile);
 const MAX_RETAKES = 3;
@@ -39,6 +40,8 @@ export interface GenerateOptions {
   vision?: boolean;
   /** @deprecated use vision:false */
   noVision?: boolean;
+  /** allow localhost/RFC1918/cloud-metadata navigation; off by default for safety */
+  allowPrivateNetwork?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -50,12 +53,14 @@ export interface GenerateResult {
   verdictLog: SceneVerdict[][];
 }
 
-async function preflight(url: string): Promise<void> {
+async function preflight(url: string, allowPrivateNetwork: boolean): Promise<void> {
+  await assertSafeNavigationUrl(url, { allowPrivateNetwork });
   // app reachable — error in seconds, never after 10 minutes of work
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
     const res = await fetch(url, { signal: ctrl.signal });
+    await assertSafeNavigationUrl(url, { allowPrivateNetwork, finalUrl: res.url });
     if (res.status >= 500) throw new Error(`app at ${url} responded ${res.status}`);
   } catch (err) {
     throw new Error(
@@ -91,10 +96,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
-  await preflight(opts.url);
+  await preflight(opts.url, opts.allowPrivateNetwork ?? false);
 
   log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
-  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3, screenshots: vision });
+  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3, screenshots: vision, allowPrivateNetwork: opts.allowPrivateNetwork ?? false });
   log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
 
   const notes = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
@@ -116,7 +121,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     takeDir = join(opts.outDir, `take-${retakes}`);
     rmSync(takeDir, { recursive: true, force: true });
     log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
-    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1 });
+    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? false });
     if (result.aborted) {
       throw new Error(
         `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
@@ -142,7 +147,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       if (retakes >= MAX_RETAKES) {
         log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
       }
-      // PR #2 review: do NOT adopt the patched recipe here. `takeDir` was
+      // Do NOT adopt the patched recipe here. `takeDir` was
       // recorded from the CURRENT `recipe`; writing applied.recipe would make
       // recipe.json/report describe scenes/holds that were never filmed (and
       // for cuts, omit a scene that is still in the rendered video). The

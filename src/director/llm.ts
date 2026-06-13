@@ -1,6 +1,7 @@
 /**
- * LLM access for the director stages — OpenRouter-first (one key, many
- * models; Engineering Decision #4), plain fetch, zero SDK dependencies.
+ * LLM access for the director stages — OpenAI-compatible, plain fetch, zero
+ * SDK dependencies. Works with OpenRouter, DeepSeek, or a custom compatible
+ * endpoint selected in config.ts.
  *
  * Every AI touchpoint in supercut goes through this interface, so tests can
  * inject a stub and the whole generate pipeline runs without any API key.
@@ -23,30 +24,36 @@ export interface LlmClient {
   readonly label: string;
 }
 
-export interface OpenRouterConfig {
+export interface OpenAICompatibleConfig {
   apiKey: string;
-  /** override with SUPERCUT_MODEL; needs vision for analyze + QC */
-  model?: string;
-  baseUrl?: string;
+  model: string;
+  baseUrl: string;
+  providerLabel: string;
+  /** whether this provider/model accepts image parts */
+  vision: boolean;
 }
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
-
-export class OpenRouterClient implements LlmClient {
+export class OpenAICompatibleClient implements LlmClient {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly baseUrl: string;
+  private readonly vision: boolean;
   readonly label: string;
 
-  constructor(cfg: OpenRouterConfig) {
-    if (!cfg.apiKey) throw new Error("OpenRouter API key is empty");
+  constructor(cfg: OpenAICompatibleConfig) {
+    if (!cfg.apiKey) throw new Error(`${cfg.providerLabel} API key is empty`);
     this.apiKey = cfg.apiKey;
-    this.model = cfg.model ?? process.env.SUPERCUT_MODEL ?? DEFAULT_MODEL;
-    this.baseUrl = cfg.baseUrl ?? "https://openrouter.ai/api/v1";
-    this.label = `openrouter:${this.model}`;
+    this.model = cfg.model;
+    this.baseUrl = cfg.baseUrl.replace(/\/$/, "");
+    this.vision = cfg.vision;
+    this.label = `${cfg.providerLabel}:${this.model}`;
   }
 
   async chat(opts: ChatOptions): Promise<string> {
+    if (!this.vision && opts.user.some((p) => p.type === "image")) {
+      throw new Error(`${this.label} is text-only; refusing to send image parts`);
+    }
+
     const content = opts.user.map((p) =>
       p.type === "text"
         ? { type: "text" as const, text: p.text }
@@ -66,8 +73,6 @@ export class OpenRouterClient implements LlmClient {
     for (let attempt = 0; attempt < 4; attempt++) {
       let res: Response;
       try {
-        // explicit 4-min timeout so a stalled connection (proxy half-open,
-        // slow reasoning model) fails cleanly instead of hanging forever
         res = await fetch(`${this.baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
@@ -79,8 +84,6 @@ export class OpenRouterClient implements LlmClient {
           signal: AbortSignal.timeout(240_000),
         });
       } catch (err) {
-        // network-level throw ("fetch failed", timeout, proxy reset) — transient,
-        // retry with backoff. Surface the underlying cause for diagnosis.
         const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
         lastErr = `network: ${cause?.code ?? ""} ${cause?.message ?? (err instanceof Error ? err.message : String(err))}`.trim();
         await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
@@ -91,15 +94,11 @@ export class OpenRouterClient implements LlmClient {
           choices?: { message?: { content?: string; reasoning_content?: string } }[];
         };
         const msg = data.choices?.[0]?.message;
-        // reasoning models (deepseek-v4) may put the answer in content; fall
-        // back to reasoning_content only if content is empty
         const text = msg?.content || msg?.reasoning_content;
         if (!text) throw new Error(`LLM returned an empty response (${this.label})`);
         return text;
       }
       const snippet = (await res.text()).slice(0, 300);
-      // auth/config errors fail FAST and clear (fail-fast preflight rule);
-      // only rate limits and server errors retry
       if (res.status === 401 || res.status === 403) {
         throw new Error(`LLM auth failed (${res.status}, ${this.label}) — check your API key. ${snippet}`);
       }
@@ -112,6 +111,10 @@ export class OpenRouterClient implements LlmClient {
     throw new Error(`LLM unavailable after 4 attempts (${this.label}): ${lastErr}`);
   }
 }
+
+/** Backwards-compatible export name for older internal imports. */
+export const OpenRouterClient = OpenAICompatibleClient;
+export type OpenRouterConfig = OpenAICompatibleConfig;
 
 /**
  * Pull the first JSON object out of a model response — tolerates ```json

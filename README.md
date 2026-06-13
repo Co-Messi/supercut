@@ -1,5 +1,9 @@
 # supercut
 
+<p align="center">
+  <img src="assets/readme-hero-10k.png" alt="supercut — institutional-grade launch videos from your real app" width="100%" />
+</p>
+
 > Point it at your app. Get the supercut.
 
 Institutional-grade, max-60-second launch videos generated from your **real**
@@ -9,6 +13,14 @@ motion blur, padded background, and a polished final export.
 
 **Status: pre-release.** The core record/render/generate pipeline exists, but
 it is still being hardened. Use it on trusted apps and trusted recipes.
+
+## Why people should star it
+
+- Real footage only — no fake UI renders, ever.
+- One-command promise — the end goal is `supercut https://your-app.com`.
+- Open event-log contract — any recorder can feed the renderer.
+- Useful without an API key — `supercut record` and `supercut render` stand alone.
+- Built for launches — ≤60s, 1080p60, padded backgrounds, smooth zooms.
 
 ```text
  your app URL ──▶ ① analyze   pick the 2-4 money moments (LLM)

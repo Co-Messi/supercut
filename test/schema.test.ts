@@ -250,3 +250,60 @@ describe("schema hardening", () => {
     ).toThrow(/monotonic/i);
   });
 });
+
+describe("submit + frame-the-result schema (4b)", () => {
+  it("accepts a type action with submit and focus_selector", () => {
+    const r = parseRecipe(
+      makeRecipe({
+        scenes: [
+          {
+            name: "search",
+            priority: 1,
+            entry: { url: "http://localhost:3000/", prelude: [] },
+            depends_on: [],
+            actions: [
+              { kind: "type", selector: "#q", text: "NVDA", submit: true, focus_selector: "#graph", duration_ms: 2000 },
+            ],
+            hold_ms: 500,
+          },
+        ],
+      }),
+    );
+    const a = r.scenes[0]!.actions[0]!;
+    expect(a.submit).toBe(true);
+    expect(a.focus_selector).toBe("#graph");
+  });
+
+  it("leaves submit/focus_selector undefined when omitted (backward compatible)", () => {
+    const a = parseRecipe(makeRecipe()).scenes[0]!.actions[0]!;
+    expect(a.submit).toBeUndefined();
+    expect(a.focus_selector).toBeUndefined();
+  });
+
+  it("event log round-trips an action event with focus_bbox", () => {
+    const log = parseEventLog({
+      version: 0,
+      viewport: { width: 1920, height: 1080, dpr: 2 },
+      fps: 60,
+      events: [
+        { t: 1000, type: "type", bbox: [10, 20, 100, 40], focus_bbox: [200, 200, 1000, 700], selector: "#q", textLen: 4 },
+      ],
+    });
+    const ev = log.events[0]!;
+    expect(ev.type).toBe("type");
+    expect((ev as { focus_bbox?: number[] }).focus_bbox).toEqual([200, 200, 1000, 700]);
+  });
+
+  it("rejects a focus_bbox with non-positive width/height", () => {
+    expect(() =>
+      parseEventLog({
+        version: 0,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [
+          { t: 1000, type: "click", bbox: [10, 20, 100, 40], focus_bbox: [0, 0, 0, 100], selector: "#q", point: [60, 40] },
+        ],
+      }),
+    ).toThrow();
+  });
+});

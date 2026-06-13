@@ -40,7 +40,9 @@ export interface GenerateOptions {
   vision?: boolean;
   /** @deprecated use vision:false */
   noVision?: boolean;
-  /** allow localhost/RFC1918/cloud-metadata navigation; off by default for safety */
+  /** allow localhost/RFC1918 navigation. Defaults to TRUE — filming your own
+   *  local dev app is the primary use case. Pass false to engage the SSRF
+   *  guard (untrusted/public targets). */
   allowPrivateNetwork?: boolean;
   log?: (msg: string) => void;
 }
@@ -96,10 +98,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
-  await preflight(opts.url, opts.allowPrivateNetwork ?? false);
+  await preflight(opts.url, opts.allowPrivateNetwork ?? true);
 
   log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
-  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3, screenshots: vision, allowPrivateNetwork: opts.allowPrivateNetwork ?? false });
+  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3, screenshots: vision, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
   log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
 
   const notes = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
@@ -121,7 +123,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     takeDir = join(opts.outDir, `take-${retakes}`);
     rmSync(takeDir, { recursive: true, force: true });
     log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
-    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? false });
+    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
     if (result.aborted) {
       throw new Error(
         `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,

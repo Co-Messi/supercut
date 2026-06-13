@@ -34,11 +34,12 @@ async function main(): Promise<number> {
           recipe: { type: "string" },
           out: { type: "string" },
           seed: { type: "string" },
-          "allow-private-network": { type: "boolean" },
+          "block-private-network": { type: "boolean" },
+          "allow-private-network": { type: "boolean" }, // deprecated no-op
         },
       });
       if (!values.recipe) {
-        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--allow-private-network]");
+        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]");
         return 1;
       }
       const { readFileSync } = await import("node:fs");
@@ -54,7 +55,7 @@ async function main(): Promise<number> {
         console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
         return 1;
       }
-      const res = await record({ recipe, outDir, seed, ...(values["allow-private-network"] ? { allowPrivateNetwork: true } : {}) });
+      const res = await record({ recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"] });
       console.log(
         `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames, ` +
           `${res.eventLog.events.length} events` +
@@ -104,6 +105,11 @@ async function main(): Promise<number> {
           model: { type: "string" },
           "no-vision": { type: "boolean" },
           "env-file": { type: "string" },
+          // private/localhost is ALLOWED BY DEFAULT — filming your own local
+          // dev app is the #1 use case. --block-private-network opts into the
+          // SSRF guard (for untrusted/public targets). --allow-private-network
+          // kept as a deprecated no-op for back-compat.
+          "block-private-network": { type: "boolean" },
           "allow-private-network": { type: "boolean" },
           yes: { type: "boolean" },
         },
@@ -111,7 +117,7 @@ async function main(): Promise<number> {
       if (!values.url) {
         console.error(
           "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--allow-private-network] [--yes] [--no-vision]",
+            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--no-vision]",
         );
         return 1;
       }
@@ -124,12 +130,14 @@ async function main(): Promise<number> {
         console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
         return 1;
       }
+      // privacy notice (informational, NOT a gate — blocking the primary
+      // command on --yes was a usability regression). --yes silences it.
       if (!values.yes) {
         console.error(
-          "generate sends crawled DOM text, optional screenshots, and optional repo notes to the configured LLM provider. " +
-            "Re-run with --yes to acknowledge, or use record/render without an LLM.",
+          "note: generate sends crawled DOM text" +
+            (values.repo ? " + repo notes" : "") +
+            " to your LLM provider. (record/render need no LLM.)",
         );
-        return 1;
       }
       let provider;
       try {
@@ -151,7 +159,8 @@ async function main(): Promise<number> {
         ...(values.repo ? { repoPath: values.repo } : {}),
         ...(values.bg ? { background: values.bg } : {}),
         ...(seed !== undefined ? { seed } : {}),
-        ...(values["allow-private-network"] ? { allowPrivateNetwork: true } : {}),
+        // default ALLOW; only --block-private-network engages the SSRF guard
+        allowPrivateNetwork: !values["block-private-network"],
       });
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;

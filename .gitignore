@@ -10,3 +10,5 @@ test/.tmp/
 # secrets — never commit
 .env
 .env.local
+
+.worktrees/

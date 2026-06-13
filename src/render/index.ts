@@ -21,6 +21,7 @@ import { chromium } from "playwright";
 import { parseEventLog } from "../schema/index.js";
 import { buildRenderPlan, type FrameIndexEntry } from "./plan.js";
 import { HOST_PAGE } from "./host-page.js";
+import { buildCaptions, type CaptionCard } from "./captions.js";
 
 const exec = promisify(execFile);
 
@@ -31,6 +32,16 @@ export interface RenderOptions {
   background?: string;
   /** ms; encoding 60s of footage is expected to finish well within 5 min */
   timeoutMs?: number;
+  /** the narrative layer (hook title + per-beat captions + close card). When
+   *  present, the video tells a story instead of being mute UI footage. Copy
+   *  comes from the director; timing is computed here against the take. */
+  narrative?: {
+    productName: string;
+    headline: string;
+    tagline: string;
+    /** scene name → benefit caption (recipe scene names match scene events) */
+    captions: Record<string, string>;
+  };
 }
 
 export interface RenderResult {
@@ -72,7 +83,26 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       ? { kind: "image", base: "#101010", blobs: [], light: true, vignette: 0.16 }
       : bgSpec,
   });
-  const planJson = JSON.stringify(plan);
+
+  // narrative caption track — built here because timing needs the final plan
+  // (total frames) + the recorded scene starts. The video time base IS the
+  // event-`t` ms timeline, so scene.t maps straight to caption time.
+  let captions: CaptionCard[] = [];
+  if (opts.narrative) {
+    const totalMs = (plan.frames / plan.fps) * 1000;
+    const beats = log.events
+      .filter((e): e is Extract<typeof e, { type: "scene" }> => e.type === "scene")
+      .map((e) => ({ caption: opts.narrative!.captions[e.name] ?? "", t: e.t }))
+      .filter((b) => b.caption);
+    captions = buildCaptions({
+      productName: opts.narrative.productName,
+      headline: opts.narrative.headline,
+      tagline: opts.narrative.tagline,
+      beats,
+      totalMs,
+    });
+  }
+  const planJson = JSON.stringify({ ...plan, captions });
 
   const token = randomBytes(16).toString("hex");
   const rawPath = join(takeDir, "encoded.h264");

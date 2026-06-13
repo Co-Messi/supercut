@@ -66,9 +66,12 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
       // ① analyze response
       JSON.stringify({
         product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        product_name: "Lumon",
+        headline: "Your team's numbers, live in seconds",
+        tagline: "Metrics without the setup",
         money_moments: [
-          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta", "#email"] },
-          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+          { title: "Zero-friction signup", caption: "Start in one click", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta", "#email"] },
+          { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
         ],
       }),
       // ② script response — real selectors from the fixture app

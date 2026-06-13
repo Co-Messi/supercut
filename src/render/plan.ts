@@ -154,6 +154,12 @@ const FOCUS_FILL = 0.88;
 /** segments closer than this bridge into ONE held zoom — the camera glides
  *  between targets instead of pumping out/in per click. */
 const MERGE_GAP_MS = 2600;
+/** between two scenes (a gap too wide to fully merge) the camera relaxes to this
+ *  gentle floor instead of snapping all the way back to z=1 — so it glides scene
+ *  to scene rather than pumping fully out then punching back in (which read as a
+ *  hard cut). Only engaged STRICTLY between segments: before the first and after
+ *  the last it still settles wide to z=1. */
+const GLIDE_Z = 1.1;
 const TAIL_MS = 600;
 const PULSE_MS = 350;
 /** critically damped spring: ~settles in ≈ 4/OMEGA seconds — 6.5 is a calm,
@@ -284,11 +290,19 @@ export function buildRenderPlan(
 
   const targetAt = (t: number): { z: number; fx: number; fy: number } => {
     let active: CameraSegment | undefined;
+    let prevEnded: CameraSegment | undefined; // most recent segment already over
+    let nextStarts = false; // a segment still lies ahead
     for (const s of segments) {
       if (t >= s.start && t <= s.end) active = s; // later-starting segment wins
-      if (s.start > t) break;
+      else if (s.end < t) prevEnded = s;
+      if (s.start > t) { nextStarts = true; break; }
     }
-    return active ?? { z: 1, fx: center.x, fy: center.y };
+    if (active) return active;
+    // strictly between two scenes: glide at a gentle floor on the last focus so
+    // the camera doesn't pump fully out and hard-cut into the next scene.
+    if (prevEnded && nextStarts) return { z: GLIDE_Z, fx: prevEnded.fx, fy: prevEnded.fy };
+    // before the first event / after the last: settle wide.
+    return { z: 1, fx: center.x, fy: center.y };
   };
 
   // ---- spring integration at subframe resolution ----

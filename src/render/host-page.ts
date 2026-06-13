@@ -33,9 +33,144 @@ async function main() {
 
   const plan = await (await fetchOk("/take/render-plan.json")).json();
   const { fps, frames, layout, background, sourceByFrame, camera, cursor, sourceFiles } = plan;
+  const captions = plan.captions || [];
   const SUB = 8;
   const W = layout.canvasW, H = layout.canvasH;
   const C = layout.content;
+
+  // ---- narrative caption layer (top-most, drawn in screen coords) ----
+  // editorial type that reads as a launch video: ink on light stages, cream on
+  // dark. The hook/close cards dim the app so the message is unmissable; the
+  // per-beat lower-thirds sit in the padded margin and never cover the app.
+  const FADE_MS = 420;
+  const onLight = !!background.light;
+  const INK = onLight ? "#17140F" : "#F4F1EA";
+  const MUTE = onLight ? "rgba(23,20,15,0.62)" : "rgba(244,241,234,0.62)";
+  const ACCENT = "#9B2D20";
+  const SCRIM = onLight ? "246,243,236" : "16,15,18";
+  const SERIF = "Georgia, 'Times New Roman', serif";
+  const MONO = "ui-monospace, Menlo, 'SF Mono', monospace";
+  const capAlpha = (c, t) => {
+    if (t <= c.start || t >= c.end) return 0;
+    return Math.max(0, Math.min(1, Math.min((t - c.start) / FADE_MS, (c.end - t) / FADE_MS)));
+  };
+  const xmlEsc = (s) =>
+    String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  const wrapText = (font, text, maxW) => {
+    tctx.font = font;
+    // NB: this whole file is a Node template literal, so the served page sees
+    // \\s as \s. The double backslash is REQUIRED — a single \s collapses to a
+    // literal 's' here, making this split on the letter 's' and silently delete
+    // every 's' from captions ("sites" → "ite"). Do not "simplify" to \s+.
+    const words = String(text).split(/\\s+/);
+    const lines = [];
+    let line = "";
+    for (const w of words) {
+      const test = line ? line + " " + w : w;
+      if (tctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  };
+  const tracked = (s) => String(s).toUpperCase().split("").join(" ");
+  // Caption cards are rendered as SVG, rasterized once to an ImageBitmap, and
+  // drawImage'd per frame (the same raster-image path the app screenshots use).
+  // This OffscreenCanvas is kept solely for measureText (line wrapping) — we
+  // never fillText onto it.
+  const txtCanvas = new OffscreenCanvas(W, H);
+  const tctx = txtCanvas.getContext("2d");
+
+  // SVG <text> for one centered line. ls = letter-spacing px for tracked mono
+  // labels — use this, NOT spaces injected between chars, which SVG collapses at
+  // word boundaries so the words merge ("THE OPERATING" → "THEOPERATING").
+  function svgTextLine(txt, ty, font, weight, size, fill, ls) {
+    return '<text x="' + (W / 2) + '" y="' + ty + '" text-anchor="middle"' +
+      ' font-family="' + xmlEsc(font) + '" font-size="' + size + '" font-weight="' + weight + '"' +
+      (ls ? ' letter-spacing="' + ls + '"' : "") +
+      ' fill="' + fill + '">' + xmlEsc(txt) + "</text>";
+  }
+
+  // Build the SVG markup for one card. The full-canvas scrim is baked in at
+  // 0.9 opacity; the per-frame fade is applied later via ctx.globalAlpha so the
+  // bitmap is rasterized exactly once.
+  function cardSvg(c) {
+    const parts = [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H +
+        '" viewBox="0 0 ' + W + " " + H + '">',
+      '<rect width="' + W + '" height="' + H + '" fill="rgb(' + SCRIM + ')" fill-opacity="0.9"/>',
+    ];
+    const big = c.title || "";
+    const small = c.subtitle || "";
+    const bigSize = Math.round(H * (c.kind === "close" ? 0.072 : 0.058));
+    const bigFont = "700 " + bigSize + "px " + SERIF;
+    const lines = wrapText(bigFont, big, W * 0.74);
+    const lh = bigSize * 1.16;
+    const eyebrowGap = small ? bigSize * 0.9 : 0;
+    const blockH = lines.length * lh + eyebrowGap;
+    let y = H / 2 - blockH / 2 + bigSize;
+    if (small && c.kind === "title") {
+      // eyebrow ABOVE the hook (product name, small mono uppercase, letter-spaced)
+      const eyebrowSize = Math.round(H * 0.018);
+      parts.push(svgTextLine(small.toUpperCase(), y - bigSize - bigSize * 0.5, MONO, 500, eyebrowSize, MUTE, eyebrowSize * 0.4));
+    }
+    for (const ln of lines) {
+      parts.push(svgTextLine(ln, y, SERIF, 700, bigSize, INK));
+      y += lh;
+    }
+    if (small && c.kind === "close") {
+      // cardinal-red accent rule under the wordmark, then the tagline below it
+      const ruleY = y - bigSize * 0.2;
+      parts.push(
+        '<line x1="' + (W / 2 - 26) + '" y1="' + ruleY + '" x2="' + (W / 2 + 26) +
+          '" y2="' + ruleY + '" stroke="' + ACCENT + '" stroke-width="2"/>',
+      );
+      const tagSize = Math.round(H * 0.02);
+      parts.push(svgTextLine(small.toUpperCase(), y + bigSize * 0.55, MONO, 500, tagSize, MUTE, tagSize * 0.35));
+    }
+    parts.push("</svg>");
+    return parts.join("");
+  }
+
+  // Rasterize a card's SVG to an ImageBitmap once, cached on the card object.
+  // NOTE: createImageBitmap(Blob) on an image/svg+xml blob throws "source image
+  // could not be decoded" in this Chromium — SVG blobs aren't a decodable image
+  // source here. Route through an HTMLImageElement data URL instead (the host
+  // page is a real DOM document, so new Image() + .decode() is available); the
+  // decoded <img> IS a valid createImageBitmap source. encodeURIComponent also
+  // safely carries the em-dash and other non-ASCII glyphs.
+  async function buildCardBitmap(c) {
+    const img = new Image();
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(cardSvg(c));
+    await img.decode();
+    c._bmp = await createImageBitmap(img);
+  }
+
+  function drawCaptions(t) {
+    for (const c of captions) {
+      const a = capAlpha(c, t);
+      if (a <= 0.001 || !c._bmp) continue;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      // Hygiene: blit the card over a known-clean compositor state. The frame
+      // body leaves shadow/composite state set (the window-shadow pass keeps
+      // shadowBlur=72 with a transparent color); reset it so the bitmap is drawn
+      // straight, independent of upstream draw order.
+      ctx.globalCompositeOperation = "source-over";
+      ctx.filter = "none";
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.globalAlpha = a;
+      ctx.drawImage(c._bmp, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+  }
 
   // bring-your-own-wallpaper mode: served by the orchestrator at /take/bg
   let bgImage = null;
@@ -72,7 +207,11 @@ async function main() {
     codec: "avc1.640028",
     width: W, height: H,
     framerate: fps,
-    bitrate: 10_000_000,
+    // 10 Mbps washed out thin serif strokes (lowercase 's' vanished from caption
+    // text while chunkier glyphs survived). Crisp 1080p60 text needs more head-
+    // room; 40 Mbps holds fine detail without bloating a ≤60s clip.
+    bitrate: 40_000_000,
+    bitrateMode: "constant",
     avc: { format: "annexb" },
   };
   // Probe BEFORE configuring: a clear one-line failure beats a cryptic
@@ -143,6 +282,36 @@ async function main() {
 
   const cx = W / 2, cy = H / 2;
   const t0 = performance.now();
+
+  // Preload caption fonts BEFORE the loop. Canvas fillText falls back to a
+  // metrics-mismatched face while the real font is still loading, which makes
+  // measureText and fillText disagree on advance width and drop/overlap glyphs
+  // (the lowercase-'s' dropout on early title frames). Realize each face up
+  // front so frame 0 already has correct metrics.
+  if (captions.length) {
+    try {
+      await Promise.all([
+        document.fonts.load("400 60px " + SERIF),
+        document.fonts.load("700 60px " + SERIF),
+        document.fonts.load("500 30px " + MONO),
+      ]);
+      await document.fonts.ready;
+      // warm the canvas text pipeline too (off-screen)
+      ctx.save();
+      ctx.globalAlpha = 0;
+      ctx.font = "400 60px " + SERIF; ctx.fillText("warmup sites", -9999, -9999);
+      ctx.font = "500 30px " + MONO; ctx.fillText("WARMUP", -9999, -9999);
+      ctx.restore();
+    } catch (e) { /* fonts.load unsupported — fall through */ }
+  }
+
+  // Pre-render each caption card to an ImageBitmap (via SVG → createImageBitmap)
+  // once, BEFORE the frame loop. Done after the font preload so measureText uses
+  // the realized SERIF/MONO metrics when wrapping lines. Per-frame, drawCaptions
+  // just drawImage's the cached bitmap — surviving the H.264 encode intact.
+  if (captions.length) {
+    await Promise.all(captions.map((c) => buildCardBitmap(c)));
+  }
 
   for (let f = 0; f < frames; f++) {
     const bmp = await sourceBitmap(sourceByFrame[f]);
@@ -273,6 +442,9 @@ async function main() {
       drawCursor(ctx, 0, 0, cur[2]);
       ctx.restore();
     }
+
+    // 4) narrative caption layer — top-most, screen-space, fades by time
+    if (captions.length) drawCaptions((f * 1000) / fps);
 
     const vf = new VideoFrame(canvas, { timestamp: Math.round((f * 1e6) / fps) });
     encoder.encode(vf, { keyFrame: f % 120 === 0 });

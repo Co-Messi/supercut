@@ -42,9 +42,12 @@ const digests: PageDigest[] = [
 
 const analysis: AppAnalysis = {
   product_summary: "A metrics dashboard for teams that want simple numbers.",
+  product_name: "Lumon",
+  headline: "Your metrics, the moment you sign up",
+  tagline: "Numbers without the setup",
   money_moments: [
-    { title: "Instant signup", why: "shows zero friction", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
-    { title: "Typed email", why: "form payoff", page_url: "http://127.0.0.1:9999/", elements: ["#email"] },
+    { title: "Instant signup", caption: "Sign up in one click", why: "shows zero friction", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
+    { title: "Typed email", caption: "Your dashboard, instantly", why: "form payoff", page_url: "http://127.0.0.1:9999/", elements: ["#email"] },
   ],
 };
 

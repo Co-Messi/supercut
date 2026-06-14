@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
+import { DESTRUCTIVE_RE } from "../src/director/inventory.js";
 import { writeRecipe } from "../src/director/script.js";
 import { applyVerdicts, deterministicChecks } from "../src/director/qc.js";
 import type { AppAnalysis } from "../src/director/analyze.js";
@@ -42,9 +43,12 @@ const digests: PageDigest[] = [
 
 const analysis: AppAnalysis = {
   product_summary: "A metrics dashboard for teams that want simple numbers.",
+  product_name: "Lumon",
+  headline: "Your metrics, the moment you sign up",
+  tagline: "Numbers without the setup",
   money_moments: [
-    { title: "Instant signup", why: "shows zero friction", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
-    { title: "Typed email", why: "form payoff", page_url: "http://127.0.0.1:9999/", elements: ["#email"] },
+    { title: "Instant signup", caption: "Sign up in one click", why: "shows zero friction", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
+    { title: "Typed email", caption: "Your dashboard, instantly", why: "form payoff", page_url: "http://127.0.0.1:9999/", elements: ["#email"] },
   ],
 };
 
@@ -61,6 +65,14 @@ function validRecipeJson(selector: string): string {
         depends_on: [],
         actions: [{ kind: "click", selector, duration_ms: 1500 }],
         hold_ms: 400,
+      },
+      {
+        name: "email-payoff",
+        priority: 2,
+        entry: { url: "http://127.0.0.1:9999/", prelude: [] },
+        depends_on: [],
+        actions: [{ kind: "type", selector: "#email", text: "founder@example.com", duration_ms: 1500 }],
+        hold_ms: 600,
       },
     ],
   });
@@ -105,6 +117,40 @@ describe("script stage — the anti-hallucination gates", () => {
     expect(attempts).toBe(2);
   });
 
+  it("rejects recipes that skip storyboard beats", async () => {
+    const oneScene = JSON.parse(validRecipeJson("#cta")) as { scenes: unknown[] };
+    oneScene.scenes = oneScene.scenes.slice(0, 1);
+    const llm = new StubLlm([JSON.stringify(oneScene), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("one per money moment");
+  });
+
+  it("rejects scenes that ignore the ordered money moment selector", async () => {
+    const wrongBeat = JSON.parse(validRecipeJson("#cta")) as {
+      scenes: { actions: { selector: string; kind: string; text?: string }[] }[];
+    };
+    wrongBeat.scenes[1]!.actions[0] = { kind: "click", selector: "#cta", duration_ms: 1500 };
+    const llm = new StubLlm([JSON.stringify(wrongBeat), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("does not film storyboard beat");
+  });
+
+  it("rejects mid-scene goto actions that make the footage a random tour", async () => {
+    const withGoto = JSON.parse(validRecipeJson("#cta")) as {
+      scenes: { actions: { kind: string; url?: string; duration_ms: number; selector?: string; text?: string }[] }[];
+    };
+    withGoto.scenes[0]!.actions.unshift({ kind: "goto", url: "http://127.0.0.1:9999/dash", duration_ms: 1200 });
+    const llm = new StubLlm([JSON.stringify(withGoto), validRecipeJson("#cta")]);
+    const { attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("mid-scene goto");
+  });
+
   it("gives up loudly after 4 failed attempts", async () => {
     const bad = validRecipeJson("#nope");
     const llm = new StubLlm([bad, bad, bad, bad]);
@@ -125,6 +171,73 @@ describe("script stage — the anti-hallucination gates", () => {
     expect(attempts).toBe(2);
     const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
     expect(retryText).toContain("not on its entry page");
+  });
+});
+
+describe("destructive-action guard (H1)", () => {
+  it("matches destructive / irreversible / financial controls", () => {
+    for (const label of [
+      "Delete account",
+      "Delete",
+      "Deactivate",
+      "Wipe data",
+      "Erase everything",
+      "Cancel subscription",
+      "Cancel account",
+      "Pay now",
+      "Purchase",
+      "Buy now",
+      "Checkout",
+      "Place order",
+      "Withdraw",
+      "Confirm payment",
+      "Revoke access",
+    ]) {
+      expect(DESTRUCTIVE_RE.test(label), `expected "${label}" to match`).toBe(true);
+    }
+  });
+
+  it("does NOT match legitimate non-destructive actions", () => {
+    for (const label of [
+      "Sign in",
+      "Submit a search",
+      "Submit",
+      "Add",
+      "Add to cart",
+      "Save",
+      "Save changes",
+      "Open",
+      "View",
+      "View details",
+      "Create",
+      "Create project",
+      "Next",
+      "Continue",
+      "Get started free",
+      // hero/reversible actions that must stay filmable (narrowed lexicon):
+      "Send",
+      "Send message",
+      "Remove",
+      "Remove item",
+      "Reset",
+      "Reset filters",
+      "Archive",
+      "Disable",
+      "Unsubscribe",
+      "Transfer to list",
+    ]) {
+      expect(DESTRUCTIVE_RE.test(label), `expected "${label}" NOT to match`).toBe(false);
+    }
+  });
+
+  it("models the inventory exclude/allow toggle on a 'Delete account' element", () => {
+    // mirrors inventory.ts: an element is excluded when it matches and
+    // allowDestructive is false; included when allowDestructive is true.
+    const accepted = (text: string, allowDestructive: boolean) =>
+      allowDestructive || !DESTRUCTIVE_RE.test(text);
+    expect(accepted("Delete account", false)).toBe(false); // excluded by default
+    expect(accepted("Delete account", true)).toBe(true); // included on opt-in
+    expect(accepted("Sign in", false)).toBe(true); // benign always kept
   });
 });
 

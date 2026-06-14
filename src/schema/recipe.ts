@@ -22,6 +22,9 @@ export const MAX_BUDGET_MS = 60_000;
 export const MIN_ACTION_MS = 200;
 
 /** recipes drive a real local browser — never allow file:/javascript:/etc. */
+const finite = z.number().finite();
+const positiveFinite = finite.positive();
+
 const httpUrl = z
   .string()
   .url()
@@ -35,13 +38,23 @@ export const action = z
     selector: z.string().min(1).optional(),
     url: httpUrl.optional(),
     text: z.string().optional(),
+    /** type only: press Enter after typing. Many query/search inputs reveal
+     *  their payoff (results, a graph, a detail panel) only on submit — without
+     *  this the robot types into a box and the product never actually runs. */
+    submit: z.boolean().optional(),
+    /** Camera target: a result region (from the page's framable regions) that
+     *  this action produces. The renderer holds the camera HERE instead of on
+     *  the interaction bbox — cursor on the control, frame on the payoff.
+     *  Resolved at capture time; ignored if it doesn't resolve. */
+    focus_selector: z.string().min(1).optional(),
     /** Scheduled duration for this action, ms. The scheduler may re-place
      *  actions on the beat grid but never invents durations. */
     duration_ms: z.number().int().min(MIN_ACTION_MS),
     /** Where the camera should look during this action (CSS px bbox).
      *  PATCHABLE by QC. */
-    zoom: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+    zoom: z.tuple([finite.nonnegative(), finite.nonnegative(), positiveFinite, positiveFinite]).optional(),
   })
+  .strict()
   .superRefine((a, ctx) => {
     // per-kind requirements — fail at parse time, never mid-capture
     if ((a.kind === "click" || a.kind === "hover" || a.kind === "type") && !a.selector) {
@@ -62,19 +75,19 @@ export const scene = z.object({
   entry: z.object({
     url: httpUrl,
     prelude: z.array(action).default([]),
-  }),
+  }).strict(),
   depends_on: z.array(z.string()).default([]),
   actions: z.array(action).min(1),
   /** Extra hold on the scene's last frame, ms. PATCHABLE by QC. */
-  hold_ms: z.number().int().nonnegative().default(0),
-});
+  hold_ms: z.number().int().nonnegative().max(MAX_BUDGET_MS).default(0),
+}).strict();
 
 export const recipe = z.object({
   version: z.literal(0),
   app_url: httpUrl,
   music_track: z.string().min(1),
   scenes: z.array(scene).min(1),
-});
+}).strict();
 
 export type Recipe = z.infer<typeof recipe>;
 export type Scene = z.infer<typeof scene>;

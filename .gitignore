@@ -6,3 +6,13 @@ out/
 *.mp4
 *.raw
 test/.tmp/
+
+# secrets — never commit
+.env
+.env.local
+
+.worktrees/
+.next/
+examples/demo-app/node_modules/
+examples/demo-app/.next/
+.roast/

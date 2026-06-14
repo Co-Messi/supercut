@@ -57,8 +57,8 @@ export interface BackgroundStyle {
 
 /**
  * Curated palettes. "aurora" is the default — the soft blurred
- * pastel-mesh look of OpenAI-style launch videos (Brayden's reference,
- * 2026-06-11). Apple wallpapers can't be bundled (copyright); users get the
+ * pastel-mesh look of modern launch videos. Apple wallpapers cannot be
+ * bundled (copyright); users get the
  * same vibe via --bg <their own image>.
  */
 export const PALETTES: Record<string, { base: string; light: boolean; colors: string[] }> = {
@@ -145,10 +145,21 @@ interface CameraSegment {
 const ZOOM_TARGET = 1.48;
 const ZOOM_LEAD_MS = 600;   // camera starts moving before the click lands
 const ZOOM_DWELL_MS = 1500; // stays on target after the event
+/** a framed RESULT (focus_bbox) is the payoff — hold on it longer than a plain
+ *  interaction so the viewer reads the graph/results before the camera moves */
+const FOCUS_DWELL_MS = 4200;
+/** a result region should FILL the frame, not be punched-into and cropped:
+ *  fit it to this fraction of the viewport (the rest is breathing room) */
+const FOCUS_FILL = 0.88;
 /** segments closer than this bridge into ONE held zoom — the camera glides
- *  between targets instead of pumping out/in per click (Brayden: "everything
- *  is just moving too much... the screen is kind of shaking", 2026-06-11) */
+ *  between targets instead of pumping out/in per click. */
 const MERGE_GAP_MS = 2600;
+/** between two scenes (a gap too wide to fully merge) the camera relaxes to this
+ *  gentle floor instead of snapping all the way back to z=1 — so it glides scene
+ *  to scene rather than pumping fully out then punching back in (which read as a
+ *  hard cut). Only engaged STRICTLY between segments: before the first and after
+ *  the last it still settles wide to z=1. */
+const GLIDE_Z = 1.1;
 const TAIL_MS = 600;
 const PULSE_MS = 350;
 /** critically damped spring: ~settles in ≈ 4/OMEGA seconds — 6.5 is a calm,
@@ -183,7 +194,7 @@ export function buildRenderPlan(
 ): RenderPlan {
   if (frameIndex.length === 0) throw new Error("render plan: empty frame index");
   // frame index is external input — one malformed entry can otherwise request
-  // absurd allocations or break the nearest-hold walk (review: P1 bounds)
+  // absurd allocations or break the nearest-hold walk.
   let prevT = -1;
   for (const [i, e] of frameIndex.entries()) {
     if (typeof e?.file !== "string" || e.file.length === 0 || typeof e?.t_source !== "number") {
@@ -209,7 +220,13 @@ export function buildRenderPlan(
   // ---- duration ----
   let lastT = frameIndex[frameIndex.length - 1]!.t_source;
   for (const e of log.events) {
-    const dwell = e.type === "click" || e.type === "hover" || e.type === "type" ? ZOOM_DWELL_MS : 0;
+    // a focused payoff holds for FOCUS_DWELL_MS (the camera segment below uses
+    // it); reserve the SAME dwell here or the render can end mid-hold and cut the
+    // result framing short on a final focused beat.
+    let dwell = 0;
+    if (e.type === "click" || e.type === "hover" || e.type === "type") {
+      dwell = e.focus_bbox ? FOCUS_DWELL_MS : ZOOM_DWELL_MS;
+    }
     lastT = Math.max(lastT, e.t + dwell);
     if (e.type === "cursor_path") {
       const last = e.points[e.points.length - 1];
@@ -218,7 +235,7 @@ export function buildRenderPlan(
   }
   const frames = Math.ceil((lastT + TAIL_MS) / frameMs);
   // hard ceiling: product max is 60s; 2 min of slack covers overruns — beyond
-  // that a corrupt timestamp is asking us to allocate the moon (review: P1)
+  // that a corrupt timestamp is asking us to allocate the moon.
   const MAX_TAKE_MS = 120_000;
   if (lastT > MAX_TAKE_MS) {
     throw new Error(
@@ -239,12 +256,30 @@ export function buildRenderPlan(
   const segments: CameraSegment[] = [];
   for (const e of log.events) {
     if (e.type !== "click" && e.type !== "hover" && e.type !== "type") continue;
-    const [bx, by, bw, bh] = e.bbox;
-    const focus = toCanvas(layout, bx + bw / 2, by + bh / 2);
+    // 4b: prefer the result region (focus_bbox) when the action named one — the
+    // camera holds on the payoff (graph/results), not the input that made it.
+    const framed = e.focus_bbox ?? e.bbox;
+    const [bx, by, bw, bh] = framed;
+    // defense in depth: clamp the focus point to the viewport so a stray
+    // off-frame bbox can never fly the camera off into empty background
+    // (the capture stage now scrolls targets in-view, but never trust a bbox)
+    const cssX = Math.min(Math.max(bx + bw / 2, 0), layout.viewport.width);
+    const cssY = Math.min(Math.max(by + bh / 2, 0), layout.viewport.height);
+    const focus = toCanvas(layout, cssX, cssY);
+    // a small control gets the fixed punch-in; a large result region gets a
+    // FIT zoom so it fills the frame (FOCUS_FILL) instead of being cropped.
+    let z = ZOOM_TARGET;
+    let dwell = ZOOM_DWELL_MS;
+    if (e.focus_bbox) {
+      const fitW = (FOCUS_FILL * layout.viewport.width) / Math.max(bw, 1);
+      const fitH = (FOCUS_FILL * layout.viewport.height) / Math.max(bh, 1);
+      z = Math.max(1, Math.min(ZOOM_TARGET, fitW, fitH));
+      dwell = FOCUS_DWELL_MS;
+    }
     segments.push({
       start: e.t - ZOOM_LEAD_MS,
-      end: e.t + ZOOM_DWELL_MS,
-      z: ZOOM_TARGET,
+      end: e.t + dwell,
+      z,
       fx: focus.x,
       fy: focus.y,
     });
@@ -261,17 +296,25 @@ export function buildRenderPlan(
 
   const targetAt = (t: number): { z: number; fx: number; fy: number } => {
     let active: CameraSegment | undefined;
+    let prevEnded: CameraSegment | undefined; // most recent segment already over
+    let nextStarts = false; // a segment still lies ahead
     for (const s of segments) {
       if (t >= s.start && t <= s.end) active = s; // later-starting segment wins
-      if (s.start > t) break;
+      else if (s.end < t) prevEnded = s;
+      if (s.start > t) { nextStarts = true; break; }
     }
-    return active ?? { z: 1, fx: center.x, fy: center.y };
+    if (active) return active;
+    // strictly between two scenes: glide at a gentle floor on the last focus so
+    // the camera doesn't pump fully out and hard-cut into the next scene.
+    if (prevEnded && nextStarts) return { z: GLIDE_Z, fx: prevEnded.fx, fy: prevEnded.fy };
+    // before the first event / after the last: settle wide.
+    return { z: 1, fx: center.x, fy: center.y };
   };
 
   // ---- spring integration at subframe resolution ----
   // 180° shutter: integrate 2×SUBFRAMES steps per frame but RECORD only the
   // first half — blur spans half the frame interval, halving ghost spacing
-  // (the "onion ring" edge artifact Brayden spotted, 2026-06-11)
+  // (prevents onion-ring edge artifacts)
   const STEPS = SUBFRAMES * 2;
   const dt = frameMs / 1000 / STEPS;
   const state = { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 };

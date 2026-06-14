@@ -1,7 +1,7 @@
 /**
  * The render host page — a dumb, fast executor served on localhost
  * (WebCodecs needs a secure context; the headless SHELL has no WebCodecs at
- * all, so this page runs in full Chromium — see spikes/RESULTS.md).
+ * all, so this page runs in full Chromium).
  *
  * It fetches the precomputed render-plan.json (all the smart math already
  * done in tested TS) and only does mechanical work per output frame:
@@ -10,7 +10,7 @@
  *   source frame → cursor] → VideoFrame → H.264 (annexb) → POST /result
  *
  * Plain JS in a template string: it is served as a real page, so no TS/esbuild
- * helper traps (the tsx __name lesson from the spikes).
+ * helper traps.
  */
 export const HOST_PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>supercut render host</title></head>
@@ -20,8 +20,9 @@ const log = (m) => console.log("[render] " + m);
 
 async function main() {
   const TOKEN = new URLSearchParams(location.search).get("t") || "";
+  const authed = (u) => u + (u.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(TOKEN);
   const fetchOk = async (u) => {
-    const r = await fetch(u);
+    const r = await fetch(authed(u));
     if (!r.ok) throw new Error("fetch " + u + " failed: HTTP " + r.status);
     return r;
   };
@@ -46,17 +47,23 @@ async function main() {
   const ctx = canvas.getContext("2d");
   // motion-blur accumulator: 'lighter' (additive) at 1/8 alpha per subframe is
   // a TRUE average — 8 × src-over at 1/8 alpha only reaches ~66% opacity and
-  // washes the content dark (found in first render QC, 2026-06-11)
+  // washes the content dark.
   const accumCanvas = new OffscreenCanvas(W, H);
   const actx = accumCanvas.getContext("2d");
 
   // --- encoder: H.264 annexb so Node can mux the raw stream with ffmpeg -c copy ---
   const chunks = [];
+  const MAX_ENCODED_BYTES = 1.5e9;
+  let totalEncodedBytes = 0;
   let encodeError = null;
   const encoder = new VideoEncoder({
     output: (chunk) => {
       const buf = new Uint8Array(chunk.byteLength);
       chunk.copyTo(buf);
+      totalEncodedBytes += buf.length;
+      if (totalEncodedBytes > MAX_ENCODED_BYTES) {
+        throw new Error("encoded result exceeds 1.5GB cap");
+      }
       chunks.push(buf);
     },
     error: (e) => { encodeError = e; },
@@ -65,11 +72,15 @@ async function main() {
     codec: "avc1.640028",
     width: W, height: H,
     framerate: fps,
-    bitrate: 10_000_000,
+    // 10 Mbps washed out thin serif strokes (lowercase 's' vanished from caption
+    // text while chunkier glyphs survived). Crisp 1080p60 text needs more head-
+    // room; 40 Mbps holds fine detail without bloating a ≤60s clip.
+    bitrate: 40_000_000,
+    bitrateMode: "constant",
     avc: { format: "annexb" },
   };
-  // probe BEFORE configuring: a clear one-line failure beats a cryptic
-  // mid-render encoder error (adversarial review: no capability probing)
+  // Probe BEFORE configuring: a clear one-line failure beats a cryptic
+  // mid-render encoder error.
   const support = await VideoEncoder.isConfigSupported(encoderConfig);
   if (!support.supported) {
     throw new Error("H.264 (avc1.640028) encoding not supported by this Chromium — cannot render");
@@ -97,8 +108,7 @@ async function main() {
     c.closePath();
   }
 
-  // macOS pointer, redrawn properly (v0's hand-sketched arrow read as cheap —
-  // Brayden: "the cursor is a bit cringe"). Accurate proportions, rounded
+  // macOS pointer with accurate proportions, rounded
   // joins, soft drop shadow, micro-squeeze on click. Tip at (0,0).
   function drawCursor(c, x, y, pulse) {
     c.save();
@@ -164,7 +174,7 @@ async function main() {
 
     // adaptive blur: pass count scales with corner displacement across the
     // shutter so ghost spacing stays ≲1px at any camera speed (the residual
-    // "weird border" rings Brayden still saw on v5 were 8 discrete copies of
+    // Border rings come from 8 discrete copies of
     // fast frames + 8 stacked shadows)
     const [z0, ox0, oy0] = camAt(0);
     const [z1, ox1, oy1] = camAt(1);
@@ -223,7 +233,7 @@ async function main() {
     }
     // window shadow: drawn ONCE per frame at mid-shutter — it is already a
     // 72px blur, so motion-blurring it is invisible, but stacking copies of
-    // it was the big concentric banding (QC round: v5 residual rings)
+    // it creates concentric banding.
     {
       const [z, offX, offY] = camAt(0.5);
       ctx.setTransform(z, 0, 0, z, offX, offY);
@@ -238,7 +248,7 @@ async function main() {
     }
     ctx.drawImage(accumCanvas, 0, 0);
     // vignette pulls the eye to the window — fades out as the camera zooms in
-    // (a fixed vignette grays the corners of bright content at zoom, QC round 3)
+    // (a fixed vignette grays the corners of bright content at zoom)
     const zNow = camera[(f * SUB + (SUB - 1)) * 3];
     const vigA = Math.max(0, Math.min(1, (1.55 - zNow) / 0.55)) * background.vignette;
     if (vigA > 0.01) {
@@ -250,7 +260,7 @@ async function main() {
     }
 
     // 3) cursor: drawn SHARP on the final composite (dark pixels vanish in the
-    //    additive blur layer — found in QC round 2). It still tracks the camera:
+    //    additive blur layer). It still tracks the camera:
     //    position + scale from the last subframe's transform.
     {
       const base = (f * SUB + (SUB - 1)) * 3;
@@ -260,7 +270,7 @@ async function main() {
       ctx.save();
       ctx.translate(z * cur[0] + offX, z * cur[1] + offY);
       // damped scale (sqrt z): full proportional growth read as distracting
-      // (PR #1 review) but a fully fixed cursor detaches from the content —
+      // but a fully fixed cursor detaches from the content —
       // sqrt keeps it cohesive while barely growing (~1.2x at max zoom)
       const cs = Math.sqrt(z);
       ctx.scale(cs, cs);
@@ -272,7 +282,7 @@ async function main() {
     encoder.encode(vf, { keyFrame: f % 120 === 0 });
     vf.close();
     if (encodeError) throw encodeError;
-    // real backpressure: DRAIN the queue, don't nap once and hope (review: P2)
+    // Real backpressure: drain the queue, do not nap once and hope.
     while (encoder.encodeQueueSize > 4) {
       await new Promise((r) => setTimeout(r, 8));
       if (encodeError) throw encodeError;

@@ -17,7 +17,7 @@
  * are canonical (design doc, stage 3). On a local fixture nothing overruns,
  * so the scheduled timeline is byte-identical across runs.
  *
- * Capture path per spike verdict (spikes/RESULTS.md): CDP screencast PNG at
+ * Capture path: CDP screencast PNG at
  * 2x DPR, ack-throttled, frames streamed straight to disk.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
+import { assertSafeNavigationUrl } from "../security/url-policy.js";
 
 const VIEWPORT = { width: 1920, height: 1080 };
 const DPR = 2;
@@ -43,6 +44,8 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
+  /** allow localhost/RFC1918/cloud-metadata navigation; off by default for safety */
+  allowPrivateNetwork?: boolean;
 }
 
 export interface RecordResult {
@@ -65,10 +68,37 @@ function roundToFrame(ms: number): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
+// from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
+// 10s budget blew on a page whose `load` only fired at ~12s, even though the DOM
+// was interactive almost immediately. So: resolve on "domcontentloaded" (DOM parsed
+// + scripts available), then give the full `load` a best-effort grace window but
+// never fail on it. SETTLE_MS after this lets first paints land. Returns the nav
+// response so callers can re-check the final URL against the SSRF policy.
+async function gotoReady(page: Page, url: string) {
+  const response = await page.goto(url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("load", { timeout: 2_000 }).catch(() => {});
+  return response;
+}
+
+async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork: boolean): Promise<void> {
+  for (const scene of recipe.scenes) {
+    await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
+    for (const action of [...scene.entry.prelude, ...scene.actions]) {
+      if (action.kind === "goto" && action.url) {
+        await assertSafeNavigationUrl(action.url, { allowPrivateNetwork });
+      }
+    }
+  }
+}
+
 export async function record(opts: RecordOptions): Promise<RecordResult> {
   const { recipe, outDir } = opts;
   const captureFrames = opts.captureFrames ?? true;
+  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   const rng = makeRng(opts.seed ?? 1);
+
+  await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork);
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
@@ -81,6 +111,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const frameIndex: FrameIndexEntry[] = [];
   let firstFrameStamp = -1;
   let frameCounter = 0;
+  // true while an inter-scene navigation is in flight: the page is blank/white
+  // mid-reload, and capturing those frames makes the video FLASH at every scene
+  // change. Skip them — the renderer holds the last good frame across the gap.
+  let isNavigating = false;
   let writeErrors = 0;
   let lastWrite: Promise<void> = Promise.resolve();
   let signalFirstFrame: () => void = () => {};
@@ -114,6 +148,19 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   async function targetBox(selector: string): Promise<{ x: number; y: number; w: number; h: number }> {
     const loc = page.locator(selector).first();
     await loc.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    // scroll the element INTO the viewport before targeting it. Without this,
+    // boundingBox returns document coordinates for below/above-fold elements
+    // (e.g. y=6549 or y=-3883), the cursor + camera then aim off-frame and the
+    // shot is pure background. Scrolling is also how a single-viewport recording
+    // reveals different parts of a long page. (Found on the first live run.)
+    const pre = await loc.boundingBox();
+    const alreadyInView =
+      !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
+    await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS });
+    // settle ONLY when a scroll actually happened — an unconditional sleep adds
+    // wall-time to every action, tipping in-view actions into the overrun path
+    // and breaking the scheduled-timeline determinism contract on fixtures
+    if (!alreadyInView) await sleep(350);
     const box = await loc.boundingBox();
     if (!box) throw new Error(`selector "${selector}" has no bounding box`);
     return { x: box.x, y: box.y, w: box.width, h: box.height };
@@ -126,7 +173,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     switch (a.kind) {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
-        await page.goto(a.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+        await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
+        const response = await gotoReady(page, a.url);
+        await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
       case "wait":
@@ -177,6 +226,26 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
             textLen: [...text].length, // code points, matching the for...of insertion
           });
+          if (a.submit) {
+            // Many query inputs only reveal their payoff on submit (a form's
+            // submit handler / an Enter keydown). Typing alone leaves the app in
+            // its idle state — the video would show a filled box and no result.
+            await page.keyboard.press("Enter");
+          }
+        }
+        // 4b — frame the result, not the cursor: if this action names a result
+        // region, resolve its box AFTER the action (and a settle for the payoff
+        // to render) and attach it to the event. The renderer prefers it over
+        // the interaction bbox, so the camera holds on the graph/results the
+        // action produced — not the input box. Unresolvable → silently skip.
+        if (a.focus_selector) {
+          await sleep(SETTLE_MS);
+          const fb = await page.locator(a.focus_selector).first().boundingBox().catch(() => null);
+          const ev = events[events.length - 1];
+          if (fb && fb.width > 4 && fb.height > 4 && ev &&
+              (ev.type === "click" || ev.type === "type" || ev.type === "hover")) {
+            ev.focus_bbox = [fb.x, fb.y, fb.width, fb.height];
+          }
         }
         break;
       }
@@ -220,6 +289,11 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       // write in flight) and a failed write can never be silently indexed
       cdp.on("Page.screencastFrame", (ev) => {
         lastWrite = (async () => {
+          // drop blank frames captured mid-navigation (the scene-change flash)
+          if (isNavigating) {
+            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+            return;
+          }
           const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
           if (firstFrameStamp < 0) {
             firstFrameStamp = stampMs;
@@ -241,7 +315,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // navigate to first scene's entry before starting capture, so frame 0 is content
     const firstScene = recipe.scenes[0];
     if (!firstScene) throw new Error("recipe has no scenes");
-    await page.goto(firstScene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
+    await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork });
+    const firstResponse = await gotoReady(page, firstScene.entry.url);
+    await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
     await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
     if (captureFrames) {
@@ -277,9 +353,21 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
       try {
         if (i > 0) {
-          await page.goto(scene.entry.url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "load" });
-          await sleep(SETTLE_MS);
-          // timestamp canon (PR #1 review): when nav finishes EARLY, dwell out
+          await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
+          // suppress capture across the reload so the blank page never lands in
+          // the footage (the scene-change flash); resume once it has painted.
+          // MUST reset in finally: if gotoReady/assert throws, leaving this true
+          // would make the screencast handler drop EVERY subsequent frame and
+          // freeze the rest of the video on the previous scene.
+          isNavigating = true;
+          try {
+            const response = await gotoReady(page, scene.entry.url);
+            await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
+            await sleep(SETTLE_MS);
+          } finally {
+            isNavigating = false;
+          }
+          // Timestamp canon: when nav finishes early, dwell out
           // the unused allowance in WALL time so pixels and schedule stay in
           // lockstep — advancing only the clock made the footage run ~1s ahead
           // of every logged event after a fast local navigation
@@ -294,8 +382,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         }
         for (const a of scene.entry.prelude) await runAction(a);
         for (const a of scene.actions) await runAction(a);
-        // hold the scene's final frame (PR #1 review: was validated + budgeted
-        // by the schema but never executed)
+        // Hold the scene's final frame; it is validated and budgeted by the schema.
         if (scene.hold_ms > 0) {
           await sleep(scene.hold_ms);
           clock += scene.hold_ms;
@@ -337,6 +424,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   };
 
   writeFileSync(join(outDir, "events.json"), JSON.stringify(eventLog, null, 2));
+  // CDP screencast timestamps can arrive/write with tiny ordering jitter across
+  // platforms. The renderer consumes by source timestamp, not filename order,
+  // so persist a monotonic index instead of failing later in render.
+  frameIndex.sort((a, b) => a.t_source - b.t_source);
   writeFileSync(join(outDir, "frames-index.json"), JSON.stringify(frameIndex));
 
   return { eventLog, frameCount: frameIndex.length, failedScenes, aborted, outDir };

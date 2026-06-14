@@ -32,8 +32,7 @@ export function makeRng(seed: number): () => number {
 
 /** Fitts's law movement time in ms, before clamping. */
 export function fittsMs(distancePx: number, targetWidthPx: number): number {
-  // tuned 2026-06-11 after Brayden's v0 verdict: "cursor moving is a little
-  // bit too fast" — slower, deliberate presenter pace
+  // Slower, deliberate presenter pace rather than twitchy cursor motion.
   const a = 220, b = 170;
   return a + b * Math.log2(distancePx / Math.max(targetWidthPx, 8) + 1);
 }

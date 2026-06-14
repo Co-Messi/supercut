@@ -34,10 +34,12 @@ async function main(): Promise<number> {
           recipe: { type: "string" },
           out: { type: "string" },
           seed: { type: "string" },
+          "block-private-network": { type: "boolean" },
+          "allow-private-network": { type: "boolean" }, // deprecated no-op
         },
       });
       if (!values.recipe) {
-        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>]");
+        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]");
         return 1;
       }
       const { readFileSync } = await import("node:fs");
@@ -48,7 +50,12 @@ async function main(): Promise<number> {
       const outDir = values.out ?? "out/take";
       console.log(`recording ${recipe.scenes.length} scene(s) from ${recipe.app_url} → ${outDir}`);
       const t0 = Date.now();
-      const res = await record({ recipe, outDir, seed: values.seed ? Number(values.seed) : 1 });
+      const seed = values.seed === undefined ? 1 : Number(values.seed);
+      if (!Number.isInteger(seed) || seed < 0) {
+        console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
+        return 1;
+      }
+      const res = await record({ recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"] });
       console.log(
         `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames, ` +
           `${res.eventLog.events.length} events` +
@@ -92,38 +99,85 @@ async function main(): Promise<number> {
         options: {
           url: { type: "string" },
           repo: { type: "string" },
+          app: { type: "string" },
           out: { type: "string" },
           bg: { type: "string" },
           seed: { type: "string" },
           model: { type: "string" },
           "no-vision": { type: "boolean" },
+          "env-file": { type: "string" },
+          // private/localhost is ALLOWED BY DEFAULT — filming your own local
+          // dev app is the #1 use case. --block-private-network opts into the
+          // SSRF guard (for untrusted/public targets). --allow-private-network
+          // kept as a deprecated no-op for back-compat.
+          "block-private-network": { type: "boolean" },
+          "allow-private-network": { type: "boolean" },
+          // fail-safe OFF: destructive controls (Delete, Pay, …) are excluded
+          // from the inventory by default so the director can't script a real
+          // harmful action on the live app. Opt in only when you trust the target.
+          "allow-destructive": { type: "boolean" },
+          yes: { type: "boolean" },
         },
       });
       if (!values.url) {
         console.error(
           "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-            "[--bg <stage>] [--seed <n>] [--model <openrouter id>] [--no-vision]",
+            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--allow-destructive] [--no-vision]",
         );
         return 1;
       }
-      const apiKey = process.env.OPENROUTER_API_KEY ?? process.env.SUPERCUT_API_KEY ?? "";
-      if (!apiKey) {
+      const { loadDotEnv, resolveProvider } = await import("../director/config.js");
+      const { generate } = await import("../director/generate.js");
+      const envLoad = loadDotEnv(values["env-file"] ?? ".env");
+      // L2: a missing .env is fine (reason "not found"), but a file that EXISTED
+      // and failed to PARSE is a real error — surface it even without verbose so
+      // a malformed .env isn't silently swallowed (user otherwise sees only a
+      // downstream "no API key").
+      if (envLoad.reason === "not found") {
+        if (process.env.SUPERCUT_VERBOSE) console.error(`env: ${envLoad.path} ${envLoad.reason}`);
+      } else if (envLoad.reason) {
+        console.error(`env: failed to parse ${envLoad.path} — ${envLoad.reason}`);
+      }
+      const seed = values.seed === undefined ? undefined : Number(values.seed);
+      if (seed !== undefined && (!Number.isInteger(seed) || seed < 0)) {
+        console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
+        return 1;
+      }
+      // privacy notice (informational, NOT a gate — blocking the primary
+      // command on --yes was a usability regression). --yes silences it.
+      if (!values.yes) {
         console.error(
-          "generate needs an LLM: set OPENROUTER_API_KEY (one key, many models — https://openrouter.ai/keys).\n" +
+          "note: generate sends crawled DOM text" +
+            (values.repo ? " + repo notes" : "") +
+            " to your LLM provider; in vision mode, screenshots of your app are " +
+            "uploaded too. (record/render need no LLM.)",
+        );
+      }
+      let provider;
+      try {
+        provider = resolveProvider(process.env, { ...(values.model ? { model: values.model } : {}) });
+      } catch (err) {
+        console.error(
+          `${err instanceof Error ? err.message : err}\n` +
             "No key? `supercut record` + `supercut render` work fully without one.",
         );
         return 1;
       }
-      const { OpenRouterClient } = await import("../director/llm.js");
-      const { generate } = await import("../director/generate.js");
+      console.log(`director: ${provider.summary}`);
       const res = await generate({
-        llm: new OpenRouterClient({ apiKey, ...(values.model ? { model: values.model } : {}) }),
+        llm: provider.client,
         url: values.url,
         outDir: values.out ?? "out/generate",
+        // --no-vision forces off; otherwise follow the provider's capability
+        vision: values["no-vision"] ? false : provider.vision,
         ...(values.repo ? { repoPath: values.repo } : {}),
+        ...(values.app ? { appName: values.app } : {}),
         ...(values.bg ? { background: values.bg } : {}),
-        ...(values.seed ? { seed: Number(values.seed) } : {}),
-        ...(values["no-vision"] ? { noVision: true } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        // default ALLOW; only --block-private-network engages the SSRF guard
+        allowPrivateNetwork: !values["block-private-network"],
+        // default OFF; --allow-destructive opts into filming destructive controls
+        allowDestructive: !!values["allow-destructive"],
       });
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;

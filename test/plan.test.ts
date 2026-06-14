@@ -90,6 +90,58 @@ describe("buildRenderPlan", () => {
   });
 });
 
+describe("frame-the-result (4b): camera prefers focus_bbox", () => {
+  // a type into a tiny input at the top-right that PRODUCES a large central
+  // result region — the camera must hold on the result, not the input box.
+  const focusLog = makeLog([
+    { t: 1000, type: "scene", name: "s1", priority: 1 },
+    {
+      t: 1500,
+      type: "type",
+      bbox: [1740, 40, 160, 40], // the input, top-right corner
+      focus_bbox: [360, 240, 1200, 700], // the result region, center → (960, 590)
+      selector: "#q",
+      textLen: 4,
+    },
+    { t: 0, type: "cursor_path", points: [[0, 960, 980], [1500, 1820, 60]] },
+  ]);
+
+  it("frames the result region center, not the interaction bbox", () => {
+    const plan = buildRenderPlan(focusLog, frameIndex);
+    const layout = defaultLayout(viewport);
+    const s = layout.content.w / viewport.width;
+    const i = 95 * SUBFRAMES * 3; // ~event moment (t≈1500ms)
+    const cx = plan.camera[i + 1]!;
+    const cy = plan.camera[i + 2]!;
+    // near the result-region center (960, 590), far from the input center (1820, 60)
+    expect(Math.abs(cx - (layout.content.x + 960 * s))).toBeLessThan(40);
+    expect(Math.abs(cy - (layout.content.y + 590 * s))).toBeLessThan(40);
+    expect(Math.abs(cx - (layout.content.x + 1820 * s))).toBeGreaterThan(200);
+  });
+
+  it("fit-zooms a large region so it fills the frame instead of cropping it", () => {
+    const plan = buildRenderPlan(focusLog, frameIndex);
+    const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
+    const z = zAt(95);
+    // a 1200x700 region in 1920x1080 fits at ~1.36x — gentler than the fixed
+    // 1.48 punch-in (proving the fit math), but still a real zoom (>1).
+    expect(z).toBeGreaterThan(1.05);
+    expect(z).toBeLessThan(1.48);
+  });
+
+  it("holds on the payoff longer than a plain interaction (FOCUS_DWELL)", () => {
+    const longIndex = Array.from({ length: 600 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: i * 16,
+    }));
+    const plan = buildRenderPlan(focusLog, longIndex);
+    const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
+    // still zoomed ~3s after the event (focus dwell 4200ms > plain dwell 1500ms)
+    // event t=1500ms ≈ frame 90; +3000ms ≈ frame 270
+    expect(zAt(270)).toBeGreaterThan(1.05);
+  });
+});
+
 describe("plan input bounds (PR #1 review)", () => {
   it("throws on a corrupt huge timestamp instead of allocating the moon", () => {
     const evil = makeLog([

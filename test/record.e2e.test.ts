@@ -84,8 +84,8 @@ describe("record E2E on fixture app", () => {
     const out2 = mkdtempSync(join(tmpdir(), "supercut-take2-"));
     dirs.push(out1, out2);
 
-    const r1 = await record({ recipe, outDir: out1, seed: 42 });
-    const r2 = await record({ recipe, outDir: out2, seed: 42 });
+    const r1 = await record({ recipe, outDir: out1, seed: 42, allowPrivateNetwork: true });
+    const r2 = await record({ recipe, outDir: out2, seed: 42, allowPrivateNetwork: true });
 
     // no failures on the fixture
     expect(r1.aborted).toBe(false);
@@ -179,7 +179,7 @@ describe("record E2E on fixture app", () => {
     const out = mkdtempSync(join(tmpdir(), "supercut-fail-"));
     dirs.push(out);
     // captureFrames off: this test is about failure policy, not pixels
-    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false });
+    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false, allowPrivateNetwork: true });
 
     expect(res.failedScenes).toContain("broken");
     expect(res.failedScenes).toContain("child-of-broken");
@@ -208,7 +208,7 @@ describe("record E2E on fixture app", () => {
 
     const out = mkdtempSync(join(tmpdir(), "supercut-partial-"));
     dirs.push(out);
-    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false });
+    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false, allowPrivateNetwork: true });
 
     expect(res.aborted).toBe(false); // 1 of 3 ≤ 50% → take survives
     expect(res.failedScenes).toEqual(["bad-mid"]);

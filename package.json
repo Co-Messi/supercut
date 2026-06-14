@@ -16,10 +16,13 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "dev": "tsx src/cli/index.ts"
+    "dev": "tsx src/cli/index.ts",
+    "test:fast": "vitest run test/cursor.test.ts test/director.test.ts test/director-validation.test.ts test/schema.test.ts test/config.test.ts test/url-policy.test.ts test/redaction.test.ts test/plan.test.ts",
+    "test:e2e": "vitest run test/record.e2e.test.ts test/generate.e2e.test.ts"
   },
   "dependencies": {
     "playwright": "^1.53.0",
@@ -29,6 +32,6 @@
     "@types/node": "^20.17.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.8"
   }
 }

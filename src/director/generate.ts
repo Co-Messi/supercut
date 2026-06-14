@@ -22,6 +22,9 @@ import { crawlApp, type PageDigest } from "./inventory.js";
 import type { LlmClient } from "./llm.js";
 import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
+import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { redactForPrompt } from "../security/redaction.js";
+import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
 const MAX_RETAKES = 3;
@@ -30,11 +33,28 @@ export interface GenerateOptions {
   llm: LlmClient;
   url: string;
   outDir: string;
+  /** path to the app's source. When given, supercut reads its routes/page
+   *  components to understand the product and SEEDS the crawl with real routes
+   *  so the director can drive into functional panels, not just the landing. */
   repoPath?: string;
+  /** scope source-reading to one app in a monorepo (path-segment match) */
+  appName?: string;
   background?: string;
   seed?: number;
-  /** skip vision QC (deterministic checks still run) */
+  /** model can see images: drives screenshot capture, analyze images, and the
+   *  vision-QC pass. Off for text-only models (e.g. deepseek-chat) — the
+   *  director then reads the DOM/inventory and QC uses deterministic checks. */
+  vision?: boolean;
+  /** @deprecated use vision:false */
   noVision?: boolean;
+  /** allow localhost/RFC1918 navigation. Defaults to TRUE — filming your own
+   *  local dev app is the primary use case. Pass false to engage the SSRF
+   *  guard (untrusted/public targets). */
+  allowPrivateNetwork?: boolean;
+  /** opt-in: let the director see (and therefore script) destructive controls
+   *  (Delete, Pay, …). OFF by default — fail-safe so a prompt-injected page
+   *  can't steer a real harmful action on the live app. */
+  allowDestructive?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -46,17 +66,39 @@ export interface GenerateResult {
   verdictLog: SceneVerdict[][];
 }
 
-async function preflight(url: string): Promise<void> {
-  // app reachable — error in seconds, never after 10 minutes of work
+async function preflight(url: string, allowPrivateNetwork: boolean): Promise<void> {
+  // app reachable — error in seconds, never after 10 minutes of work.
+  // Follow redirects MANUALLY and validate EVERY hop BEFORE the request: a
+  // default `fetch` follows 3xx automatically, so a public URL that 302s to
+  // http://169.254.169.254/ (cloud metadata) or an RFC1918 host would already
+  // have made the internal request before any post-hoc check. SSRF-guard errors
+  // propagate as-is (a security failure, not "cannot reach"); only network
+  // errors get the friendly reachability message.
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (res.status >= 500) throw new Error(`app at ${url} responded ${res.status}`);
-  } catch (err) {
-    throw new Error(
-      `preflight: cannot reach ${url} — is the app running? (${err instanceof Error ? err.message : err})`,
-    );
+    let current = url;
+    let status = 0;
+    for (let hop = 0; hop < 6; hop++) {
+      await assertSafeNavigationUrl(current, { allowPrivateNetwork });
+      let res: Response;
+      try {
+        res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
+      } catch (err) {
+        throw new Error(
+          `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+        );
+      }
+      status = res.status;
+      const loc = res.headers.get("location");
+      if (status >= 300 && status < 400 && loc) {
+        current = new URL(loc, current).href;
+        continue;
+      }
+      break;
+    }
+    if (status >= 500) throw new Error(`app at ${url} responded ${status}`);
+    if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
   } finally {
     clearTimeout(timer);
   }
@@ -83,16 +125,56 @@ function repoNotes(repoPath: string): string | undefined {
 
 export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   const log = opts.log ?? ((m: string) => console.log(`[generate] ${m}`));
+  const vision = opts.vision !== undefined ? opts.vision : !(opts.noVision ?? false);
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
-  await preflight(opts.url);
+  await preflight(opts.url, opts.allowPrivateNetwork ?? true);
 
-  log("① analyze: crawling app…");
-  const digests: PageDigest[] = await crawlApp(opts.url, { maxPages: 3 });
+  // read the app's source FIRST: derive real routes (seed the crawl so
+  // functional panels enter the inventory) + a product summary for the director
+  let seedUrls: string[] = [];
+  let sourceNotes: string | undefined;
+  if (opts.repoPath) {
+    const routes = extractAppRoutes(opts.repoPath, opts.appName ? { appName: opts.appName } : {});
+    if (routes.length > 0) {
+      const sn = routesToSeedAndNotes(routes, opts.url);
+      seedUrls = sn.seedUrls;
+      sourceNotes = sn.notes;
+      log(`   source: ${routes.length} route(s) found, seeding ${seedUrls.length} into the crawl`);
+    } else {
+      log(`   source: no routes detected at ${opts.repoPath} (crawling links only)`);
+    }
+  }
+
+  log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
+  // crawl the start page + every seeded route + a few link-discovered pages
+  const maxPages = Math.min(3 + seedUrls.length, 12);
+  const digests: PageDigest[] = await crawlApp(opts.url, {
+    maxPages,
+    screenshots: vision,
+    allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
+    seedUrls,
+    allowDestructive: opts.allowDestructive ?? false,
+  });
   log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
+  // LOUD, never silent: if we excluded destructive controls, say which — so a
+  // user whose hero action got filtered knows why and can opt back in.
+  const excluded = [...new Set(digests.flatMap((d) => d.excludedDestructive ?? []))];
+  if (excluded.length) {
+    log(`   note: excluded ${excluded.length} destructive control(s) from filming — ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
+  }
 
-  const notes = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
+  // analyze notes = source routes/summary + README/package.json. Both come
+  // from the app's source (string literals, README, package.json) — exactly
+  // where hardcoded tokens / internal URLs live — so redact them before egress,
+  // matching the redaction DOM text already gets (parity, no asymmetry).
+  const readme = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
+  const notes =
+    [sourceNotes, readme]
+      .filter((s): s is string => Boolean(s))
+      .map(redactForPrompt)
+      .join("\n\n") || undefined;
   const analysis = await analyzeApp(opts.llm, digests, notes);
   log(`   product: ${analysis.product_summary.slice(0, 100)}`);
   for (const m of analysis.money_moments) log(`   moment: ${m.title}`);
@@ -111,7 +193,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     takeDir = join(opts.outDir, `take-${retakes}`);
     rmSync(takeDir, { recursive: true, force: true });
     log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
-    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1 });
+    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
     if (result.aborted) {
       throw new Error(
         `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
@@ -120,7 +202,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
     log("④ qc: deterministic checks…");
     const verdicts = deterministicChecks(result);
-    if (!opts.noVision) {
+    if (vision) {
       log("④ qc: vision pass…");
       verdicts.push(...await visionQc(opts.llm, takeDir, result.eventLog));
     }
@@ -137,7 +219,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       if (retakes >= MAX_RETAKES) {
         log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
       }
-      // PR #2 review: do NOT adopt the patched recipe here. `takeDir` was
+      // Do NOT adopt the patched recipe here. `takeDir` was
       // recorded from the CURRENT `recipe`; writing applied.recipe would make
       // recipe.json/report describe scenes/holds that were never filmed (and
       // for cuts, omit a scene that is still in the rendered video). The
@@ -154,6 +236,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
   log("⑤ render…");
   const outFile = join(opts.outDir, "final.mp4");
+  // NO on-screen text. supercut is a pure product demo — the product is the
+  // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
+  // it; nothing is ever drawn over the app. (The director still writes copy in
+  // the report for reference, but it is deliberately NOT rendered.)
   const renderRes = await renderTake({
     takeDir,
     outFile,
@@ -165,6 +251,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     join(opts.outDir, "director-report.json"),
     JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
   );
+
+  // best-effort cost telemetry (reporting only — no budget cap)
+  const tokens = opts.llm.tokensUsed;
+  log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens` : "unavailable"}`);
 
   return { outFile, recipe, analysis, retakes, verdictLog };
 }

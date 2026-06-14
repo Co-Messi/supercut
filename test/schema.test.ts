@@ -203,3 +203,107 @@ describe("recipe hardening (PR #1 review)", () => {
     expect(() => parseRecipe(r)).toThrow();
   });
 });
+
+describe("schema hardening", () => {
+  it("rejects unknown recipe fields instead of silently dropping hallucinated keys", () => {
+    const raw = makeRecipe();
+    (raw.scenes[0] as unknown as Record<string, unknown>).voiceover = "this field is not supported";
+    expect(() => parseRecipe(raw)).toThrow();
+  });
+
+  it("rejects invalid zoom boxes", () => {
+    const raw = makeRecipe();
+    raw.scenes[0]!.actions[0]!.zoom = [-10, 0, -1, 0];
+    expect(() => parseRecipe(raw)).toThrow(/zoom/i);
+  });
+
+  it("rejects event logs with too many events", () => {
+    const events = Array.from({ length: 5001 }, (_, i) => ({ type: "scene", t: i, name: `s${i}`, priority: 1 }));
+    expect(() => parseEventLog({ version: 0, viewport: { width: 1920, height: 1080, dpr: 2 }, fps: 60, events })).toThrow(
+      /too many events/i,
+    );
+  });
+
+  it("rejects cursor paths with too many points", () => {
+    const points = Array.from({ length: 20001 }, (_, i) => [i, 1, 1]);
+    expect(() =>
+      parseEventLog({
+        version: 0,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [{ type: "cursor_path", t: 0, points }],
+      }),
+    ).toThrow(/too many cursor points/i);
+  });
+
+  it("rejects known events that go backwards in time", () => {
+    expect(() =>
+      parseEventLog({
+        version: 0,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [
+          { type: "scene", t: 100, name: "a", priority: 1 },
+          { type: "click", t: 50, bbox: [0, 0, 10, 10], selector: "#x", point: [5, 5] },
+        ],
+      }),
+    ).toThrow(/monotonic/i);
+  });
+});
+
+describe("submit + frame-the-result schema (4b)", () => {
+  it("accepts a type action with submit and focus_selector", () => {
+    const r = parseRecipe(
+      makeRecipe({
+        scenes: [
+          {
+            name: "search",
+            priority: 1,
+            entry: { url: "http://localhost:3000/", prelude: [] },
+            depends_on: [],
+            actions: [
+              { kind: "type", selector: "#q", text: "NVDA", submit: true, focus_selector: "#graph", duration_ms: 2000 },
+            ],
+            hold_ms: 500,
+          },
+        ],
+      }),
+    );
+    const a = r.scenes[0]!.actions[0]!;
+    expect(a.submit).toBe(true);
+    expect(a.focus_selector).toBe("#graph");
+  });
+
+  it("leaves submit/focus_selector undefined when omitted (backward compatible)", () => {
+    const a = parseRecipe(makeRecipe()).scenes[0]!.actions[0]!;
+    expect(a.submit).toBeUndefined();
+    expect(a.focus_selector).toBeUndefined();
+  });
+
+  it("event log round-trips an action event with focus_bbox", () => {
+    const log = parseEventLog({
+      version: 0,
+      viewport: { width: 1920, height: 1080, dpr: 2 },
+      fps: 60,
+      events: [
+        { t: 1000, type: "type", bbox: [10, 20, 100, 40], focus_bbox: [200, 200, 1000, 700], selector: "#q", textLen: 4 },
+      ],
+    });
+    const ev = log.events[0]!;
+    expect(ev.type).toBe("type");
+    expect((ev as { focus_bbox?: number[] }).focus_bbox).toEqual([200, 200, 1000, 700]);
+  });
+
+  it("rejects a focus_bbox with non-positive width/height", () => {
+    expect(() =>
+      parseEventLog({
+        version: 0,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [
+          { t: 1000, type: "click", bbox: [10, 20, 100, 40], focus_bbox: [0, 0, 0, 100], selector: "#q", point: [60, 40] },
+        ],
+      }),
+    ).toThrow();
+  });
+});

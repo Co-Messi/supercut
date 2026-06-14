@@ -197,24 +197,14 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
   log("⑤ render…");
   const outFile = join(opts.outDir, "final.mp4");
-  // narrative copy → render: scenes are one-per-money-moment in order, so map
-  // each scene name to its beat's benefit caption. This is what turns mute UI
-  // footage into a launch story (hook → benefit beats → close).
-  const captionByScene: Record<string, string> = {};
-  recipe.scenes.forEach((s, i) => {
-    const cap = analysis.money_moments[i]?.caption;
-    if (cap) captionByScene[s.name] = cap;
-  });
+  // NO on-screen text. supercut is a pure product demo — the product is the
+  // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
+  // it; nothing is ever drawn over the app. (The director still writes copy in
+  // the report for reference, but it is deliberately NOT rendered.)
   const renderRes = await renderTake({
     takeDir,
     outFile,
     ...(opts.background ? { background: opts.background } : {}),
-    narrative: {
-      productName: analysis.product_name,
-      headline: analysis.headline,
-      tagline: analysis.tagline,
-      captions: captionByScene,
-    },
   });
   log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB)`);
 

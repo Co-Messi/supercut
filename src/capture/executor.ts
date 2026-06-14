@@ -111,6 +111,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const frameIndex: FrameIndexEntry[] = [];
   let firstFrameStamp = -1;
   let frameCounter = 0;
+  // true while an inter-scene navigation is in flight: the page is blank/white
+  // mid-reload, and capturing those frames makes the video FLASH at every scene
+  // change. Skip them — the renderer holds the last good frame across the gap.
+  let isNavigating = false;
   let writeErrors = 0;
   let lastWrite: Promise<void> = Promise.resolve();
   let signalFirstFrame: () => void = () => {};
@@ -285,6 +289,11 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       // write in flight) and a failed write can never be silently indexed
       cdp.on("Page.screencastFrame", (ev) => {
         lastWrite = (async () => {
+          // drop blank frames captured mid-navigation (the scene-change flash)
+          if (isNavigating) {
+            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+            return;
+          }
           const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
           if (firstFrameStamp < 0) {
             firstFrameStamp = stampMs;
@@ -345,9 +354,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
+          // suppress capture across the reload so the blank page never lands in
+          // the footage (the scene-change flash); resume once it has painted.
+          isNavigating = true;
           const response = await gotoReady(page, scene.entry.url);
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
           await sleep(SETTLE_MS);
+          isNavigating = false;
           // Timestamp canon: when nav finishes early, dwell out
           // the unused allowance in WALL time so pixels and schedule stay in
           // lockstep — advancing only the clock made the footage run ~1s ahead

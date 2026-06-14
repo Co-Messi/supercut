@@ -73,6 +73,36 @@ node dist/cli/index.js doctor   # check Chromium + ffmpeg are installed
 
 > Browser + video need Chromium and ffmpeg: `npx playwright install chromium` and an `ffmpeg` on your PATH.
 
+### 🤖 Or: let your coding agent set it up
+
+Already living in **Claude Code, Codex, opencode, Cursor, or Cline**? Don't run the
+steps by hand — paste the block below in as your task, fill in the two `<...>`
+placeholders, and let the agent clone, build, install Chromium/ffmpeg, and film your app:
+
+```text
+Set up and run supercut (https://github.com/Co-Messi/supercut) to make a launch
+video of my app. Steps:
+
+1. git clone https://github.com/Co-Messi/supercut && cd supercut
+2. npm install && npm run build
+3. npx playwright install chromium
+4. Ensure ffmpeg is on PATH (install it if missing), then run:
+   node dist/cli/index.js doctor
+5. Ask me which LLM provider to use, then create a .env:
+   - DeepSeek:    SUPERCUT_PROVIDER=deepseek    + DEEPSEEK_API_KEY=...
+   - OpenRouter:  SUPERCUT_PROVIDER=openrouter  + OPENROUTER_API_KEY=...
+6. Film it (my app is running locally — fill these in):
+   node dist/cli/index.js generate --url <MY_APP_URL> --repo <MY_APP_SOURCE_DIR> --yes
+7. When it finishes, open out/final.mp4 and show me the result.
+
+No API key handy? Skip the .env and use the no-LLM path instead:
+   node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
+   node dist/cli/index.js render --take out/take --out out/final.mp4
+```
+
+Same block works in any agent — they all take a pasted task. `--repo` is optional but
+makes the director read your routes so it films real panels, not just the landing page.
+
 Help the director understand a deeper, multi-page app by pointing it at the source:
 
 ```bash

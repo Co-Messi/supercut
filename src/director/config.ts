@@ -3,7 +3,7 @@
  * input (a loaded `.env` file or real env vars). OpenAI-compatible: works with
  * OpenRouter, DeepSeek, or a custom endpoint.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { OpenAICompatibleClient, type LlmClient } from "./llm.js";
 
 export type ProviderName = "deepseek" | "openrouter" | "custom";
@@ -127,13 +127,38 @@ export interface DotEnvLoadResult {
   reason?: string;
 }
 
-/** Best-effort .env loader (Node 20.12+ / 22). Does not silently pretend success. */
+/** Best-effort .env loader. Uses native process.loadEnvFile when present
+ *  (Node 20.12+ / 21.7+), else a minimal parser so the package's `node >=20`
+ *  engine range actually works on 20.0–20.11. Never silently pretends success. */
 export function loadDotEnv(path = ".env"): DotEnvLoadResult {
   if (!existsSync(path)) return { path, loaded: false, reason: "not found" };
+  const native = (process as unknown as { loadEnvFile?: (p: string) => void }).loadEnvFile;
   try {
-    (process as unknown as { loadEnvFile: (p: string) => void }).loadEnvFile(path);
+    if (typeof native === "function") {
+      native.call(process, path);
+    } else {
+      parseDotEnvInto(readFileSync(path, "utf8"), process.env);
+    }
     return { path, loaded: true };
   } catch (err) {
     return { path, loaded: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Minimal KEY=VALUE .env parser (fallback for Node < 20.12). Skips blanks and
+ *  `#` comments, strips matching surrounding quotes, never overrides an existing
+ *  real environment variable. */
+function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): void {
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (!(key in env)) env[key] = val;
   }
 }

@@ -220,7 +220,13 @@ export function buildRenderPlan(
   // ---- duration ----
   let lastT = frameIndex[frameIndex.length - 1]!.t_source;
   for (const e of log.events) {
-    const dwell = e.type === "click" || e.type === "hover" || e.type === "type" ? ZOOM_DWELL_MS : 0;
+    // a focused payoff holds for FOCUS_DWELL_MS (the camera segment below uses
+    // it); reserve the SAME dwell here or the render can end mid-hold and cut the
+    // result framing short on a final focused beat.
+    let dwell = 0;
+    if (e.type === "click" || e.type === "hover" || e.type === "type") {
+      dwell = e.focus_bbox ? FOCUS_DWELL_MS : ZOOM_DWELL_MS;
+    }
     lastT = Math.max(lastT, e.t + dwell);
     if (e.type === "cursor_path") {
       const last = e.points[e.points.length - 1];

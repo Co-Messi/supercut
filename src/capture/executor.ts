@@ -356,11 +356,17 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
           // suppress capture across the reload so the blank page never lands in
           // the footage (the scene-change flash); resume once it has painted.
+          // MUST reset in finally: if gotoReady/assert throws, leaving this true
+          // would make the screencast handler drop EVERY subsequent frame and
+          // freeze the rest of the video on the previous scene.
           isNavigating = true;
-          const response = await gotoReady(page, scene.entry.url);
-          await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
-          await sleep(SETTLE_MS);
-          isNavigating = false;
+          try {
+            const response = await gotoReady(page, scene.entry.url);
+            await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
+            await sleep(SETTLE_MS);
+          } finally {
+            isNavigating = false;
+          }
           // Timestamp canon: when nav finishes early, dwell out
           // the unused allowance in WALL time so pixels and schedule stay in
           // lockstep — advancing only the clock made the footage run ~1s ahead

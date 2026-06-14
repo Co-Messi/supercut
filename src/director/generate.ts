@@ -67,18 +67,38 @@ export interface GenerateResult {
 }
 
 async function preflight(url: string, allowPrivateNetwork: boolean): Promise<void> {
-  await assertSafeNavigationUrl(url, { allowPrivateNetwork });
-  // app reachable — error in seconds, never after 10 minutes of work
+  // app reachable — error in seconds, never after 10 minutes of work.
+  // Follow redirects MANUALLY and validate EVERY hop BEFORE the request: a
+  // default `fetch` follows 3xx automatically, so a public URL that 302s to
+  // http://169.254.169.254/ (cloud metadata) or an RFC1918 host would already
+  // have made the internal request before any post-hoc check. SSRF-guard errors
+  // propagate as-is (a security failure, not "cannot reach"); only network
+  // errors get the friendly reachability message.
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    await assertSafeNavigationUrl(url, { allowPrivateNetwork, finalUrl: res.url });
-    if (res.status >= 500) throw new Error(`app at ${url} responded ${res.status}`);
-  } catch (err) {
-    throw new Error(
-      `preflight: cannot reach ${url} — is the app running? (${err instanceof Error ? err.message : err})`,
-    );
+    let current = url;
+    let status = 0;
+    for (let hop = 0; hop < 6; hop++) {
+      await assertSafeNavigationUrl(current, { allowPrivateNetwork });
+      let res: Response;
+      try {
+        res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
+      } catch (err) {
+        throw new Error(
+          `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+        );
+      }
+      status = res.status;
+      const loc = res.headers.get("location");
+      if (status >= 300 && status < 400 && loc) {
+        current = new URL(loc, current).href;
+        continue;
+      }
+      break;
+    }
+    if (status >= 500) throw new Error(`app at ${url} responded ${status}`);
+    if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
   } finally {
     clearTimeout(timer);
   }

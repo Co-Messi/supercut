@@ -55,16 +55,30 @@ node dist/cli/index.js render --take out/take --out out/final.mp4
 node dist/cli/index.js generate --url https://your-app.example --out out/generate --yes
 ```
 
-### Private/local apps
+### Private/local apps & untrusted targets
 
-`generate` blocks localhost, RFC1918, link-local, and cloud metadata addresses
-by default. If you intentionally want to film a local development app, opt in:
+Filming your own local dev app is the primary use case, so `generate` **allows**
+localhost / RFC1918 / link-local by default — no flag needed:
 
 ```bash
-node dist/cli/index.js generate --url http://127.0.0.1:3000 --allow-private-network --yes
+node dist/cli/index.js generate --url http://127.0.0.1:3000 --yes
 ```
 
-Do not use recipes or URLs you do not trust. They drive real browser navigation.
+If you point supercut at an **untrusted or public** URL, add `--block-private-network`
+to engage the SSRF guard (rejects localhost, RFC1918, link-local, and cloud-metadata
+addresses, and validates each redirect hop):
+
+```bash
+node dist/cli/index.js generate --url https://untrusted.example --block-private-network --yes
+```
+
+(`--allow-private-network` is a deprecated no-op kept for back-compat.) Known limit:
+the guard does not defend against DNS-rebinding (resolve-time TOCTOU).
+
+> **supercut drives and may MUTATE the target app.** It performs real clicks and
+> typing on whatever you point it at. Destructive controls (Delete, Pay, Checkout,
+> …) are excluded from filming by default; pass `--allow-destructive` to include
+> them. Do not run it against production data or URLs/recipes you do not trust.
 
 ## LLM provider setup
 

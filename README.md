@@ -13,7 +13,7 @@
   <a href="#license"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/status-pre--release-orange" alt="Status: pre-release" />
+  <a href="#contributing"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome" /></a>
 </p>
 
 <p align="center">

@@ -1,31 +1,32 @@
-# supercut
-
 <p align="center">
-  <img src="assets/readme-hero-10k.png" alt="supercut — institutional-grade launch videos from your real app" width="100%" />
+  <img src="assets/supercut-wordmark-final.png" alt="supercut — real app footage → cinematic launch video" width="640" />
 </p>
 
-> Point it at your app. Get the supercut.
+<p align="center"><em>Point it at your app. Get the supercut.</em></p>
 
-Institutional-grade, max-60-second launch videos generated from your **real**
-product — not an HTML mockup. A scripted browser performs your app on camera;
-a cinematic renderer adds the Screen Studio look: spring zoom-to-cursor,
-motion blur, padded background, and a polished final export.
+Max-60-second, 1080p60 launch videos generated from your **real** product — not
+an HTML mockup. An AI director studies your app, a scripted browser performs it
+on camera, and a cinematic renderer adds the Screen-Studio look: spring
+zoom-to-cursor, motion blur, a padded background, and a polished export.
 
-**Status: pre-release.** The core record/render/generate pipeline exists, but
-it is still being hardened. Use it on trusted apps and trusted recipes.
+**Status: pre-release.** The record / render / generate pipeline works
+end-to-end but is still being hardened. Use it on apps and recipes you trust.
 
-## Why people should star it
+## Why supercut
 
-- Real footage only — no fake UI renders, ever.
-- One-command promise — the end goal is `supercut https://your-app.com`.
-- Open event-log contract — any recorder can feed the renderer.
-- Useful without an API key — `supercut record` and `supercut render` stand alone.
-- Built for launches — ≤60s, 1080p60, padded backgrounds, smooth zooms.
+- **Real footage only** — it drives your actual app; no faked UI renders, ever.
+- **It understands the product** — reads your source + crawls the DOM, then films
+  the money moments (type a query → frame the result), not just the landing page.
+- **One-command promise** — the goal is `supercut https://your-app.com`.
+- **Open event-log contract** — any recorder can feed the renderer.
+- **Useful without an API key** — `record` + `render` stand alone; no LLM needed.
+
+## How it works
 
 ```text
  your app URL ──▶ ① analyze   pick the 2-4 money moments (LLM)
                   ② script    write the filming recipe (LLM, schema-validated)
-                  ③ record    deterministic browser executor performs it
+                  ③ record    a deterministic browser executor performs it
                   ④ qc        deterministic + optional vision checks, bounded retakes
                   ⑤ render    cinematic compositing ──▶ final.mp4 (≤60s target)
 ```

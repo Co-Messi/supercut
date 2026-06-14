@@ -9,7 +9,7 @@
  *      └─ ffmpeg as MUXER ONLY (-c copy) → final .mp4
  */
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { Transform } from "node:stream";
@@ -21,7 +21,6 @@ import { chromium } from "playwright";
 import { parseEventLog } from "../schema/index.js";
 import { buildRenderPlan, type FrameIndexEntry } from "./plan.js";
 import { HOST_PAGE } from "./host-page.js";
-import { buildCaptions, type CaptionCard } from "./captions.js";
 
 const exec = promisify(execFile);
 
@@ -32,16 +31,6 @@ export interface RenderOptions {
   background?: string;
   /** ms; encoding 60s of footage is expected to finish well within 5 min */
   timeoutMs?: number;
-  /** the narrative layer (hook title + per-beat captions + close card). When
-   *  present, the video tells a story instead of being mute UI footage. Copy
-   *  comes from the director; timing is computed here against the take. */
-  narrative?: {
-    productName: string;
-    headline: string;
-    tagline: string;
-    /** scene name → benefit caption (recipe scene names match scene events) */
-    captions: Record<string, string>;
-  };
 }
 
 export interface RenderResult {
@@ -84,25 +73,26 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       : bgSpec,
   });
 
-  // narrative caption track — built here because timing needs the final plan
-  // (total frames) + the recorded scene starts. The video time base IS the
-  // event-`t` ms timeline, so scene.t maps straight to caption time.
-  let captions: CaptionCard[] = [];
-  if (opts.narrative) {
-    const totalMs = (plan.frames / plan.fps) * 1000;
-    const beats = log.events
-      .filter((e): e is Extract<typeof e, { type: "scene" }> => e.type === "scene")
-      .map((e) => ({ caption: opts.narrative!.captions[e.name] ?? "", t: e.t }))
-      .filter((b) => b.caption);
-    captions = buildCaptions({
-      productName: opts.narrative.productName,
-      headline: opts.narrative.headline,
-      tagline: opts.narrative.tagline,
-      beats,
-      totalMs,
-    });
+  const planJson = JSON.stringify(plan);
+
+  // M5: clock-vs-frame skew warning (non-fatal). Event `t` rides a wall-time
+  // accumulator; frame `t_source` rides CDP screencast timestamps. If the latest
+  // event time runs well past the last frame's source time, the camera (driven
+  // by event `t`) may be ahead of the footage (indexed by `t_source`). We do not
+  // change the timing model — just surface the skew so the operator isn't blind.
+  {
+    const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
+    let maxEventT = 0;
+    for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
+    const skew = maxEventT - lastFrameT;
+    if (skew > 500) {
+      console.error(
+        `[render] WARNING: event timeline leads footage by ${Math.round(skew)}ms ` +
+          `(last event t=${Math.round(maxEventT)}ms, last frame t_source=${Math.round(lastFrameT)}ms) — ` +
+          `camera may be slightly ahead of the footage (clock/frame skew).`,
+      );
+    }
   }
-  const planJson = JSON.stringify({ ...plan, captions });
 
   const token = randomBytes(16).toString("hex");
   const rawPath = join(takeDir, "encoded.h264");
@@ -116,7 +106,15 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     const rawUrl = req.url ?? "/";
     const parsedUrl = new URL(rawUrl, "http://127.0.0.1");
     const url = parsedUrl.pathname;
-    const authorized = parsedUrl.searchParams.get("t") === token || req.headers["x-render-token"] === token;
+    // constant-time compare (length-checked: timingSafeEqual throws on a length
+    // mismatch). Negligible value here — 128-bit per-run token, loopback-only —
+    // but trivially correct.
+    const tokenMatches = (got: string | string[] | undefined | null): boolean => {
+      if (typeof got !== "string" || got.length !== token.length) return false;
+      return timingSafeEqual(Buffer.from(got), Buffer.from(token));
+    };
+    const authorized =
+      tokenMatches(parsedUrl.searchParams.get("t")) || tokenMatches(req.headers["x-render-token"]);
     const requireToken = (): boolean => {
       if (authorized) return true;
       res.writeHead(403);

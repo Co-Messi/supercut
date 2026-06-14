@@ -19,7 +19,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test -- --run test/cursor.test.ts test/director.test.ts test/director-validation.test.ts test/schema.test.ts test/config.test.ts test/url-policy.test.ts test/redaction.test.ts test/plan.test.ts
+      # whole unit suite (no explicit file list, so new test files aren't
+      # silently skipped); the e2e files run in the browser-e2e job below,
+      # which has chromium + ffmpeg installed.
+      - run: npx vitest run --exclude '**/*.e2e.test.ts'
       - run: npm audit --audit-level=moderate
 
   browser-e2e:

@@ -16,6 +16,13 @@ describe("navigation URL policy", () => {
     await expect(assertSafeNavigationUrl("http://[fd00::1]/")).rejects.toThrow(/private network/i);
   });
 
+  it("rejects alternate IP encodings of loopback when private nets are blocked", async () => {
+    // decimal int, hex int, and IPv4-mapped IPv6 all canonicalize to 127.0.0.1
+    await expect(assertSafeNavigationUrl("http://2130706433/")).rejects.toThrow(/private network/i);
+    await expect(assertSafeNavigationUrl("http://0x7f000001/")).rejects.toThrow(/private network/i);
+    await expect(assertSafeNavigationUrl("http://[::ffff:127.0.0.1]/")).rejects.toThrow(/private network/i);
+  });
+
   it("rejects redirects to private networks", async () => {
     await expect(
       assertSafeNavigationUrl("https://example.com/start", {

@@ -112,20 +112,32 @@ async function main(): Promise<number> {
           // kept as a deprecated no-op for back-compat.
           "block-private-network": { type: "boolean" },
           "allow-private-network": { type: "boolean" },
+          // fail-safe OFF: destructive controls (Delete, Pay, …) are excluded
+          // from the inventory by default so the director can't script a real
+          // harmful action on the live app. Opt in only when you trust the target.
+          "allow-destructive": { type: "boolean" },
           yes: { type: "boolean" },
         },
       });
       if (!values.url) {
         console.error(
           "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--no-vision]",
+            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--allow-destructive] [--no-vision]",
         );
         return 1;
       }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
-      if (process.env.SUPERCUT_VERBOSE && envLoad.reason) console.error(`env: ${envLoad.path} ${envLoad.reason}`);
+      // L2: a missing .env is fine (reason "not found"), but a file that EXISTED
+      // and failed to PARSE is a real error — surface it even without verbose so
+      // a malformed .env isn't silently swallowed (user otherwise sees only a
+      // downstream "no API key").
+      if (envLoad.reason === "not found") {
+        if (process.env.SUPERCUT_VERBOSE) console.error(`env: ${envLoad.path} ${envLoad.reason}`);
+      } else if (envLoad.reason) {
+        console.error(`env: failed to parse ${envLoad.path} — ${envLoad.reason}`);
+      }
       const seed = values.seed === undefined ? undefined : Number(values.seed);
       if (seed !== undefined && (!Number.isInteger(seed) || seed < 0)) {
         console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
@@ -137,7 +149,8 @@ async function main(): Promise<number> {
         console.error(
           "note: generate sends crawled DOM text" +
             (values.repo ? " + repo notes" : "") +
-            " to your LLM provider. (record/render need no LLM.)",
+            " to your LLM provider; in vision mode, screenshots of your app are " +
+            "uploaded too. (record/render need no LLM.)",
         );
       }
       let provider;
@@ -163,6 +176,8 @@ async function main(): Promise<number> {
         ...(seed !== undefined ? { seed } : {}),
         // default ALLOW; only --block-private-network engages the SSRF guard
         allowPrivateNetwork: !values["block-private-network"],
+        // default OFF; --allow-destructive opts into filming destructive controls
+        allowDestructive: !!values["allow-destructive"],
       });
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;

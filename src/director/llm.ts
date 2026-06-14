@@ -22,6 +22,10 @@ export interface ChatOptions {
 export interface LlmClient {
   chat(opts: ChatOptions): Promise<string>;
   readonly label: string;
+  /** running total of tokens billed across this client's calls, when the
+   *  provider reports usage. Optional: stubs and providers that omit usage
+   *  leave it undefined (callers report "usage: unavailable"). */
+  readonly tokensUsed?: number | undefined;
 }
 
 export interface OpenAICompatibleConfig {
@@ -39,6 +43,13 @@ export class OpenAICompatibleClient implements LlmClient {
   private readonly baseUrl: string;
   private readonly vision: boolean;
   readonly label: string;
+  /** best-effort token accounting: sum of provider-reported usage across calls.
+   *  Stays undefined until the FIRST response that carries a usage block, so a
+   *  provider that never reports usage leaves it undefined (→ "unavailable"). */
+  private _tokensUsed: number | undefined = undefined;
+  get tokensUsed(): number | undefined {
+    return this._tokensUsed;
+  }
 
   constructor(cfg: OpenAICompatibleConfig) {
     if (!cfg.apiKey) throw new Error(`${cfg.providerLabel} API key is empty`);
@@ -92,7 +103,16 @@ export class OpenAICompatibleClient implements LlmClient {
       if (res.ok) {
         const data = (await res.json()) as {
           choices?: { message?: { content?: string; reasoning_content?: string } }[];
+          usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
         };
+        // best-effort cost telemetry: prefer total_tokens, else sum prompt+completion
+        const u = data.usage;
+        const billed =
+          u?.total_tokens ??
+          (u?.prompt_tokens !== undefined || u?.completion_tokens !== undefined
+            ? (u?.prompt_tokens ?? 0) + (u?.completion_tokens ?? 0)
+            : undefined);
+        if (billed !== undefined) this._tokensUsed = (this._tokensUsed ?? 0) + billed;
         const msg = data.choices?.[0]?.message;
         const text = msg?.content || msg?.reasoning_content;
         if (!text) throw new Error(`LLM returned an empty response (${this.label})`);

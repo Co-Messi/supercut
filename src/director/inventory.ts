@@ -38,11 +38,34 @@ export interface PageDigest {
   inventory: InventoryItem[];
   /** framable result/content regions (focus_selector candidates) */
   regions: RegionItem[];
+  /** labels of destructive controls excluded from the inventory (fail-safe) —
+   *  surfaced so the exclusion is LOUD, never silent. Empty/absent when none. */
+  excludedDestructive?: string[];
   /** viewport screenshot for the analyze stage's vision pass */
   screenshotB64?: string;
 }
 
 const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
+
+/**
+ * Fail-safe-by-default destructive-action lexicon. The director scripts clicks
+ * and typing on the LIVE app, so a prompt-injected page (or just an unlucky
+ * "payoff" beat) could fire a real, irreversible action. We exclude any element
+ * whose visible text / aria-label / value matches this from the inventory
+ * entirely — so the LLM never even SEES a destructive control and structurally
+ * cannot reference one (the script stage may only use inventory selectors).
+ * Opt back in with `allowDestructive`. Word-boundary anchored so legitimate
+ * non-destructive actions (Sign in, Submit, Add, Save, Open, View, Create,
+ * Next, Continue) do NOT match.
+ */
+// Deliberately NARROW: only genuinely irreversible / data-destroying /
+// money-committing verbs. We do NOT match common, reversible, or hero-action
+// words (send, remove, reset, disable, archive, unsubscribe, transfer) — those
+// are exactly the core interactions a launch video exists to show, and silently
+// dropping a chat app's "Send" or a list's "Remove" would gut the demo. The set
+// here is "things you'd almost never want filmed and that can't be undone."
+export const DESTRUCTIVE_RE =
+  /\b(delete|deactivate|wipe|erase|destroy|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke)\b/i;
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -99,7 +122,7 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
   return out.sort((a, b) => b.bbox.w * b.bbox.h - a.bbox.w * a.bbox.h).slice(0, 6);
 }
 
-async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDigest> {
+async function digestPage(page: Page, withScreenshot: boolean, allowDestructive = false): Promise<PageDigest> {
   const title = await page.title();
 
   const headings: string[] = [];
@@ -111,6 +134,7 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
   }
 
   const inventory: InventoryItem[] = [];
+  const excludedDestructive: string[] = [];
   const seen = new Set<string>();
   const els = page.locator(
     "a[href], button, input, textarea, select, [role=button], [role=tab], " +
@@ -131,12 +155,21 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
     const id = await el.getAttribute("id").catch(() => null);
     const aria = await el.getAttribute("aria-label").catch(() => null);
     const placeholder = await el.getAttribute("placeholder").catch(() => null);
+    const value = await el.getAttribute("value").catch(() => null);
     const href = (await el.getAttribute("href").catch(() => null)) ?? undefined;
     const text = (
       (await el.innerText().catch(() => "")) ||
       (await el.textContent().catch(() => "")) ||
       placeholder || aria || ""
     ).trim().replace(/\s+/g, " ").slice(0, 80);
+
+    // fail-safe: never put a destructive/irreversible control into the inventory
+    // (so the director can't script a click/type on it) unless explicitly opted
+    // in. Checks visible text, aria-label, and value (input buttons).
+    if (!allowDestructive && [text, aria, value].some((s) => s && DESTRUCTIVE_RE.test(s))) {
+      if (text) excludedDestructive.push(text);
+      continue;
+    }
 
     let selector: string;
     if (id) selector = `#${id}`;
@@ -187,7 +220,11 @@ async function digestPage(page: Page, withScreenshot: boolean): Promise<PageDige
     if (shot) screenshotB64 = shot.toString("base64");
   }
 
-  return { url: page.url(), title, headings, inventory, regions, ...(screenshotB64 ? { screenshotB64 } : {}) };
+  return {
+    url: page.url(), title, headings, inventory, regions,
+    ...(excludedDestructive.length ? { excludedDestructive } : {}),
+    ...(screenshotB64 ? { screenshotB64 } : {}),
+  };
 }
 
 /**
@@ -203,10 +240,15 @@ export async function crawlApp(
     /** source-derived routes to crawl FIRST (so real panels enter the
      *  inventory even when no link points to them) — see sourceRoutes.ts */
     seedUrls?: string[];
+    /** opt-in: include destructive/irreversible controls (Delete, Pay, …) in
+     *  the inventory. OFF by default — fail-safe so the director can't script a
+     *  real harmful action on the live app. */
+    allowDestructive?: boolean;
   } = {},
 ): Promise<PageDigest[]> {
   const maxPages = opts.maxPages ?? 3;
   const screenshots = opts.screenshots ?? true;
+  const allowDestructive = opts.allowDestructive ?? false;
   const origin = new URL(appUrl).origin;
   const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   await assertSafeNavigationUrl(appUrl, { allowPrivateNetwork });
@@ -256,7 +298,7 @@ export async function crawlApp(
         if (digests.length === 0 && queue.length === 0) throw err; // start page must load
         continue;
       }
-      const digest = await digestPage(page, screenshots);
+      const digest = await digestPage(page, screenshots, allowDestructive);
       digests.push(digest);
 
       for (const item of digest.inventory) {

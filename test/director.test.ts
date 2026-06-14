@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
+import { DESTRUCTIVE_RE } from "../src/director/inventory.js";
 import { writeRecipe } from "../src/director/script.js";
 import { applyVerdicts, deterministicChecks } from "../src/director/qc.js";
 import type { AppAnalysis } from "../src/director/analyze.js";
@@ -170,6 +171,73 @@ describe("script stage — the anti-hallucination gates", () => {
     expect(attempts).toBe(2);
     const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
     expect(retryText).toContain("not on its entry page");
+  });
+});
+
+describe("destructive-action guard (H1)", () => {
+  it("matches destructive / irreversible / financial controls", () => {
+    for (const label of [
+      "Delete account",
+      "Delete",
+      "Deactivate",
+      "Wipe data",
+      "Erase everything",
+      "Cancel subscription",
+      "Cancel account",
+      "Pay now",
+      "Purchase",
+      "Buy now",
+      "Checkout",
+      "Place order",
+      "Withdraw",
+      "Confirm payment",
+      "Revoke access",
+    ]) {
+      expect(DESTRUCTIVE_RE.test(label), `expected "${label}" to match`).toBe(true);
+    }
+  });
+
+  it("does NOT match legitimate non-destructive actions", () => {
+    for (const label of [
+      "Sign in",
+      "Submit a search",
+      "Submit",
+      "Add",
+      "Add to cart",
+      "Save",
+      "Save changes",
+      "Open",
+      "View",
+      "View details",
+      "Create",
+      "Create project",
+      "Next",
+      "Continue",
+      "Get started free",
+      // hero/reversible actions that must stay filmable (narrowed lexicon):
+      "Send",
+      "Send message",
+      "Remove",
+      "Remove item",
+      "Reset",
+      "Reset filters",
+      "Archive",
+      "Disable",
+      "Unsubscribe",
+      "Transfer to list",
+    ]) {
+      expect(DESTRUCTIVE_RE.test(label), `expected "${label}" NOT to match`).toBe(false);
+    }
+  });
+
+  it("models the inventory exclude/allow toggle on a 'Delete account' element", () => {
+    // mirrors inventory.ts: an element is excluded when it matches and
+    // allowDestructive is false; included when allowDestructive is true.
+    const accepted = (text: string, allowDestructive: boolean) =>
+      allowDestructive || !DESTRUCTIVE_RE.test(text);
+    expect(accepted("Delete account", false)).toBe(false); // excluded by default
+    expect(accepted("Delete account", true)).toBe(true); // included on opt-in
+    expect(accepted("Sign in", false)).toBe(true); // benign always kept
   });
 });
 

@@ -45,6 +45,10 @@ function walk(dir: string, out: string[] = [], depth = 0): string[] {
     return out;
   }
   for (const e of entries) {
+    // skip symlinks entirely (never recurse into or read them): a `--repo`
+    // symlink to ~/.ssh, /etc, etc. would otherwise be walked and its file
+    // contents shipped into the LLM prompt via extractSummary.
+    if (e.isSymbolicLink()) continue;
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
       walk(join(dir, e.name), out, depth + 1);

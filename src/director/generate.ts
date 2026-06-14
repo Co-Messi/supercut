@@ -23,6 +23,7 @@ import type { LlmClient } from "./llm.js";
 import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
 import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { redactForPrompt } from "../security/redaction.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
@@ -50,6 +51,10 @@ export interface GenerateOptions {
    *  local dev app is the primary use case. Pass false to engage the SSRF
    *  guard (untrusted/public targets). */
   allowPrivateNetwork?: boolean;
+  /** opt-in: let the director see (and therefore script) destructive controls
+   *  (Delete, Pay, …). OFF by default — fail-safe so a prompt-injected page
+   *  can't steer a real harmful action on the live app. */
+  allowDestructive?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -130,12 +135,26 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     screenshots: vision,
     allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
     seedUrls,
+    allowDestructive: opts.allowDestructive ?? false,
   });
   log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
+  // LOUD, never silent: if we excluded destructive controls, say which — so a
+  // user whose hero action got filtered knows why and can opt back in.
+  const excluded = [...new Set(digests.flatMap((d) => d.excludedDestructive ?? []))];
+  if (excluded.length) {
+    log(`   note: excluded ${excluded.length} destructive control(s) from filming — ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
+  }
 
-  // analyze notes = source routes/summary + README/package.json
+  // analyze notes = source routes/summary + README/package.json. Both come
+  // from the app's source (string literals, README, package.json) — exactly
+  // where hardcoded tokens / internal URLs live — so redact them before egress,
+  // matching the redaction DOM text already gets (parity, no asymmetry).
   const readme = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
-  const notes = [sourceNotes, readme].filter(Boolean).join("\n\n") || undefined;
+  const notes =
+    [sourceNotes, readme]
+      .filter((s): s is string => Boolean(s))
+      .map(redactForPrompt)
+      .join("\n\n") || undefined;
   const analysis = await analyzeApp(opts.llm, digests, notes);
   log(`   product: ${analysis.product_summary.slice(0, 100)}`);
   for (const m of analysis.money_moments) log(`   moment: ${m.title}`);
@@ -212,6 +231,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     join(opts.outDir, "director-report.json"),
     JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
   );
+
+  // best-effort cost telemetry (reporting only — no budget cap)
+  const tokens = opts.llm.tokensUsed;
+  log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens` : "unavailable"}`);
 
   return { outFile, recipe, analysis, retakes, verdictLog };
 }

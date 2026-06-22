@@ -29,7 +29,7 @@ beforeAll(() => {
   writeFileSync(join(other, "page.tsx"), `<h1>Admin</h1>`);
   // A5: test/spec/fixture/story pages live under the app tree but must NOT be
   // ingested as real routes. Plant a page in each excluded dir.
-  for (const skip of ["e2e", "fixtures", "stories", "cypress", "__mocks__"]) {
+  for (const skip of ["e2e", "fixtures", "stories", "cypress", "__mocks__", "spec"]) {
     mkdirSync(join(web, skip, "secret"), { recursive: true });
     writeFileSync(join(web, skip, "secret", "page.tsx"), `<h1>FIXTURE-${skip}</h1>`);
   }
@@ -51,7 +51,7 @@ describe("extractAppRoutes", () => {
   it("skips test/spec/fixture/story dirs so sample pages aren't ingested (A5)", () => {
     const routes = extractAppRoutes(join(root, "apps", "web"));
     // no route should originate from an excluded dir
-    expect(routes.some((r) => /[/\\](e2e|fixtures|stories|cypress|__mocks__)[/\\]/.test(r.file))).toBe(false);
+    expect(routes.some((r) => /[/\\](e2e|fixtures|stories|cypress|__mocks__|spec)[/\\]/.test(r.file))).toBe(false);
     // and the planted /secret route from those dirs never surfaces
     expect(routes.some((r) => r.route.includes("secret"))).toBe(false);
   });

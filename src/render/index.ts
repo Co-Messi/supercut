@@ -231,7 +231,9 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         })(),
       ]);
     } finally {
-      await browser.close();
+      // guard close: if browser.close() throws, server.close() must still run,
+      // else the loopback render server leaks the port until process exit.
+      await browser.close().catch(() => {});
       await new Promise<void>((r) => server.close(() => r()));
     }
 

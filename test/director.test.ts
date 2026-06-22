@@ -274,6 +274,7 @@ describe("destructive-action guard (H1)", () => {
       "Publish",
       "Publish to production",
       "Transfer funds",
+      "Transfer ownership",
       "Regenerate API key",
       "Suspend account",
       "Terminate instance",
@@ -312,6 +313,10 @@ describe("destructive-action guard (H1)", () => {
       "Archive",
       "Disable",
       "Unsubscribe",
+      // "transfer" is narrowed to money/ownership phrases — benign transfers stay filmable:
+      "Transfer to list",
+      "Transfer ticket",
+      "Transfer call",
     ]) {
       expect(DESTRUCTIVE_RE.test(label), `expected "${label}" NOT to match`).toBe(false);
     }

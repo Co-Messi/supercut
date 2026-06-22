@@ -26,6 +26,10 @@ async function main(): Promise<number> {
 
   switch (command) {
     case "doctor":
+      if (rest.includes("--help") || rest.includes("-h")) {
+        console.log("usage: supercut doctor   (checks ffmpeg + Chromium/WebCodecs H.264 — takes no flags)");
+        return 0;
+      }
       return doctor();
     case "record": {
       const recordUsage =

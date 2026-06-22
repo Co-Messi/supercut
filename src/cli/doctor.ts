@@ -73,19 +73,20 @@ const checks: Check[] = [
     // closed, hiding a missing/unsupported codec until 10 min into a run).
     name: "Chromium + WebCodecs H.264",
     run: async () => {
-      const { chromium } = await import("playwright").catch(() => {
-        throw new Error("playwright not installed — run `npm install`");
-      });
-      const { createServer } = await import("node:http");
-      // VideoEncoder is SecureContext-gated, so it's undefined on the opaque
-      // about:blank origin — evaluating there would falsely FAIL. Mirror what
-      // render does (render/index.ts) and probe over a real 127.0.0.1 origin,
-      // which Chromium treats as a secure context (see render/host-page.ts).
-      const server = createServer((_req, res) => res.end("<!doctype html>"));
-      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-      const { port } = server.address() as { port: number };
+      let server: import("node:http").Server | undefined;
       let browser: import("playwright").Browser | undefined;
       try {
+        // import INSIDE the try: a missing/broken playwright must surface as a
+        // FAILED check (doctor's whole job) — not throw past doctor() to the
+        // top-level handler, which is exactly the dep-diagnosis path doctor exists for.
+        const { chromium } = await import("playwright");
+        const { createServer } = await import("node:http");
+        // VideoEncoder is SecureContext-gated, so it's undefined on the opaque
+        // about:blank origin — evaluating there would falsely FAIL. Probe over a
+        // real 127.0.0.1 origin, which Chromium treats as a secure context.
+        server = createServer((_req, res) => res.end("<!doctype html>"));
+        await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+        const { port } = server.address() as { port: number };
         browser = await chromium.launch({ channel: "chromium", timeout: 20_000 });
         const page = await browser.newPage();
         await page.goto(`http://127.0.0.1:${port}/`);
@@ -109,9 +110,9 @@ const checks: Check[] = [
           detail: `FAIL — ${err instanceof Error ? err.message : String(err)} (run \`npx playwright install chromium\`)`,
         };
       } finally {
-        // always release the browser + server, even if launch/eval threw mid-way
+        // always release the browser + server, even if import/launch threw mid-way
         await browser?.close().catch(() => {});
-        await new Promise<void>((r) => server.close(() => r()));
+        if (server) await new Promise<void>((r) => server!.close(() => r()));
       }
     },
   },

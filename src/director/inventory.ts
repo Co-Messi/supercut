@@ -71,7 +71,7 @@ const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
 // you intend to film. Criterion: add a verb ONLY if firing it by accident on a
 // live app is genuinely costly AND it is rarely the intended payoff beat.
 export const DESTRUCTIVE_RE =
-  /\b(delete|deactivate|wipe|erase|destroy|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer|regenerate|suspend|terminate|downgrade)\b/i;
+  /\b(delete|deactivate|wipe|erase|destroy|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes

@@ -115,6 +115,18 @@ export async function visionQc(
   const parts: ChatPart[] = [];
   const sceneNames: string[] = [];
 
+  // the take's last CAPTURED frame time. Capture keeps emitting frames through
+  // hold_ms without emitting any event, so the final scene's hold must be
+  // sampled against the last frame, not the last event (else a late blank/error
+  // during a closing hold is missed). Fall back to event time if no index.
+  let lastFrameT = 0;
+  try {
+    const idx = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8")) as { t_source: number }[];
+    lastFrameT = idx.reduce((m, e) => Math.max(m, e.t_source), 0);
+  } catch {
+    /* no frame index — final scene falls back to last event time below */
+  }
+
   for (let i = 0; i < scenes.length; i++) {
     const s = scenes[i]!;
     if (s.type !== "scene") continue;
@@ -131,7 +143,9 @@ export async function visionQc(
     // the last frame we can attribute to this scene; for the final scene `end`
     // is Infinity, so fall back to the take's last captured frame time.
     const lastEventT = log.events.reduce((m, e) => Math.max(m, e.t), s.t);
-    const sceneEndT = end === Infinity ? lastEventT : end;
+    // final scene: end at the last captured FRAME (covers the hold), not the
+    // last event — see lastFrameT note above.
+    const sceneEndT = end === Infinity ? Math.max(lastFrameT, lastEventT) : end;
     const holdT = Math.max(keyT, sceneEndT - 200); // just inside the final hold
     const midT = (keyT + holdT) / 2;
     // de-dupe near-identical sample times (short scenes collapse to one frame)

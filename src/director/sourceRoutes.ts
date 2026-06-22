@@ -34,7 +34,7 @@ const SKIP_DIRS = new Set([
   "coverage", ".vercel", ".cache", "__tests__", "test", "tests",
   // A5: test/spec/fixture/story dirs hold fake pages and sample data — never
   // real product routes — so keep them out of the crawl seeds and LLM prompt.
-  "e2e", "__mocks__", "stories", ".storybook", "cypress", "playwright", "fixtures",
+  "e2e", "__mocks__", "stories", ".storybook", "cypress", "playwright", "fixtures", "spec", "specs",
 ]);
 const PAGE_FILE = /^(page|index)\.(tsx|jsx|ts|js)$/;
 const PAGES_FILE = /\.(tsx|jsx)$/;

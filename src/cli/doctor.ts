@@ -65,16 +65,53 @@ const checks: Check[] = [
   {
     // render needs the FULL chromium channel (the headless shell has no
     // WebCodecs) — a doctor that only checks the shell passes while render
-    // cannot launch
-    name: "full chromium (render)",
+    // cannot launch.
+    //
+    // A4: launching is necessary but NOT sufficient — render encodes via the
+    // in-page WebCodecs VideoEncoder, so actually probe H.264 support here
+    // rather than punting it to render time (the old check only launched and
+    // closed, hiding a missing/unsupported codec until 10 min into a run).
+    name: "Chromium + WebCodecs H.264",
     run: async () => {
+      const { chromium } = await import("playwright").catch(() => {
+        throw new Error("playwright not installed — run `npm install`");
+      });
+      const { createServer } = await import("node:http");
+      // VideoEncoder is SecureContext-gated, so it's undefined on the opaque
+      // about:blank origin — evaluating there would falsely FAIL. Mirror what
+      // render does (render/index.ts) and probe over a real 127.0.0.1 origin,
+      // which Chromium treats as a secure context (see render/host-page.ts).
+      const server = createServer((_req, res) => res.end("<!doctype html>"));
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      const { port } = server.address() as { port: number };
+      let browser: import("playwright").Browser | undefined;
       try {
-        const { chromium } = await import("playwright");
-        const browser = await chromium.launch({ headless: true, channel: "chromium", timeout: 20_000 });
-        await browser.close();
-        return { ok: true, detail: "launches (WebCodecs verified at render time)" };
-      } catch {
-        return { ok: false, detail: "cannot launch — run `npx playwright install chromium` (installs both)" };
+        browser = await chromium.launch({ channel: "chromium", timeout: 20_000 });
+        const page = await browser.newPage();
+        await page.goto(`http://127.0.0.1:${port}/`);
+        const supported = await page.evaluate(async () => {
+          if (typeof VideoEncoder === "undefined") return false;
+          const r = await VideoEncoder.isConfigSupported({
+            codec: "avc1.640028",
+            width: 1920,
+            height: 1080,
+            bitrate: 8_000_000,
+            framerate: 60,
+          });
+          return !!r.supported;
+        });
+        return supported
+          ? { ok: true, detail: "ok" }
+          : { ok: false, detail: "FAIL — Chromium launched but WebCodecs H.264 (avc1.640028) is unsupported" };
+      } catch (err) {
+        return {
+          ok: false,
+          detail: `FAIL — ${err instanceof Error ? err.message : String(err)} (run \`npx playwright install chromium\`)`,
+        };
+      } finally {
+        // always release the browser + server, even if launch/eval threw mid-way
+        await browser?.close().catch(() => {});
+        await new Promise<void>((r) => server.close(() => r()));
       }
     },
   },

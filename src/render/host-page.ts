@@ -74,8 +74,11 @@ async function main() {
     framerate: fps,
     // 10 Mbps washed out thin serif strokes (lowercase 's' vanished from caption
     // text while chunkier glyphs survived). Crisp 1080p60 text needs more head-
-    // room; 40 Mbps holds fine detail without bloating a ≤60s clip.
-    bitrate: 40_000_000,
+    // room.
+    // B3 (review): lowered 40 Mbps → 16 Mbps to reduce Chromium memory pressure
+    // (the encoder buffers chunks in-page; 40 Mbps risked OOM on long takes).
+    // 16 Mbps is ample for 1080p60 screen content and still holds fine detail.
+    bitrate: 16_000_000,
     bitrateMode: "constant",
     avc: { format: "annexb" },
   };

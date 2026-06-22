@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MAX_BUDGET_MS,
   parseEventLog,
@@ -52,7 +52,7 @@ describe("event log schema", () => {
     expect(log.viewport.dpr).toBe(2);
   });
 
-  it("silently drops unknown event types (forward compatibility)", () => {
+  it("drops unknown event types but warns once (A3 — forward compat, not silent)", () => {
     const withUnknown = {
       ...validEventLog,
       events: [
@@ -60,8 +60,44 @@ describe("event log schema", () => {
         { t: 5000, type: "pinch_zoom", fingers: 2 },
       ],
     };
-    const log = parseEventLog(withUnknown);
-    expect(log.events).toHaveLength(2);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const log = parseEventLog(withUnknown);
+      expect(log.events).toHaveLength(2); // known events only
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = warn.mock.calls[0]![0] as string;
+      expect(msg).toContain("pinch_zoom");
+      expect(msg).toContain("dropped 1 event");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("dedupes dropped type names and counts the total (A3)", () => {
+    const withUnknown = {
+      ...validEventLog,
+      events: [
+        ...validEventLog.events,
+        { t: 5000, type: "pinch_zoom", fingers: 2 },
+        { t: 6000, type: "pinch_zoom", fingers: 3 }, // same unknown type
+        { t: 7000, type: "long_press" },
+      ],
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const log = parseEventLog(withUnknown);
+      expect(log.events).toHaveLength(2);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = warn.mock.calls[0]![0] as string;
+      // distinct type names, deduped, but count reflects all 3 dropped events
+      expect(msg).toContain("dropped 3 event");
+      expect(msg).toContain("pinch_zoom");
+      expect(msg).toContain("long_press");
+      // "pinch_zoom" listed once, not twice
+      expect(msg.match(/pinch_zoom/g)!).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("fails loudly on a malformed KNOWN event", () => {

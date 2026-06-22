@@ -130,10 +130,24 @@ export function parseEventLog(raw: unknown): EventLog {
     .passthrough()
     .parse(raw);
 
-  const filtered = {
-    ...envelope,
-    events: envelope.events.filter((e) => KNOWN_EVENT_TYPES.has(e.type)),
-  };
+  // A3: keep the forward-compat drop, but don't do it silently — a typo'd or
+  // wrong-version event type would otherwise vanish with no signal. Collect the
+  // distinct dropped type names and warn ONCE with the total count.
+  const droppedTypes = new Set<string>();
+  let droppedCount = 0;
+  const keptEvents = envelope.events.filter((e) => {
+    if (KNOWN_EVENT_TYPES.has(e.type)) return true;
+    droppedTypes.add(e.type);
+    droppedCount++;
+    return false;
+  });
+  if (droppedCount > 0) {
+    console.warn(
+      `[event-log] dropped ${droppedCount} event(s) of unknown type(s): ${[...droppedTypes].join(", ")} — the renderer ignores these`,
+    );
+  }
+
+  const filtered = { ...envelope, events: keptEvents };
 
   const parsed = eventLog.parse(filtered);
   enforceMonotonic(parsed.events);

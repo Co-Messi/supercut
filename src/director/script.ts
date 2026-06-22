@@ -62,8 +62,13 @@ export async function writeRecipe(
   // inventory of ITS entry.url page. (v1 caveat: a mid-scene `goto` to another
   // page is not modeled — selectors validate against entry.url only.)
   const pageUrls = new Set<string>(digests.map((d) => d.url));
-  const byPage = new Map<string, Set<string>>();
-  for (const d of digests) byPage.set(d.url, new Set(d.inventory.map((i) => i.selector)));
+  // selector → isHidden, per page. The hidden flag lets us VALIDATE the
+  // reveal-order rule (B5 review) instead of only asking the model to honor it
+  // in the prompt: a hidden selector must be unlocked by a prior action.
+  const byPage = new Map<string, Map<string, boolean>>();
+  for (const d of digests) {
+    byPage.set(d.url, new Map(d.inventory.map((i) => [i.selector, i.hidden === true])));
+  }
   // framable result regions per page — valid ONLY as focus_selector (camera
   // target), never as an action selector (they aren't click targets)
   const byPageRegions = new Map<string, Set<string>>();
@@ -135,6 +140,9 @@ export async function writeRecipe(
         const pageSelectors = byPage.get(scene.entry.url)!;
         const pageRegions = byPageRegions.get(scene.entry.url) ?? new Set<string>();
         let usesMoneySelector = false;
+        // selectors already targeted by EARLIER actions in this scene — any one
+        // of them is a plausible revealer for a later hidden element (B5 review)
+        const priorSelectors = new Set<string>();
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
           if (a.kind === "goto") {
             throw new Error(`scene "${scene.name}" uses a mid-scene goto; use a new scene entry.url instead`);
@@ -145,6 +153,21 @@ export async function writeRecipe(
                 `use only selectors listed under that page in the inventory`,
             );
           }
+          // reveal-order gate: a hidden element (modal/reveal-on-click field) may
+          // only be acted on AFTER a prior action in the same scene targets a
+          // DIFFERENT selector (a plausible revealer). A hidden selector used as
+          // the first action would wait forever for an element nothing opened.
+          if (a.selector && pageSelectors.get(a.selector) === true) {
+            const revealedByPrior = [...priorSelectors].some((s) => s !== a.selector);
+            if (!revealedByPrior) {
+              throw new Error(
+                `selector "${a.selector}" in scene "${scene.name}" is HIDDEN (reveal-on-click/modal) but no ` +
+                  `prior action in the scene reveals it — add an earlier action (e.g. click the control that ` +
+                  `opens it) before targeting it`,
+              );
+            }
+          }
+          if (a.selector) priorSelectors.add(a.selector);
           // focus_selector is a camera hint: it must be a real crawled selector
           // (a framable region, or any interactable) on this page — never invented.
           if (a.focus_selector && !pageRegions.has(a.focus_selector) && !pageSelectors.has(a.focus_selector)) {

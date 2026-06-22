@@ -98,14 +98,14 @@ async function frameJpegB64(takeDir: string, t: number): Promise<string | null> 
   }
 }
 
-const SYSTEM = `You are the quality judge for a cinematic product launch video. For each scene you get a captured frame at its key interaction moment. Judge ONLY:
+const SYSTEM = `You are the quality judge for a cinematic product launch video. For each scene you get SEVERAL captured frames sampled across the scene (its key interaction moment, a mid point, and its final hold). Judge the scene across ALL of its frames. Judge ONLY:
 - is the interaction's payoff visible (did something happen)?
-- is there an error page, blank screen, overlay, or cookie banner ruining the shot?
+- is there an error page, blank screen, overlay, or cookie banner ruining the shot — in ANY of the frames?
 - does the scene need a longer hold to land (slow content)?
 Respond ONLY with JSON: { "verdicts": [{ "scene": string, "verdict": "ok"|"patch"|"cut", "reason": string, "patch": { "hold_ms"?: int } }] }
-Rules: "cut" only for ruined shots (error/blank/banner). "patch" with hold_ms 400-2000 for shots that need breathing room. Otherwise "ok". One verdict per scene, scene names exactly as given.`;
+Rules: if ANY sampled frame is an error page, blank/empty screen, or shows a banner ruining the shot, prefer "cut" (a late error still ruins the clip). "patch" with hold_ms 400-2000 for shots that need breathing room. Otherwise "ok". One verdict per scene, scene names exactly as given.`;
 
-/** Layer (b): vision QC on the event frame of each scene. */
+/** Layer (b): vision QC on multiple frames per scene. */
 export async function visionQc(
   llm: LlmClient,
   takeDir: string,
@@ -115,6 +115,18 @@ export async function visionQc(
   const parts: ChatPart[] = [];
   const sceneNames: string[] = [];
 
+  // the take's last CAPTURED frame time. Capture keeps emitting frames through
+  // hold_ms without emitting any event, so the final scene's hold must be
+  // sampled against the last frame, not the last event (else a late blank/error
+  // during a closing hold is missed). Fall back to event time if no index.
+  let lastFrameT = 0;
+  try {
+    const idx = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8")) as { t_source: number }[];
+    lastFrameT = idx.reduce((m, e) => Math.max(m, e.t_source), 0);
+  } catch {
+    /* no frame index — final scene falls back to last event time below */
+  }
+
   for (let i = 0; i < scenes.length; i++) {
     const s = scenes[i]!;
     if (s.type !== "scene") continue;
@@ -122,13 +134,38 @@ export async function visionQc(
     const firstInteraction = log.events.find(
       (e) => (e.type === "click" || e.type === "hover" || e.type === "type") && e.t >= s.t && e.t < end,
     );
-    // judge the moment AFTER the payoff, not the moment of the click
-    const judgeT = (firstInteraction?.t ?? s.t) + 800;
-    const b64 = await frameJpegB64(takeDir, judgeT);
-    if (!b64) continue;
+    // B6 (review): one frame per scene let LATE errors (a result that errors out
+    // after the click, a modal that pops during the hold) pass QC. Sample up to
+    // 3 frames per scene — the key moment (after the payoff), a mid frame, and
+    // the scene's final hold frame — so a late blank/error is caught. Capped at
+    // 3 to bound vision token cost.
+    const keyT = (firstInteraction?.t ?? s.t) + 800;
+    // the last frame we can attribute to this scene; for the final scene `end`
+    // is Infinity, so fall back to the take's last captured frame time.
+    const lastEventT = log.events.reduce((m, e) => Math.max(m, e.t), s.t);
+    // final scene: end at the last captured FRAME (covers the hold), not the
+    // last event — see lastFrameT note above.
+    const sceneEndT = end === Infinity ? Math.max(lastFrameT, lastEventT) : end;
+    const holdT = Math.max(keyT, sceneEndT - 200); // just inside the final hold
+    const midT = (keyT + holdT) / 2;
+    // de-dupe near-identical sample times (short scenes collapse to one frame)
+    const sampleTs = [keyT, midT, holdT].filter(
+      (t, idx, arr) => arr.findIndex((u) => Math.abs(u - t) < 200) === idx,
+    );
+
+    const labels = ["its key moment", "mid-scene", "its final hold"];
+    const sceneParts: ChatPart[] = [];
+    for (let k = 0; k < sampleTs.length; k++) {
+      const b64 = await frameJpegB64(takeDir, sampleTs[k]!);
+      if (!b64) continue;
+      const label = sampleTs.length === 1 ? "its key moment" : (labels[k] ?? "another moment");
+      sceneParts.push({ type: "text", text: `scene "${s.name}" — ${label}:` });
+      sceneParts.push({ type: "image", dataUrl: `data:image/jpeg;base64,${b64}` });
+    }
+    // need at least one real frame to judge the scene at all
+    if (sceneParts.length === 0) continue;
     sceneNames.push(s.name);
-    parts.push({ type: "text", text: `scene "${s.name}" at its key moment:` });
-    parts.push({ type: "image", dataUrl: `data:image/jpeg;base64,${b64}` });
+    parts.push(...sceneParts);
   }
   if (sceneNames.length === 0) return [];
 

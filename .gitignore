@@ -16,3 +16,8 @@ test/.tmp/
 examples/demo-app/node_modules/
 examples/demo-app/.next/
 .roast/
+
+# launch working dir + scratch demo app (not part of the package)
+demos/
+examples/pulse-app/
+node_modules

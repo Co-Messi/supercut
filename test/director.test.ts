@@ -174,6 +174,84 @@ describe("script stage — the anti-hallucination gates", () => {
   });
 });
 
+describe("hidden-element reveal order (B5)", () => {
+  // a page with a visible "Open form" trigger and a HIDDEN field that only
+  // becomes targetable after the trigger reveals it
+  const revealDigests: PageDigest[] = [
+    {
+      url: "http://127.0.0.1:9999/",
+      title: "Reveal",
+      headings: ["Reveal-on-click form"],
+      inventory: [
+        { selector: "#open", tag: "button", text: "Open form", bbox: { x: 100, y: 100, w: 160, h: 48 } },
+        { selector: "#field", tag: "input", text: "name", bbox: { x: 0, y: 0, w: 0, h: 0 }, hidden: true },
+      ],
+    },
+  ];
+  const revealAnalysis: AppAnalysis = {
+    product_summary: "Form that reveals fields on click.",
+    product_name: "Reveal",
+    headline: "Reveal",
+    tagline: "Reveal",
+    money_moments: [
+      { title: "Open the form", caption: "one click", why: "reveal", page_url: "http://127.0.0.1:9999/", elements: ["#open", "#field"] },
+    ],
+  };
+
+  function oneSceneRecipe(actions: unknown[]): string {
+    return JSON.stringify({
+      version: 0,
+      app_url: "http://127.0.0.1:9999",
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "reveal",
+          priority: 1,
+          entry: { url: "http://127.0.0.1:9999/", prelude: [] },
+          depends_on: [],
+          actions,
+          hold_ms: 600,
+        },
+      ],
+    });
+  }
+
+  it("rejects a hidden selector used as the first action", async () => {
+    const badFirst = oneSceneRecipe([
+      { kind: "type", selector: "#field", text: "Ada", duration_ms: 1500 },
+    ]);
+    const good = oneSceneRecipe([
+      { kind: "click", selector: "#open", duration_ms: 1200 },
+      { kind: "type", selector: "#field", text: "Ada", duration_ms: 1500 },
+    ]);
+    const llm = new StubLlm([badFirst, good]);
+    const { attempts } = await writeRecipe(llm, revealAnalysis, revealDigests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("HIDDEN");
+    expect(retryText).toContain("#field");
+  });
+
+  it("allows a hidden selector after a prior click reveals it", async () => {
+    const good = oneSceneRecipe([
+      { kind: "click", selector: "#open", duration_ms: 1200 },
+      { kind: "type", selector: "#field", text: "Ada", duration_ms: 1500 },
+    ]);
+    const llm = new StubLlm([good]);
+    const { attempts } = await writeRecipe(llm, revealAnalysis, revealDigests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(1);
+  });
+
+  it("always allows a visible selector as the first action", async () => {
+    const good = oneSceneRecipe([
+      { kind: "click", selector: "#open", duration_ms: 1200 },
+    ]);
+    const llm = new StubLlm([good]);
+    const { attempts } = await writeRecipe(llm, revealAnalysis, revealDigests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(1);
+  });
+});
+
 describe("destructive-action guard (H1)", () => {
   it("matches destructive / irreversible / financial controls", () => {
     for (const label of [
@@ -192,6 +270,15 @@ describe("destructive-action guard (H1)", () => {
       "Withdraw",
       "Confirm payment",
       "Revoke access",
+      // B4 (review): conservatively broadened — irreversible / high-blast-radius
+      "Publish",
+      "Publish to production",
+      "Transfer funds",
+      "Transfer ownership",
+      "Regenerate API key",
+      "Suspend account",
+      "Terminate instance",
+      "Downgrade plan",
     ]) {
       expect(DESTRUCTIVE_RE.test(label), `expected "${label}" to match`).toBe(true);
     }
@@ -206,6 +293,8 @@ describe("destructive-action guard (H1)", () => {
       "Add to cart",
       "Save",
       "Save changes",
+      "Save draft",
+      "Search",
       "Open",
       "View",
       "View details",
@@ -224,7 +313,10 @@ describe("destructive-action guard (H1)", () => {
       "Archive",
       "Disable",
       "Unsubscribe",
+      // "transfer" is narrowed to money/ownership phrases — benign transfers stay filmable:
       "Transfer to list",
+      "Transfer ticket",
+      "Transfer call",
     ]) {
       expect(DESTRUCTIVE_RE.test(label), `expected "${label}" NOT to match`).toBe(false);
     }

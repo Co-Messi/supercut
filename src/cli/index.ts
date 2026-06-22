@@ -5,7 +5,7 @@ import { doctor } from "./doctor.js";
 /**
  * supercut — point it at your app, get the supercut.
  *
- *   supercut generate --url <app> [--repo <path>] [--config <file>]   full pipeline
+ *   supercut generate --url <app> [--repo <path>]                      full pipeline
  *   supercut record   --recipe <file> [--out <dir>] [--seed <n>]       stage 3 only
  *   supercut render   --take <dir> [--out <mp4>] [--bg <stage>]        stage 5 only
  *   supercut doctor                                                    check deps
@@ -14,7 +14,7 @@ import { doctor } from "./doctor.js";
 const HELP = `supercut — institutional-grade 60s launch videos from your real app
 
 Usage:
-  supercut generate --url <running app URL> [--repo <path>] [--config <file>]
+  supercut generate --url <running app URL> [--repo <path>]
   supercut record   --recipe <recipe.json> [--out <dir>] [--seed <n>]
   supercut render   --take <dir> [--out <file.mp4>] [--bg aurora|midnight|dusk|paper|<asset>|<image>]
   supercut doctor
@@ -26,8 +26,20 @@ async function main(): Promise<number> {
 
   switch (command) {
     case "doctor":
+      if (rest.includes("--help") || rest.includes("-h")) {
+        console.log("usage: supercut doctor   (checks ffmpeg + Chromium/WebCodecs H.264 — takes no flags)");
+        return 0;
+      }
       return doctor();
     case "record": {
+      const recordUsage =
+        "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]";
+      // A1: subcommands advertised "--help" but strict parseArgs would throw on
+      // it — intercept before parsing and print this command's usage.
+      if (rest.includes("--help") || rest.includes("-h")) {
+        console.log(recordUsage);
+        return 0;
+      }
       const { values } = parseArgs({
         args: rest,
         options: {
@@ -39,8 +51,15 @@ async function main(): Promise<number> {
         },
       });
       if (!values.recipe) {
-        console.error("usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]");
+        console.error(recordUsage);
         return 1;
+      }
+      // A1: --allow-private-network is parsed for back-compat but ignored;
+      // warn that it no longer does anything so callers don't rely on it.
+      if (values["allow-private-network"]) {
+        console.error(
+          "--allow-private-network is deprecated and ignored; private/localhost is allowed by default — use --block-private-network to restrict",
+        );
       }
       const { readFileSync } = await import("node:fs");
       const { parseRecipe } = await import("../schema/index.js");
@@ -64,6 +83,15 @@ async function main(): Promise<number> {
       return res.aborted ? 1 : 0;
     }
     case "render": {
+      const renderUsage =
+        "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
+        "[--bg aurora|midnight|dusk|paper|<image path>]";
+      // A1: print this command's usage on --help instead of letting strict
+      // parseArgs throw on the unknown flag.
+      if (rest.includes("--help") || rest.includes("-h")) {
+        console.log(renderUsage);
+        return 0;
+      }
       const { values } = parseArgs({
         args: rest,
         options: {
@@ -73,10 +101,7 @@ async function main(): Promise<number> {
         },
       });
       if (!values.take) {
-        console.error(
-          "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
-            "[--bg aurora|midnight|dusk|paper|<image path>]",
-        );
+        console.error(renderUsage);
         return 1;
       }
       const { renderTake } = await import("../render/index.js");
@@ -94,6 +119,15 @@ async function main(): Promise<number> {
       return 0;
     }
     case "generate": {
+      const generateUsage =
+        "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
+        "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--allow-destructive] [--no-vision]";
+      // A1: print this command's usage on --help instead of letting strict
+      // parseArgs throw on the unknown flag.
+      if (rest.includes("--help") || rest.includes("-h")) {
+        console.log(generateUsage);
+        return 0;
+      }
       const { values } = parseArgs({
         args: rest,
         options: {
@@ -120,11 +154,15 @@ async function main(): Promise<number> {
         },
       });
       if (!values.url) {
-        console.error(
-          "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-            "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--allow-destructive] [--no-vision]",
-        );
+        console.error(generateUsage);
         return 1;
+      }
+      // A1: --allow-private-network is parsed for back-compat but ignored;
+      // warn that it no longer does anything so callers don't rely on it.
+      if (values["allow-private-network"]) {
+        console.error(
+          "--allow-private-network is deprecated and ignored; private/localhost is allowed by default — use --block-private-network to restrict",
+        );
       }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { generate } = await import("../director/generate.js");

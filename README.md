@@ -73,6 +73,8 @@ node dist/cli/index.js doctor   # check Chromium + ffmpeg are installed
 
 > Browser + video need Chromium and ffmpeg: `npx playwright install chromium` and an `ffmpeg` on your PATH.
 
+> Any command accepts `--help` to print its own usage (e.g. `node dist/cli/index.js generate --help`).
+
 ### 🤖 Or: let your coding agent set it up
 
 Already living in **Claude Code, Codex, opencode, Cursor, or Cline**? Don't run the

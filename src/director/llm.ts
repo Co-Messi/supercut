@@ -118,14 +118,18 @@ export class OpenAICompatibleClient implements LlmClient {
         if (!text) throw new Error(`LLM returned an empty response (${this.label})`);
         return text;
       }
+      // A2: drain the body, but the raw provider response can echo prompt text
+      // or account metadata. Only surface it when SUPERCUT_VERBOSE is set;
+      // otherwise keep status + provider label (+ auth hint) and omit the body.
       const snippet = (await res.text()).slice(0, 300);
+      const detail = process.env.SUPERCUT_VERBOSE ? ` ${snippet}` : "";
       if (res.status === 401 || res.status === 403) {
-        throw new Error(`LLM auth failed (${res.status}, ${this.label}) — check your API key. ${snippet}`);
+        throw new Error(`LLM auth failed (${res.status}, ${this.label}) — check your API key.${detail}`);
       }
       if (res.status !== 429 && res.status < 500) {
-        throw new Error(`LLM request rejected (${res.status}, ${this.label}): ${snippet}`);
+        throw new Error(`LLM request rejected (${res.status}, ${this.label}):${detail}`);
       }
-      lastErr = `${res.status}: ${snippet}`;
+      lastErr = `${res.status}:${detail}`;
       await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
     }
     throw new Error(`LLM unavailable after 4 attempts (${this.label}): ${lastErr}`);

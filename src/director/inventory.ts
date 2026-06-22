@@ -58,14 +58,20 @@ const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
  * non-destructive actions (Sign in, Submit, Add, Save, Open, View, Create,
  * Next, Continue) do NOT match.
  */
-// Deliberately NARROW: only genuinely irreversible / data-destroying /
-// money-committing verbs. We do NOT match common, reversible, or hero-action
-// words (send, remove, reset, disable, archive, unsubscribe, transfer) — those
-// are exactly the core interactions a launch video exists to show, and silently
-// dropping a chat app's "Send" or a list's "Remove" would gut the demo. The set
-// here is "things you'd almost never want filmed and that can't be undone."
+// Deliberately NARROW: only clearly-irreversible / high-blast-radius verbs that
+// are almost never a legitimate demo "money moment". We still do NOT match
+// common, reversible, or hero-action words (send, remove, reset, disable,
+// archive, unsubscribe, save, submit, search) — those are exactly the core
+// interactions a launch video exists to show, and silently dropping a chat
+// app's "Send" or a list's "Remove" would gut the demo.
+// B4 (review): broadened conservatively with publish, transfer, regenerate,
+// suspend, terminate, downgrade — each is irreversible or high blast-radius
+// (goes public, moves money/ownership, throws away generated state, kills
+// access/an account, drops a paid tier) and would almost never be the action
+// you intend to film. Criterion: add a verb ONLY if firing it by accident on a
+// live app is genuinely costly AND it is rarely the intended payoff beat.
 export const DESTRUCTIVE_RE =
-  /\b(delete|deactivate|wipe|erase|destroy|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke)\b/i;
+  /\b(delete|deactivate|wipe|erase|destroy|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes

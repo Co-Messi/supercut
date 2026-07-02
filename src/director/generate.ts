@@ -15,19 +15,27 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { record, type RecordResult } from "../capture/index.js";
-import { renderTake } from "../render/index.js";
+import { renderTake, resolveMusicTrack } from "../render/index.js";
 import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { crawlApp, type PageDigest } from "./inventory.js";
-import type { LlmClient } from "./llm.js";
+import { BudgetedLlmClient, type LlmClient } from "./llm.js";
 import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
-import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, urlResolvesPrivate } from "../security/url-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
 const MAX_RETAKES = 3;
+/** default hard token budget for a whole run — generous for a normal run
+ *  (~15 calls at 8k output max), fatal only to runaway retry loops */
+const DEFAULT_MAX_TOKENS = 300_000;
+// stage retry ceilings, mirrored from analyze.ts / script.ts / qc.ts — used
+// only for the advisory pre-flight call-count estimate
+const ANALYZE_ATTEMPTS = 3;
+const SCRIPT_ATTEMPTS = 4;
+const VISION_QC_ATTEMPTS = 2;
 
 export interface GenerateOptions {
   llm: LlmClient;
@@ -40,6 +48,8 @@ export interface GenerateOptions {
   /** scope source-reading to one app in a monorepo (path-segment match) */
   appName?: string;
   background?: string;
+  /** bundled track name, audio file path, or "off"/absent for a silent video */
+  music?: string;
   seed?: number;
   /** model can see images: drives screenshot capture, analyze images, and the
    *  vision-QC pass. Off for text-only models (e.g. deepseek-chat) — the
@@ -55,6 +65,9 @@ export interface GenerateOptions {
    *  (Delete, Pay, …). OFF by default — fail-safe so a prompt-injected page
    *  can't steer a real harmful action on the live app. */
   allowDestructive?: boolean;
+  /** hard cumulative token ceiling for the run's LLM calls (prompt+completion,
+   *  provider-reported). 0 disables. Default: 300000. */
+  maxTokens?: number;
   log?: (msg: string) => void;
 }
 
@@ -126,10 +139,19 @@ function repoNotes(repoPath: string): string | undefined {
 export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   const log = opts.log ?? ((m: string) => console.log(`[generate] ${m}`));
   const vision = opts.vision !== undefined ? opts.vision : !(opts.noVision ?? false);
+  const budget = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
+  // every LLM call in the run goes through the budget guard (analyze, script,
+  // and vision QC all receive this wrapper) — no stage can spend past the cap
+  const llm = new BudgetedLlmClient(opts.llm, budget);
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
+  // a bad --music must die here, not after the LLM crawl and capture spend
+  resolveMusicTrack(opts.music);
   await preflight(opts.url, opts.allowPrivateNetwork ?? true);
+  if ((opts.allowPrivateNetwork ?? true) && !(await urlResolvesPrivate(opts.url))) {
+    log("hint: target resolves to a public address — pass --block-private-network when filming untrusted targets");
+  }
 
   // read the app's source FIRST: derive real routes (seed the crawl so
   // functional panels enter the inventory) + a product summary for the director
@@ -150,6 +172,14 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
   // crawl the start page + every seeded route + a few link-discovered pages
   const maxPages = Math.min(3 + seedUrls.length, 12);
+  // pre-flight spend estimate — printed before any paid call so a runaway
+  // config is visible up front
+  const callCeiling =
+    ANALYZE_ATTEMPTS + SCRIPT_ATTEMPTS + (vision ? VISION_QC_ATTEMPTS * (MAX_RETAKES + 1) : 0);
+  log(
+    `   LLM plan: ≤${maxPages} page(s) to crawl, vision ${vision ? "on" : "off"}, ` +
+      `≤${callCeiling} LLM call(s), token budget ${budget > 0 ? budget : "off"} (--max-tokens / SUPERCUT_MAX_TOKENS)`,
+  );
   const digests: PageDigest[] = await crawlApp(opts.url, {
     maxPages,
     screenshots: vision,
@@ -175,12 +205,13 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       .filter((s): s is string => Boolean(s))
       .map(redactForPrompt)
       .join("\n\n") || undefined;
-  const analysis = await analyzeApp(opts.llm, digests, notes);
+  const analysis = await analyzeApp(llm, digests, notes);
   log(`   product: ${analysis.product_summary.slice(0, 100)}`);
   for (const m of analysis.money_moments) log(`   moment: ${m.title}`);
 
   log("② script: writing recipe…");
-  const { recipe: firstRecipe, attempts } = await writeRecipe(opts.llm, analysis, digests, opts.url);
+  llm.stage = "script";
+  const { recipe: firstRecipe, attempts } = await writeRecipe(llm, analysis, digests, opts.url);
   log(`   recipe valid after ${attempts} attempt(s): ${firstRecipe.scenes.length} scenes`);
 
   let recipe = firstRecipe;
@@ -204,7 +235,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     const verdicts = deterministicChecks(result);
     if (vision) {
       log("④ qc: vision pass…");
-      verdicts.push(...await visionQc(opts.llm, takeDir, result.eventLog));
+      llm.stage = "qc";
+      verdicts.push(...await visionQc(llm, takeDir, result.eventLog));
     }
     verdictLog.push(verdicts);
     const notOk = verdicts.filter((v) => v.verdict !== "ok");
@@ -244,6 +276,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     takeDir,
     outFile,
     ...(opts.background ? { background: opts.background } : {}),
+    ...(opts.music ? { music: opts.music } : {}),
   });
   log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB)`);
 
@@ -252,9 +285,9 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
   );
 
-  // best-effort cost telemetry (reporting only — no budget cap)
-  const tokens = opts.llm.tokensUsed;
-  log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens` : "unavailable"}`);
+  // best-effort cost telemetry (the hard cap lives in BudgetedLlmClient)
+  const tokens = llm.tokensUsed;
+  log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens (${llm.breakdown()})` : "unavailable"}`);
 
   return { outFile, recipe, analysis, retakes, verdictLog };
 }

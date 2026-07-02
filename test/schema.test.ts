@@ -108,6 +108,19 @@ describe("event log schema", () => {
     expect(() => parseEventLog(broken)).toThrow();
   });
 
+  it("accepts focus_bbox + focus_source and rejects an unknown source", () => {
+    const focusedClick = {
+      t: 1234, type: "click", bbox: [10, 20, 100, 40], selector: "#q", point: [60, 40],
+      focus_bbox: [200, 300, 800, 500], focus_source: "mutation",
+    };
+    const log = parseEventLog({ ...validEventLog, events: [focusedClick] });
+    expect(log.events[0]).toMatchObject({ focus_source: "mutation" });
+
+    expect(() =>
+      parseEventLog({ ...validEventLog, events: [{ ...focusedClick, focus_source: "vibes" }] }),
+    ).toThrow();
+  });
+
   it("rejects negative timestamps", () => {
     const broken = {
       ...validEventLog,

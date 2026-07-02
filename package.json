@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "assets"
+    "assets",
+    "examples/demo-app"
   ],
   "scripts": {
     "build": "tsc",

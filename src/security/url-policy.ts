@@ -29,10 +29,14 @@ function inCidr(ip: string, base: string, bits: number): boolean {
  * here makes the guard self-contained and covers the mapped-IPv6 case the URL
  * parser leaves intact. Returns the original host when it isn't an alt-encoding.
  *
- * NOTE: this does NOT defend against DNS-rebinding (a hostname that resolves
- * public at check time and private at connect time — resolve-time TOCTOU).
- * Resolve-and-pin (connect to the exact IP we validated) is out of scope here;
- * the guard validates the host string and the post-redirect final URL only.
+ * DNS-rebinding (a hostname that resolves public at check time and private at
+ * connect time — resolve-time TOCTOU): when the guard is ON, `resolveAndPinHost`
+ * below resolves once, validates the addresses, and yields a Chromium
+ * `--host-resolver-rules` mapping so the browser connects to the exact IP that
+ * was vetted. The director's crawler applies it; the capture executor's
+ * browser launch (src/capture/executor.ts) does not yet accept launch args, so
+ * record-stage navigations are still validated as strings + post-redirect
+ * final URLs only — rebinding remains possible there.
  */
 function normalizeHostToIPv4(h: string): string {
   // whole-host bare decimal integer, e.g. "2130706433" → "127.0.0.1"
@@ -112,4 +116,52 @@ async function checkOne(raw: string, opts: NavigationPolicyOptions, redirect: bo
 export async function assertSafeNavigationUrl(raw: string, opts: NavigationPolicyOptions = {}): Promise<void> {
   await checkOne(raw, opts, false);
   if (opts.finalUrl && opts.finalUrl !== raw) await checkOne(opts.finalUrl, opts, true);
+}
+
+/** Does this URL's host name/resolve to a private address? Never throws —
+ *  used for advisory hints, not enforcement. */
+export async function urlResolvesPrivate(raw: string): Promise<boolean> {
+  try {
+    return await resolvesPrivate(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export interface PinnedHost {
+  hostname: string;
+  /** the exact address that passed validation */
+  ip: string;
+  /** value for Chromium's `--host-resolver-rules=` launch arg */
+  hostResolverRule: string;
+}
+
+/**
+ * Resolve-and-pin (DNS-rebinding defense): resolve the target hostname ONCE,
+ * validate every returned address against the private-network policy, and
+ * return a Chromium host-resolver rule that pins the hostname to the first
+ * vetted IP — so the browser connects to the address we checked, not whatever
+ * a second resolve returns. Returns undefined for IP-literal hosts (nothing
+ * to rebind).
+ */
+export async function resolveAndPinHost(
+  raw: string,
+  opts: NavigationPolicyOptions = {},
+): Promise<PinnedHost | undefined> {
+  const url = new URL(raw);
+  const hostname = url.hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "");
+  if (isIP(hostname) !== 0 || isIP(normalizeHostToIPv4(hostname)) !== 0) return undefined;
+  // "," separates rules in --host-resolver-rules; a comma can survive URL
+  // parsing inside a hostname, so refuse rather than emit a second rule.
+  if (hostname.includes(",")) throw new Error(`unsupported character in hostname: ${hostname}`);
+  const addrs = await lookup(hostname, { all: true, verbatim: true });
+  if (addrs.length === 0) throw new Error(`cannot resolve host: ${hostname}`);
+  if (!opts.allowPrivateNetwork) {
+    const bad = addrs.find((a) => isPrivateHostname(a.address));
+    if (bad) {
+      throw new Error(`navigation URL is on a private network: ${raw} (${hostname} → ${bad.address})`);
+    }
+  }
+  const ip = addrs[0]!.address;
+  return { hostname, ip, hostResolverRule: `MAP ${hostname} ${ip}` };
 }

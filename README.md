@@ -63,11 +63,16 @@ npm run build
 node dist/cli/index.js generate --url http://127.0.0.1:3000 --yes
 ```
 
-`generate` needs an LLM key (see [provider setup](#-llm-provider-setup)). No key? The non-AI path works standalone:
+`generate` needs an LLM key (see [provider setup](#-llm-provider-setup)). No key? The non-AI path works standalone against the bundled demo app:
 
 ```bash
+# 1. serve the bundled demo app on port 4173 (or: npx serve -l 4173 examples/demo-app)
+python3 -m http.server 4173 --directory examples/demo-app &
+
+# 2. film it with the example recipe, then render
 node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
 node dist/cli/index.js render --take out/take --out out/final.mp4
+
 node dist/cli/index.js doctor   # check Chromium + ffmpeg are installed
 ```
 
@@ -98,6 +103,7 @@ video of my app. Steps:
 7. When it finishes, open out/final.mp4 and show me the result.
 
 No API key handy? Skip the .env and use the no-LLM path instead:
+   python3 -m http.server 4173 --directory examples/demo-app &
    node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
    node dist/cli/index.js render --take out/take --out out/final.mp4
 ```
@@ -123,13 +129,17 @@ each redirect hop):
 node dist/cli/index.js generate --url https://untrusted.example --block-private-network --yes
 ```
 
-(`--allow-private-network` is a deprecated no-op kept for back-compat. Known limit: the
-guard does not defend against DNS-rebinding / resolve-time TOCTOU.)
+(`--allow-private-network` is a deprecated no-op kept for back-compat. With the guard on,
+the crawler also resolves-and-pins the target host's DNS so a rebinding hostname can't
+swap in a private IP mid-run; the `record` stage's browser does not pin yet, so its
+navigations are validated as URLs only.)
 
 > ⚠️ **supercut drives and may MUTATE the target app** — it performs real clicks and
-> typing on whatever you point it at. Destructive controls (Delete, Pay, Checkout, …)
-> are excluded from filming by default; pass `--allow-destructive` to include them.
-> Never run it against production data or URLs/recipes you do not trust.
+> typing on whatever you point it at. Destructive controls (Delete, Remove, Pay, …)
+> are excluded from filming by default, but that filter is **best-effort and
+> English-only**: it matches visible labels and cannot catch icon-only buttons or
+> other wording. Film against a disposable/staging environment, never production
+> data or URLs/recipes you do not trust. Pass `--allow-destructive` to opt back in.
 
 ## 🔌 LLM provider setup
 
@@ -160,12 +170,43 @@ For `SUPERCUT_PROVIDER=custom`, set both `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_M
 If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly — ambiguous
 config fails loudly rather than guessing.
 
+Every `generate` run has a hard LLM spend ceiling: 300k tokens by default, tunable with
+`--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0`/`off` disables). The run aborts with a
+per-stage spend breakdown if a misbehaving model would blow past it.
+
+## 🎵 Music
+
+Videos are silent by default. `--music` (on `render` and `generate`) muxes a looped,
+loudness-normalized track with fade-in/out under the video — never re-encoding the
+video and never changing its length:
+
+```sh
+supercut render   --take out/take --music midnight
+supercut generate --url http://localhost:3000 --music pulse
+supercut render   --take out/take --music path/to/your-track.mp3   # your own file
+```
+
+Bundled tracks (in `assets/music/` — original instrumentals made for supercut;
+provenance in `assets/music/CREDITS.md`):
+
+| track      | vibe         |
+| ---------- | ------------ |
+| `pulse`    | minimal-tech |
+| `daybreak` | warm         |
+| `midnight` | cinematic    |
+| `momentum` | energetic    |
+
+`--music off` (or omitting the flag) keeps the video silent.
+
 ## 🔒 Privacy
 
-`generate` may send crawled DOM text, element labels/selectors, optional screenshots,
-and optional repo notes (`--repo`) to your configured LLM provider. It also writes
-frames, recipes, and director reports to `out/`. Review those before sharing — and use
-`record` + `render` for a fully no-LLM workflow.
+`generate` sends crawled page text, element labels/selectors, and optional repo notes
+(`--repo`) to your configured LLM provider. **In vision mode it also uploads full,
+unredacted screenshots of your app.** Text gets best-effort secret redaction (keys,
+tokens, emails, private keys) — but redaction cannot cover images, so don't film apps
+showing real customer data or secrets with vision on. It also writes frames, recipes,
+and director reports to `out/`; review those before sharing. `record` + `render` are a
+fully no-LLM workflow.
 
 ## 📜 Event-log contract
 
@@ -182,6 +223,8 @@ take directory ──▶ render ──▶ final.mp4
 
 Schemas reject unsupported URL schemes, malformed events, non-monotonic timelines,
 oversized logs, and impossible camera boxes.
+
+Event timestamps share the frame `t_source` clock: identical runs now produce structurally/geometrically identical events.json with timestamps agreeing within ~150ms (not byte-identical), and renders fail when events lead the footage by >250ms unless `SUPERCUT_ALLOW_SKEW=1` (legacy sparse takes only warn).
 
 ## Project principles
 

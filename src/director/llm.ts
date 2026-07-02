@@ -140,6 +140,56 @@ export class OpenAICompatibleClient implements LlmClient {
 export const OpenRouterClient = OpenAICompatibleClient;
 export type OpenRouterConfig = OpenAICompatibleConfig;
 
+/** Thrown when a run's cumulative token spend hits the hard budget. */
+export class TokenBudgetExceededError extends Error {}
+
+/**
+ * Hard cost ceiling for a whole run. Wraps any LlmClient and refuses the NEXT
+ * call once the inner client's provider-reported cumulative tokens reach the
+ * budget — so a misbehaving model/retry loop is bounded instead of burning
+ * unbounded spend. Enforcement relies on provider usage reporting: a provider
+ * that never reports usage (tokensUsed stays undefined) can't be metered.
+ * budget <= 0 disables the cap (accounting still runs).
+ */
+export class BudgetedLlmClient implements LlmClient {
+  readonly label: string;
+  /** current pipeline stage, set by the orchestrator — names spend in errors */
+  stage = "analyze";
+  private readonly spentByStage = new Map<string, number>();
+
+  constructor(
+    private readonly inner: LlmClient,
+    private readonly budget: number,
+  ) {
+    this.label = inner.label;
+  }
+
+  get tokensUsed(): number | undefined {
+    return this.inner.tokensUsed;
+  }
+
+  /** per-stage spend, e.g. "analyze 12000, script 8000" */
+  breakdown(): string {
+    if (this.spentByStage.size === 0) return "no usage reported";
+    return [...this.spentByStage].map(([stage, n]) => `${stage} ${n}`).join(", ");
+  }
+
+  async chat(opts: ChatOptions): Promise<string> {
+    const used = this.inner.tokensUsed ?? 0;
+    if (this.budget > 0 && used >= this.budget) {
+      throw new TokenBudgetExceededError(
+        `LLM token budget exhausted: ${used} of ${this.budget} tokens spent (${this.breakdown()}) — ` +
+          `raise --max-tokens / SUPERCUT_MAX_TOKENS, or set it to 0/off to disable the cap`,
+      );
+    }
+    const before = this.inner.tokensUsed ?? 0;
+    const out = await this.inner.chat(opts);
+    const delta = (this.inner.tokensUsed ?? 0) - before;
+    if (delta > 0) this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + delta);
+    return out;
+  }
+}
+
 /**
  * Pull the first JSON object out of a model response — tolerates ```json
  * fences and prose around the object, balanced-brace scan.

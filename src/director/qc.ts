@@ -19,6 +19,11 @@ import type { RecordResult } from "../capture/executor.js";
 
 const exec = promisify(execFile);
 
+// a zoom patch flows into the event log's focus_bbox, whose schema demands
+// nonneg x/y and positive w/h (mirrors recipe.ts) — a hallucinated degenerate
+// bbox must die HERE, not at render time after all the capture spend
+const finiteNum = z.number().finite();
+
 export const sceneVerdict = z.object({
   scene: z.string(),
   verdict: z.enum(["ok", "patch", "cut"]),
@@ -27,7 +32,7 @@ export const sceneVerdict = z.object({
     .object({
       hold_ms: z.number().int().min(0).max(3000).optional(),
       action_index: z.number().int().min(0).optional(),
-      zoom: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+      zoom: z.tuple([finiteNum.nonnegative(), finiteNum.nonnegative(), finiteNum.positive(), finiteNum.positive()]).optional(),
     })
     .optional(),
 });
@@ -219,9 +224,15 @@ export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): Applied
       for (const p of patches) {
         if (p.patch?.hold_ms !== undefined) out = { ...out, hold_ms: p.patch.hold_ms };
         if (p.patch?.zoom && p.patch.action_index !== undefined) {
+          // apply-time guard (schema already rejects these on the parse path,
+          // but applyVerdicts is public API): a degenerate bbox in the recipe
+          // would only explode much later, at render-time event validation
+          const [zx, zy, zw, zh] = p.patch.zoom;
+          const zoomValid =
+            [zx, zy, zw, zh].every(Number.isFinite) && zx >= 0 && zy >= 0 && zw > 0 && zh > 0;
           const actions = [...out.actions];
           const target = actions[p.patch.action_index];
-          if (target) {
+          if (target && zoomValid) {
             actions[p.patch.action_index] = { ...target, zoom: p.patch.zoom };
             out = { ...out, actions };
           }

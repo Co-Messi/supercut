@@ -19,9 +19,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
-import { parseEventLog } from "../schema/index.js";
+import { parseEventLog, type EventLog } from "../schema/index.js";
 import { buildRenderPlan, type FrameIndexEntry } from "./plan.js";
-import { HOST_PAGE } from "./host-page.js";
+import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 
 const exec = promisify(execFile);
 
@@ -30,6 +30,9 @@ export interface RenderOptions {
   outFile: string;
   /** palette name (aurora|midnight|dusk|paper) or a path to a wallpaper image */
   background?: string;
+  /** bundled track name (assets/music/), a path to an audio file, or
+   *  "off"/absent for a silent video (the default) */
+  music?: string;
   /** ms; encoding 60s of footage is expected to finish well within 5 min */
   timeoutMs?: number;
 }
@@ -39,6 +42,86 @@ export interface RenderResult {
   frames: number;
   encodedBytes: number;
   wallMs: number;
+  /** measured bits/second of the encoded stream (encodedBytes over plan duration) */
+  deliveredBitrate: number;
+  /** resolved audio track muxed under the video, or null for a silent cut */
+  music: string | null;
+}
+
+/**
+ * Resolve --music: a bundled track name (fuzzy-matched against assets/music/,
+ * same pattern as --bg), a path to the user's own audio file, or "off"/absent
+ * → null. Throws with the available bundled names — validating here keeps a
+ * bad track from ever reaching the expensive render.
+ */
+export function resolveMusicTrack(spec: string | undefined, musicDir?: string): string | null {
+  if (!spec || spec === "off") return null;
+  if (existsSync(spec) && statSync(spec).isFile()) return spec;
+  const dir = musicDir ?? fileURLToPath(new URL("../../assets/music", import.meta.url));
+  const requested = spec.toLowerCase().replace(/\.[a-z0-9]+$/, "");
+  const bundled = existsSync(dir) ? readdirSync(dir).filter((f) => /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(f)) : [];
+  const hit = bundled.find((f) => {
+    const lower = f.toLowerCase();
+    return lower === spec.toLowerCase() || lower.replace(/\.[a-z0-9]+$/, "") === requested;
+  });
+  if (hit) return join(dir, hit);
+  const names = bundled.map((f) => f.replace(/\.[a-z0-9]+$/i, ""));
+  throw new Error(
+    `--music "${spec}" is neither an audio file nor a bundled track — ` +
+      (names.length ? `bundled tracks: ${names.join(", ")} (or "off")` : `no bundled tracks installed; pass an audio file path or "off"`),
+  );
+}
+
+/** gentle loudness normalization + edge fades (skipped on clips too short to
+ *  fade without eating the whole track) */
+export function musicFilterChain(durationS: number): string {
+  const filters = ["loudnorm=I=-20:TP=-2:LRA=9"];
+  if (durationS >= 2.5) {
+    filters.push("afade=t=in:st=0:d=0.6", `afade=t=out:st=${(durationS - 1.8).toFixed(3)}:d=1.8`);
+  }
+  return filters.join(",");
+}
+
+export interface SkewVerdict {
+  skewMs: number;
+  maxEventT: number;
+  lastFrameT: number;
+  action: "ok" | "warn" | "fail";
+}
+
+/** residual event-vs-footage skew below this is invisible; above it the
+ *  camera visibly leads the pixels (unified-clock takes only) */
+const SKEW_FAIL_MS = 250;
+/** legacy skew tolerance: pre-unified-clock takes stamped events on a
+ *  separate wall accumulator; anything past this was already warn-worthy */
+const SKEW_LEGACY_WARN_MS = 500;
+/** takes below this average source fps predate the repaint beacon (change-
+ *  driven capture) — their event clock was never unified with t_source, so
+ *  large skew is expected and must stay renderable (events.json back-compat) */
+const LEGACY_FPS_CEILING = 20;
+
+/**
+ * Clock-vs-frame skew gate. Unified-clock takes stamp events on the same
+ * timeline as frame `t_source` (anchored to the first screencast frame), so
+ * the event timeline running well past the footage means the take is broken —
+ * fail. Legacy sparse takes keep the old non-fatal warning.
+ */
+export function assessSkew(log: EventLog, frameIndex: FrameIndexEntry[]): SkewVerdict {
+  const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
+  const firstFrameT = frameIndex.length ? frameIndex[0]!.t_source : 0;
+  let maxEventT = 0;
+  for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
+  const skewMs = maxEventT - lastFrameT;
+  const spanMs = lastFrameT - firstFrameT;
+  const avgFps = spanMs > 0 ? ((frameIndex.length - 1) / spanMs) * 1000 : 0;
+  const legacy = avgFps < LEGACY_FPS_CEILING;
+  let action: SkewVerdict["action"] = "ok";
+  if (legacy) {
+    if (skewMs > SKEW_LEGACY_WARN_MS) action = "warn";
+  } else if (skewMs > SKEW_FAIL_MS) {
+    action = "fail";
+  }
+  return { skewMs, maxEventT, lastFrameT, action };
 }
 
 export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
@@ -68,6 +151,9 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     }
   }
   const bgIsImage = existsSync(bgSpec) && statSync(bgSpec).isFile();
+  // --music: resolved + validated here, before the plan and the browser — a
+  // missing track must fail in milliseconds, not after a full encode
+  const musicPath = resolveMusicTrack(opts.music);
   const plan = buildRenderPlan(log, frameIndex, {
     background: bgIsImage
       ? { kind: "image", base: "#101010", blobs: [], light: true, vignette: 0.16 }
@@ -76,22 +162,19 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
   const planJson = JSON.stringify(plan);
 
-  // M5: clock-vs-frame skew warning (non-fatal). Event `t` rides a wall-time
-  // accumulator; frame `t_source` rides CDP screencast timestamps. If the latest
-  // event time runs well past the last frame's source time, the camera (driven
-  // by event `t`) may be ahead of the footage (indexed by `t_source`). We do not
-  // change the timing model — just surface the skew so the operator isn't blind.
+  // Clock-vs-frame skew gate (assessed in assessSkew, below).
   {
-    const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
-    let maxEventT = 0;
-    for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
-    const skew = maxEventT - lastFrameT;
-    if (skew > 500) {
-      console.error(
-        `[render] WARNING: event timeline leads footage by ${Math.round(skew)}ms ` +
-          `(last event t=${Math.round(maxEventT)}ms, last frame t_source=${Math.round(lastFrameT)}ms) — ` +
-          `camera may be slightly ahead of the footage (clock/frame skew).`,
-      );
+    const verdict = assessSkew(log, frameIndex);
+    if (verdict.action !== "ok") {
+      const msg =
+        `event timeline leads footage by ${Math.round(verdict.skewMs)}ms ` +
+        `(last event t=${Math.round(verdict.maxEventT)}ms, last frame t_source=${Math.round(verdict.lastFrameT)}ms) — ` +
+        `the camera would run ahead of the pixels`;
+      if (verdict.action === "warn" || process.env.SUPERCUT_ALLOW_SKEW === "1") {
+        console.error(`[render] WARNING: ${msg} (continuing)`);
+      } else {
+        throw new Error(`render: ${msg}. Re-record the take, or set SUPERCUT_ALLOW_SKEW=1 to force.`);
+      }
     }
   }
 
@@ -241,24 +324,56 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       throw new Error("render produced no encoded output");
     }
 
-    // mux raw annexb H.264 → MP4. ffmpeg is a muxer here, never an effects engine.
+    // mux raw annexb H.264 → MP4. ffmpeg is a muxer here, never an effects
+    // engine (video is ALWAYS -c:v copy; music only touches the audio lane).
     // -r BEFORE -i: raw annexb has no timestamps; this assigns them at 60fps.
     // (-framerate alone can misparse to the wrong duration.)
-    await exec("ffmpeg", [
-      "-y",
-      "-f", "h264",
-      "-r", String(plan.fps),
-      "-i", rawPath,
-      "-c", "copy",
-      "-movflags", "+faststart",
-      outFile,
-    ]);
+    const muxDurationS = plan.frames / plan.fps;
+    const muxArgs = ["-y", "-f", "h264", "-r", String(plan.fps), "-i", rawPath];
+    if (musicPath) {
+      muxArgs.push(
+        // loop a short track under a long video; -t clamps the OUTPUT to the
+        // exact video length so audio can never extend the cut
+        "-stream_loop", "-1",
+        "-i", musicPath,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-af", musicFilterChain(muxDurationS),
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-t", muxDurationS.toFixed(3),
+      );
+    } else {
+      muxArgs.push("-c", "copy");
+    }
+    muxArgs.push("-movflags", "+faststart", outFile);
+    await exec("ffmpeg", muxArgs);
+    if (musicPath) console.error(`[render] music: ${musicPath}`);
+
+    // trust, then verify: the encoder is ASKED for CBR at ENCODER_BITRATE, but
+    // WebCodecs implementations may deliver far less. Healthy encoders undershoot
+    // on low-motion screen content (static frames simply need few bits), so only
+    // severe starvation — the regime where text goes mushy — earns a warning.
+    const durationS = plan.frames / plan.fps;
+    const deliveredBitrate = Math.round((encodedBytes * 8) / durationS);
+    console.error(
+      `[render] delivered bitrate ${(deliveredBitrate / 1e6).toFixed(2)} Mbps ` +
+        `(configured ${(ENCODER_BITRATE / 1e6).toFixed(0)} Mbps CBR, ${durationS.toFixed(1)}s)`,
+    );
+    if (deliveredBitrate < ENCODER_BITRATE * 0.25) {
+      console.error(
+        `[render] WARNING: delivered bitrate is below 25% of the configured target — ` +
+          `the encoder is starving the stream; text/detail quality may suffer`,
+      );
+    }
 
     return {
       outFile,
       frames: plan.frames,
       encodedBytes,
       wallMs: Date.now() - t0,
+      deliveredBitrate,
+      music: musicPath,
     };
   } finally {
     // B2 (review): always remove the temp raw stream — success or failure.

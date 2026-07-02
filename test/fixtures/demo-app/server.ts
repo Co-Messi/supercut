@@ -90,6 +90,39 @@ const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — 
   </script>
 </body></html>`;
 
+/** third route: a query panel whose big result region is revealed only on
+ *  click — exercises the changed-region (MutationObserver) focus fallback.
+ *  The click also fires a transient toast (bottom-right, auto-removed after
+ *  400ms): a vanished overlay must never end up inside the framed result. */
+const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Query</title><style>
+  :root { --ink:#16161a; --accent:#2563eb; --bg:#fafaf7 }
+  * { box-sizing:border-box; margin:0 }
+  body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
+  main { max-width:1200px; margin:48px auto; padding:0 32px }
+  #reveal { background:var(--accent); color:#fff; border:0; font-size:16px; font-weight:600;
+            padding:14px 30px; border-radius:10px; cursor:pointer }
+  #results { display:none; margin-top:28px; background:#fff; border:1px solid #ececec;
+             border-radius:14px; padding:32px; height:620px }
+  #toast { position:fixed; right:24px; bottom:24px; width:300px; padding:18px 22px;
+           background:var(--ink); color:#fff; border-radius:12px; font-size:14px }
+</style></head><body>
+  <main>
+    <h2>Revenue query</h2>
+    <button id="reveal">Run query</button>
+    <div id="results"><h3>Q3 revenue by region</h3><p>EMEA up 34%, APAC up 21%, AMER up 12%.</p></div>
+  </main>
+  <script>
+    document.getElementById("reveal").addEventListener("click", () => {
+      document.getElementById("results").style.display = "block";
+      const toast = document.createElement("div");
+      toast.id = "toast";
+      toast.textContent = "Query completed";
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 400);
+    });
+  </script>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -97,7 +130,7 @@ export interface DemoApp {
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
   const server: Server = createServer((req, res) => {
-    const body = req.url?.startsWith("/dash") ? DASH : LANDING;
+    const body = req.url?.startsWith("/dash") ? DASH : req.url?.startsWith("/panel") ? PANEL : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);
   });

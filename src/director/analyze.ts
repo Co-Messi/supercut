@@ -130,13 +130,15 @@ function digestText(d: PageDigest): string {
   // look signal: lets a text-only model ground vibe/music choices in the
   // page's actual appearance, not just its copy
   const look = d.theme ? `\ntheme: ${d.theme}${d.accentColor ? ` (accent ${d.accentColor})` : ""}` : "";
-  // URL/title/headings are egress too — a query-string token (?session=<jwt>,
-  // ?token=<key>) or a secret in the title reaches the provider otherwise. Route
-  // them through the same redaction the inventory text/href already gets.
-  const url = redactForPrompt(d.url);
+  // title/headings are egress and display-only, so redact them — a secret in a
+  // page title reaches the provider otherwise. The URL is NOT redacted here: it
+  // is a validation KEY (scene.entry.url must round-trip exactly against the raw
+  // crawled URL), so a redacted URL would break the recipe gate. Pages whose URL
+  // itself carries a secret are dropped upstream in crawlApp, so no token-URL
+  // reaches this prompt to leak.
   const title = redactForPrompt(d.title);
   const headings = d.headings.map(redactForPrompt).join(" | ");
-  return `PAGE ${url}\ntitle: ${title}${look}\nheadings: ${headings}\nelements:\n${inv}`;
+  return `PAGE ${d.url}\ntitle: ${title}${look}\nheadings: ${headings}\nelements:\n${inv}`;
 }
 
 const SYSTEM = `You are the director AND copywriter of a 60-second product launch video — a polished launch film, not a website tour. You study a web product and turn it into a PERSUASIVE STORY with a crystal-clear message: a viewer must understand within seconds what problem it solves and why it's good. Ambiguity is failure.
@@ -171,7 +173,7 @@ export async function analyzeApp(
   const imageParts: ChatPart[] = [];
   for (const d of digests) {
     if (d.screenshotB64) {
-      imageParts.push({ type: "text", text: `screenshot of ${redactForPrompt(d.url)}:` });
+      imageParts.push({ type: "text", text: `screenshot of ${d.url}:` });
       imageParts.push({ type: "image", dataUrl: `data:image/jpeg;base64,${d.screenshotB64}` });
     }
   }

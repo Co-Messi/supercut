@@ -6,6 +6,17 @@
  */
 import { chromium, type Browser, type Page } from "playwright";
 import { assertSafeNavigationUrl, navigationRequestAllowed, resolveAndPinHost } from "../security/url-policy.js";
+import { redactForPrompt } from "../security/redaction.js";
+
+/**
+ * True when a page URL carries a secret (token/key/JWT) in its path or query.
+ * A crawled URL is a validation KEY the director must echo back verbatim, so it
+ * can't be redacted in the prompt — instead we drop the whole page (never film a
+ * page whose URL is itself a credential), so the secret never egresses.
+ */
+export function pageUrlHasSecret(url: string): boolean {
+  return redactForPrompt(url) !== url;
+}
 
 export interface InventoryItem {
   /** Playwright-compatible selector, verified to resolve on the page */
@@ -98,30 +109,6 @@ export const DESTRUCTIVE_RE =
 export function isDestructiveLabel(s: string): boolean {
   return DESTRUCTIVE_RE.test(s.replace(/_/g, " "));
 }
-
-/**
- * A "safe content slug" is a single lowercase identifier token — a service NAME
- * ("checkout-api", "delete-log-2024", "payments-worker"), never a verb. Only
- * these earn the destructive-match exception. Anchored, all-lowercase,
- * hyphen/underscore-joined, no spaces, no capitals — so "Delete-all" (capital)
- * and "Delete account" (space) never qualify.
- */
-const CONTENT_SLUG_RE = /^[a-z][a-z0-9]*([-_][a-z0-9]+)+$/;
-
-/**
- * Strip every content-slug token from a label; what remains is its non-name
- * text. If that STILL matches the lexicon the destructive signal lives outside
- * a slug ("checkout-api Delete" → "Delete"), so the element must be excluded
- * even though it also carries a service name.
- */
-function withoutSlugTokens(s: string): string {
-  return s.split(/\s+/).filter((tok) => !CONTENT_SLUG_RE.test(tok)).join(" ");
-}
-
-/** ARIA roles that make an element an action target regardless of its tag — a
- *  destructive-lexicon hit carried by any of these is never a passive content
- *  row, so it can't earn the slug-name keep exception. */
-const INTERACTIVE_ROLES = new Set(["button", "link", "menuitem", "tab", "option"]);
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -294,25 +281,13 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // a prior revealing action makes them targetable
     const hidden = !box || box.width < 4 || box.height < 4;
 
-    // one round-trip for tag + the interactivity signals a framework-delegated
-    // handler leaves in the DOM: computed cursor and tabindex reveal a clickable
-    // control even when the onclick ATTR is null (React/Vue/Svelte bind via
-    // addEventListener). Cheap probe — folded into the tagName read.
-    const probe = await el
-      .evaluate((n) => {
-        const e = n as HTMLElement;
-        return { tag: e.tagName, cursor: getComputedStyle(e).cursor, tabIndex: e.tabIndex };
-      })
-      .catch(() => ({ tag: "", cursor: "", tabIndex: -1 }));
-    const tag = probe.tag.toLowerCase();
+    const tag = (await el.evaluate((n) => n.tagName).catch(() => "")).toLowerCase();
     if (!tag) continue;
     const id = await el.getAttribute("id").catch(() => null);
     const testid = await el.getAttribute("data-testid").catch(() => null);
-    const role = await el.getAttribute("role").catch(() => null);
     const aria = await el.getAttribute("aria-label").catch(() => null);
     const placeholder = await el.getAttribute("placeholder").catch(() => null);
     const value = await el.getAttribute("value").catch(() => null);
-    const onclick = await el.getAttribute("onclick").catch(() => null);
     const href = (await el.getAttribute("href").catch(() => null)) ?? undefined;
     const text = (
       (await el.innerText().catch(() => "")) ||
@@ -322,33 +297,17 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
 
     // Fail-safe: never put a destructive/irreversible control into the inventory
     // (so the director can't script a click/type on it) unless explicitly opted
-    // in. Checks visible text, aria-label, and value (input buttons), on EVERY
-    // crawled candidate — a clickable div[onclick] or [data-testid] can be a real
-    // Delete button just as much as a <button> can. A slug-NAMED content row
-    // ("checkout-api" on an <li>) is the ONE exception: its only lexicon hit is a
-    // service NAME (every destructive-matching token is a lowercase identifier
-    // slug) AND it sits on a passive content container, not an action control.
+    // in. Checks visible text, aria-label, and value (input buttons) on EVERY
+    // crawled candidate. There is NO reliable way to prove an element has no
+    // click handler from page context — addEventListener bindings are invisible
+    // to the DOM and getEventListeners is devtools-only — so any destructive-
+    // lexicon hit is excluded outright. Losing a passive row that merely SHARES a
+    // name with a verb ("checkout-api") is a small price for never scripting a
+    // real Delete/Pay; --allow-destructive re-includes them.
     const labels = [text, aria, value].filter((s): s is string => Boolean(s));
     if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
-      // A genuinely PASSIVE content container has NO interactivity signal of any
-      // kind — an inert display row (a service name, a read-only cell), never an
-      // action control. We must not infer inertness from the onclick ATTR alone:
-      // frameworks bind clicks via addEventListener, so onclick is null even on a
-      // fully clickable destructive control. Require the tag to be non-interactive
-      // AND the role non-interactive AND onclick null AND the computed cursor not
-      // "pointer" AND tabindex < 0. Any one signal → treat as an action control
-      // (safety-first: a clickable row we can't prove benign is excluded).
-      const contentContainer =
-        tag !== "button" && tag !== "a" && tag !== "input" &&
-        (role === null || !INTERACTIVE_ROLES.has(role.toLowerCase())) &&
-        onclick === null && probe.cursor !== "pointer" && probe.tabIndex < 0;
-      // keep ONLY when the container is passive AND the destructive signal is
-      // confined to slug tokens (stripping them leaves nothing destructive)
-      const slugSafe = contentContainer && labels.every((s) => !isDestructiveLabel(withoutSlugTokens(s)));
-      if (!slugSafe) {
-        if (text) excludedDestructive.push(text);
-        continue;
-      }
+      if (text) excludedDestructive.push(text);
+      continue;
     }
 
     // data-testid outranks aria/placeholder/text: it survives live-updating
@@ -512,6 +471,22 @@ export async function crawlApp(
         continue;
       }
       const digest = await digestPage(page, screenshots, allowDestructive);
+      // never film a page whose settled URL is itself a credential — the URL is
+      // an un-redactable validation key, so drop the page rather than leak it
+      if (pageUrlHasSecret(digest.url)) {
+        if (digests.length === 0 && queue.length === 0) {
+          throw new Error(
+            "the target URL contains a secret in its path or query (a token/key/JWT); " +
+              "supercut won't film a page whose URL is itself a credential — point --url at a " +
+              "token-free URL (film against a local/staging environment)",
+          );
+        }
+        console.error(
+          `  skipped ${new URL(digest.url).pathname} — its URL contains a secret ` +
+            `(won't film a page whose URL is a credential)`,
+        );
+        continue;
+      }
       digests.push(digest);
 
       for (const item of digest.inventory) {

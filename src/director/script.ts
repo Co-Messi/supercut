@@ -96,26 +96,24 @@ export async function writeRecipe(
         ? `\n  FRAMABLE REGIONS (focus_selector only — hold the camera here to show a result):\n` +
           d.regions.map((r) => `    \`${r.selector}\`  [${r.tag}] "${redactForPrompt(r.text)}"`).join("\n")
         : "";
-      // redact the page URL too — a query-string token (?session=<jwt>) is egress
-      // just like the element text/hrefs already routed through redactForPrompt
-      return `PAGE ${redactForPrompt(d.url)}\n${els}${regions}`;
+      // URLs are validation KEYS (entry.url must round-trip against the raw
+      // crawled URL), so they stay unredacted; pages whose URL carries a secret
+      // are dropped in crawlApp, so none reaches this prompt.
+      return `PAGE ${d.url}\n${els}${regions}`;
     })
     .join("\n\n");
 
   const base: ChatPart[] = [
     {
       type: "text",
-      // every crawled/app URL is egress — a query-string token would leak here
-      // too, so redact app_url and each money moment's page_url alongside the
-      // PAGE lines in inventoryText (validation still keys off the raw digests).
       text:
-        `APP: ${redactForPrompt(appUrl)}\nPRODUCT: ${analysis.product_summary}\n\nMONEY MOMENTS:\n` +
+        `APP: ${appUrl}\nPRODUCT: ${analysis.product_summary}\n\nMONEY MOMENTS:\n` +
         analysis.money_moments
-          .map((m) => `- ${m.title} (${redactForPrompt(m.page_url)}): ${m.why} — elements: ${m.elements.join(", ")}`)
+          .map((m) => `- ${m.title} (${m.page_url}): ${m.why} — elements: ${m.elements.join(", ")}`)
           .join("\n") +
         `\n\nSTORYBOARD (mandatory; output exactly these beats in this order, one scene per beat):\n` +
         analysis.money_moments
-          .map((m, i) => `${i + 1}. ${i === 0 ? "HOOK" : i === analysis.money_moments.length - 1 ? "PAYOFF" : "PROOF"} — ${m.title} @ ${redactForPrompt(m.page_url)}; scene must use one of: ${m.elements.join(", ")}`)
+          .map((m, i) => `${i + 1}. ${i === 0 ? "HOOK" : i === analysis.money_moments.length - 1 ? "PAYOFF" : "PROOF"} — ${m.title} @ ${m.page_url}; scene must use one of: ${m.elements.join(", ")}`)
           .join("\n") +
         `\n\nMUSIC: set "music_track" to "${analysis.music_track}" (picked to match the app's look) unless you have a strong reason to choose another bundled track.` +
         `\n\nELEMENT INVENTORY (the ONLY selectors you may use):\n${inventoryText}`,

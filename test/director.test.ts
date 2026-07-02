@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
-import { DESTRUCTIVE_RE, isDestructiveLabel } from "../src/director/inventory.js";
+import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
 import { pickMusic } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
@@ -384,9 +384,10 @@ describe("destructive-action guard (H1)", () => {
     for (const label of ["Delete account", "Delete", "Remove", "Pay $49", "Cancel subscription", "checkout"]) {
       expect(isDestructiveLabel(label), `expected "${label}" to be destructive`).toBe(true);
     }
-    // hyphen/underscore-joined verbs now match too — a bare lexicon test can't
-    // tell a service NAME from a Delete button, so the keep/exclude decision is
-    // made at the filter site (content row vs action control), never here
+    // hyphen/underscore-joined verbs match too. A service NAME sharing a word
+    // with a verb ("checkout-api") also matches and IS excluded: there's no way
+    // to prove an element has no click handler from page context, so any
+    // lexicon hit is fail-safe excluded rather than kept on a guess.
     for (const label of [
       "Delete-all",
       "reset_config",
@@ -460,9 +461,13 @@ describe("LLM prompt egress redaction + retry payload", () => {
   const jwt =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
 
-  it("redacts a query-string token in the page URL (plus title/heading secrets) before the analyze prompt", async () => {
-    const url = `http://127.0.0.1:9999/dash?session=${jwt}`;
-    const secretDigests: PageDigest[] = [
+  it("redacts title/heading/element secrets but keeps the URL intact as a validation key in the analyze prompt", async () => {
+    // secret-URL pages are dropped upstream in crawlApp (see pageUrlHasSecret +
+    // the e2e drop test), so here the URL is a normal query URL that must
+    // round-trip UNREDACTED (it is the key the recipe's entry.url validates
+    // against); only the display fields (title/headings/element text) are redacted.
+    const url = "http://127.0.0.1:9999/dash?view=chart";
+    const digests: PageDigest[] = [
       {
         url,
         title: "Ops console admin@corp.com",
@@ -486,24 +491,23 @@ describe("LLM prompt egress redaction + retry payload", () => {
       ],
     });
     const llm = new StubLlm([good]);
-    await analyzeApp(llm, secretDigests);
+    await analyzeApp(llm, digests);
     const prompt = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
-    expect(prompt).not.toContain(jwt);
     expect(prompt).not.toContain("admin@corp.com");
     expect(prompt).not.toContain("supersecretvalue123456");
-    expect(prompt).toContain("[REDACTED_TOKEN]"); // the JWT in ?session=
     expect(prompt).toContain("[REDACTED_EMAIL]"); // the email in the title
     expect(prompt).toContain("token=[REDACTED]"); // the assignment in the heading
+    expect(prompt).toContain(url); // the URL round-trips unredacted (it is a key)
   });
 
-  it("redacts a query-string token in the page/app URL before the script prompt", async () => {
-    const url = `http://127.0.0.1:9999/dash?session=${jwt}`;
-    const secretDigests: PageDigest[] = [
+  it("keeps the URL intact so the recipe round-trips, while element text stays redacted, in the script prompt", async () => {
+    const url = "http://127.0.0.1:9999/dash?view=chart";
+    const digests: PageDigest[] = [
       { url, title: "Dash", headings: ["Live"], inventory: [
-        { selector: "#cta", tag: "button", text: "Start", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+        { selector: "#cta", tag: "button", text: `open ${jwt}`, bbox: { x: 1, y: 2, w: 3, h: 4 } },
       ] },
     ];
-    const secretAnalysis: AppAnalysis = {
+    const analysis: AppAnalysis = {
       product_summary: "A dashboard product for teams.",
       product_name: "Lumon",
       headline: "See it live now",
@@ -522,10 +526,19 @@ describe("LLM prompt egress redaction + retry payload", () => {
       ],
     });
     const llm = new StubLlm([recipe]);
-    await writeRecipe(llm, secretAnalysis, secretDigests, url);
+    // the recipe echoes the raw URL as entry.url and passes validation (round-trip)
+    await writeRecipe(llm, analysis, digests, url);
     const prompt = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
-    expect(prompt).not.toContain(jwt);
+    expect(prompt).toContain(url); // URL is a key: unredacted, round-trips
+    expect(prompt).not.toContain(jwt); // element TEXT is still redacted
     expect(prompt).toContain("[REDACTED_TOKEN]");
+  });
+
+  it("pageUrlHasSecret flags a URL carrying a token/key/JWT, not a normal query URL", () => {
+    expect(pageUrlHasSecret(`http://app/dash?session=${jwt}`)).toBe(true);
+    expect(pageUrlHasSecret("http://app/dash?token=supersecretvalue123456")).toBe(true);
+    expect(pageUrlHasSecret("http://app/dash?view=chart&tab=latency")).toBe(false);
+    expect(pageUrlHasSecret("http://127.0.0.1:4100/")).toBe(false);
   });
 
   it("sends page screenshots only on the first attempt, never on a schema retry", async () => {

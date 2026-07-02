@@ -72,22 +72,19 @@ describe("inventory crawler on the fixture app", () => {
     expect(digests[0]!.accentColor).toBe("rgb(37, 99, 235)");
   }, 60_000);
 
-  it("keeps a multi-row dashboard filmable: distinct siblings, content names survive, real Delete excluded", async () => {
+  it("keeps a multi-row dashboard filmable while fail-safe excluding every destructive-labelled element", async () => {
     const digests = await crawlApp(`${app.url}/fleet`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     const fleet = digests[0]!;
 
     // dark ops dashboard → the look probe must say so
     expect(fleet.theme).toBe("dark");
 
-    // six identical-testid rows → six DISTINCT :nth-match entries with their
-    // own text; a story needs "click row 2, then row 4"
+    // six identical-testid rows (all non-destructive names) → six DISTINCT
+    // :nth-match entries with their own text; a story needs "click row 2, then 4"
     const rows = fleet.inventory.filter((i) => i.selector.includes('[data-testid="service-item"]'));
     expect(rows).toHaveLength(6);
     expect(new Set(rows.map((r) => r.selector)).size).toBe(6);
     for (const row of rows) expect(row.selector).toMatch(/^:nth-match\(/);
-
-    // a row NAMED "checkout-api" is content, not a destructive control
-    expect(rows.some((r) => r.text.includes("checkout-api"))).toBe(true);
 
     // the search box resolves via data-testid, immune to ticking metrics text
     expect(fleet.inventory.some((i) => i.selector === '[data-testid="service-search"]')).toBe(true);
@@ -99,17 +96,30 @@ describe("inventory crawler on the fixture app", () => {
       expect(fleet.excludedDestructive).toContain(label);
     }
 
-    // a framework-wired clickable div — handler bound via addEventListener, so
-    // the onclick ATTR is null — with a destructive slug label must ALSO be
-    // excluded. The onclick-attr heuristic alone would have KEPT it; the
-    // cursor:pointer interactivity signal is what catches it.
+    // the reviewer's repro: a framework-wired clickable div — handler bound via
+    // addEventListener (onclick ATTR null) AND no cursor:pointer/tabindex/role
+    // signal — is excluded purely by its destructive label. No interactivity
+    // heuristic could have caught it; we no longer rely on one.
     expect(fleet.inventory.some((i) => i.text.includes("delete-worker"))).toBe(false);
     expect(fleet.excludedDestructive).toContain("delete-worker");
 
-    // the slug-named content row survived the same filter that excluded them —
-    // it is genuinely passive (cursor:default, no handler, no role)
-    expect(fleet.inventory.some((i) => i.text.includes("checkout-api"))).toBe(true);
+    // a genuinely PASSIVE destructive-slug row (a read-only <li>, cursor:default,
+    // no handler) is ALSO excluded now — we can't prove it's inert, so fail-safe
+    // wins over filming a row that merely looks like a display cell.
+    expect(fleet.inventory.some((i) => i.text.includes("delete-log-2024"))).toBe(false);
+    expect(fleet.excludedDestructive).toContain("delete-log-2024");
   }, 60_000);
+
+  it("refuses to film a page whose URL is itself a credential (token in the query)", async () => {
+    // a URL is a validation key that can't be redacted, so a page whose URL
+    // carries a secret is dropped rather than leaked — here it's the start page,
+    // so the run fails closed with a clear error instead of egressing the token
+    await expect(
+      crawlApp(`${app.url}/?token=supersecretvalue123456`, {
+        maxPages: 1, screenshots: false, allowPrivateNetwork: true,
+      }),
+    ).rejects.toThrow(/contains a secret/i);
+  }, 30_000);
 
   it("does not misread a light app with a full-viewport translucent overlay as dark", async () => {
     // a modal backdrop rgba(0,0,0,.55) out-covers the body but is not the page

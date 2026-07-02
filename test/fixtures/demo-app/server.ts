@@ -124,17 +124,17 @@ const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
 </body></html>`;
 
 /** fourth route: a DARK service-fleet dashboard shaped like real ops tools —
- *  six PASSIVE rows sharing one data-testid (cursor:default, no click handler:
- *  each must survive as a distinct :nth-match entry), one row NAMED with a
- *  destructive-looking slug ("checkout-api" must stay filmable as a read-only
- *  display row), live-ticking latencies (text-based selectors self-invalidate),
- *  and destructive controls that must ALL be excluded: a <button>, an inline-
- *  onclick div, a bare <button>Delete-all</button>, and a framework-wired
- *  "danger-row" div whose click is bound via addEventListener (NO onclick attr)
- *  and is caught only by its cursor:pointer signal. The dark surface is painted
- *  on a #root wrapper while body/html stay transparent — the React/Next shape a
- *  body-only theme probe misreads "light", so this exercises the largest-surface
- *  probe. */
+ *  six PASSIVE rows sharing one data-testid (each must survive as a distinct
+ *  :nth-match entry), live-ticking latencies (text-based selectors self-
+ *  invalidate), and destructive controls that must ALL be excluded: a <button>,
+ *  an inline-onclick div, a bare <button>Delete-all</button>, a PASSIVE
+ *  destructive-slug row (<li>delete-log-2024</li> — we can't prove it's inert,
+ *  so it's fail-safe excluded), and a framework-wired "danger-row" div whose
+ *  click is bound via addEventListener with NO onclick attr and NO cursor/
+ *  tabindex/role signal at all — excluded purely by its destructive label. The
+ *  dark surface is painted on a #root wrapper while body/html stay transparent —
+ *  the React/Next shape a body-only theme probe misreads "light", so this
+ *  exercises the largest-surface probe. */
 const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Fleet</title><style>
   :root { --ink:#e8eaf2; --accent:#5b8cff; --surface:#0b0e14 }
   * { box-sizing:border-box; margin:0 }
@@ -155,16 +155,17 @@ const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
     <h2>Service fleet</h2>
     <input data-testid="service-search" placeholder="Search services…">
     <ul>
-      <li data-testid="service-item"><span>checkout-api</span><span class="ms">160ms</span></li>
+      <li data-testid="service-item"><span>orders-api</span><span class="ms">160ms</span></li>
       <li data-testid="service-item"><span>payments-worker</span><span class="ms">84ms</span></li>
       <li data-testid="service-item"><span>auth-gateway</span><span class="ms">41ms</span></li>
       <li data-testid="service-item"><span>search-indexer</span><span class="ms">203ms</span></li>
       <li data-testid="service-item"><span>media-transcoder</span><span class="ms">330ms</span></li>
       <li data-testid="service-item"><span>notification-hub</span><span class="ms">57ms</span></li>
     </ul>
+    <ul><li data-testid="log-row"><span>delete-log-2024</span></li></ul>
     <button id="danger">Delete service</button>
     <div id="danger-div" data-testid="danger" onclick="return false">Delete account</div>
-    <div data-testid="danger-row" style="cursor:pointer">delete-worker</div>
+    <div data-testid="danger-row">delete-worker</div>
     <button>Delete-all</button>
   </main>
   </div>

@@ -127,21 +127,26 @@ const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
  *  six rows sharing one data-testid (each must survive as a distinct
  *  :nth-match entry), one row NAMED with a destructive-looking slug
  *  ("checkout-api" must stay filmable), live-ticking latencies (text-based
- *  selectors self-invalidate), and a genuine Delete button (must be excluded). */
+ *  selectors self-invalidate), and several genuine destructive controls (all
+ *  excluded). The dark surface is painted on a #root wrapper while body/html
+ *  stay transparent — the React/Next shape that a body-only theme probe
+ *  misreads "light", so this exercises the largest-surface probe. */
 const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Fleet</title><style>
-  :root { --ink:#e8eaf2; --accent:#5b8cff; --bg:#0b0e14 }
+  :root { --ink:#e8eaf2; --accent:#5b8cff; --surface:#0b0e14 }
   * { box-sizing:border-box; margin:0 }
-  body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
-  main { max-width:1000px; margin:40px auto; padding:0 24px }
+  body { font-family:-apple-system,'Segoe UI',sans-serif }
+  #root { min-height:100vh; background:var(--surface); color:var(--ink) }
+  main { max-width:1000px; margin:0 auto; padding:40px 24px }
   input { width:100%; font-size:16px; padding:12px 16px; background:#141926; color:var(--ink);
           border:1px solid #232a3d; border-radius:10px; margin-top:16px }
   ul { list-style:none; padding:0; margin-top:20px }
   li { background:#11151f; border:1px solid #1d2333; border-radius:10px; padding:14px 18px;
        margin-bottom:8px; display:flex; justify-content:space-between; cursor:pointer }
   li:hover { border-color:var(--accent) }
-  #danger { margin-top:28px; background:#3a1420; color:#ff9cae; border:0; padding:12px 22px;
+  #danger, #danger-div { margin-top:28px; background:#3a1420; color:#ff9cae; border:0; padding:12px 22px;
             border-radius:8px; cursor:pointer }
 </style></head><body>
+  <div id="root">
   <main>
     <h2>Service fleet</h2>
     <input data-testid="service-search" placeholder="Search services…">
@@ -154,7 +159,10 @@ const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
       <li data-testid="service-item"><span>notification-hub</span><span class="ms">57ms</span></li>
     </ul>
     <button id="danger">Delete service</button>
+    <div id="danger-div" data-testid="danger" onclick="return false">Delete account</div>
+    <button>Delete-all</button>
   </main>
+  </div>
   <script>
     setInterval(() => {
       for (const el of document.querySelectorAll(".ms"))

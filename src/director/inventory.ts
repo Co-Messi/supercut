@@ -84,21 +84,36 @@ export const DESTRUCTIVE_RE =
   /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
 
 /**
- * A label is destructive only when the lexicon verb stands ALONE — a slug
- * fragment ("checkout-api", "delete-log-2024") is a content NAME, not an
- * action. `\b` fires at hyphen boundaries, so a bare regex test erased whole
- * dashboards whose data happened to contain a scary substring.
+ * PLAIN lexicon match: a label is destructive if it CONTAINS any DESTRUCTIVE_RE
+ * verb — no border exemption. `_` is a regex word char, so `\b` never fires at
+ * an underscore seam ("reset_config"); we normalize `_`→space first so
+ * slug-joined verbs still match. This is deliberately over-inclusive: whether a
+ * slug-shaped CONTENT name ("checkout-api") is kept or excluded is decided at
+ * the filter site (a passive content row survives; an action control never
+ * does), NOT here — a lexicon test alone can't tell a Delete button from a
+ * service row.
  */
 export function isDestructiveLabel(s: string): boolean {
-  const re = new RegExp(DESTRUCTIVE_RE.source, "gi");
-  for (let m = re.exec(s); m !== null; m = re.exec(s)) {
-    const before = s[m.index - 1];
-    const after = s[m.index + m[0].length];
-    // bordered by -/_ → inside a larger identifier token, keep scanning
-    if ((before !== undefined && /[-_]/.test(before)) || (after !== undefined && /[-_]/.test(after))) continue;
-    return true;
-  }
-  return false;
+  return DESTRUCTIVE_RE.test(s.replace(/_/g, " "));
+}
+
+/**
+ * A "safe content slug" is a single lowercase identifier token — a service NAME
+ * ("checkout-api", "delete-log-2024", "payments-worker"), never a verb. Only
+ * these earn the destructive-match exception. Anchored, all-lowercase,
+ * hyphen/underscore-joined, no spaces, no capitals — so "Delete-all" (capital)
+ * and "Delete account" (space) never qualify.
+ */
+const CONTENT_SLUG_RE = /^[a-z][a-z0-9]*([-_][a-z0-9]+)+$/;
+
+/**
+ * Strip every content-slug token from a label; what remains is its non-name
+ * text. If that STILL matches the lexicon the destructive signal lives outside
+ * a slug ("checkout-api Delete" → "Delete"), so the element must be excluded
+ * even though it also carries a service name.
+ */
+function withoutSlugTokens(s: string): string {
+  return s.split(/\s+/).filter((tok) => !CONTENT_SLUG_RE.test(tok)).join(" ");
 }
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
@@ -160,25 +175,52 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
  *  near 0; ambiguous mid-grays fall through to the safer "light" default. */
 const DARK_LUMINANCE_MAX = 0.35;
 
+/** a background must cover at least this fraction of the viewport to count as a
+ *  dominant surface — below it we're looking at a card/hero, not the ground */
+const SURFACE_COVER_MIN = 0.6;
+/** cap the element scan so the probe stays cheap on huge DOMs */
+const SURFACE_SCAN_LIMIT = 400;
+
 /**
- * Cheap look probe: effective background color (body → html, first
- * non-transparent) → relative luminance → dark/light, plus the first visible
- * button's background as an accent hint. Advisory only — any failure defaults
- * to "light" rather than blocking the crawl.
+ * Cheap look probe: the DOMINANT visible background → relative luminance →
+ * dark/light, plus the first visible button's background as an accent hint.
+ * Many React/Next apps leave body/html transparent (or white) and paint the
+ * real surface on #root/main/a full-bleed wrapper, so a body→html-only walk
+ * misreads them "light". We instead take the background of the LARGEST
+ * viewport-covering element, with body/html as the fallback floor. Advisory
+ * only — any failure defaults to "light" rather than blocking the crawl.
  */
 async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accentColor?: string }> {
   try {
-    const probe = await page.evaluate(({ darkMax }) => {
+    const probe = await page.evaluate(({ darkMax, coverMin, scanLimit }) => {
       const parse = (c: string): [number, number, number, number] | null => {
         const m = c.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)/);
         return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])] : null;
       };
-      // effective page ground: body first, html as fallback (transparent body)
-      let rgb: [number, number, number] | null = null;
-      for (const el of [document.body, document.documentElement]) {
-        if (!el) continue;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const vArea = Math.max(1, vw * vh);
+      const coverage = (el: Element): number => {
+        const r = el.getBoundingClientRect();
+        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        return (w * h) / vArea;
+      };
+      // dominant ground: largest-covered element with a non-transparent bg.
+      // body/html carry a small bias DOWN so a full-bleed painted wrapper wins
+      // ties over a transparent/white body (the misread this fix targets).
+      let bestRgb: [number, number, number] | null = null;
+      let bestScore = -Infinity;
+      const consider = (el: Element | null, fallbackBias: number): void => {
+        if (!el) return;
         const c = parse(getComputedStyle(el).backgroundColor);
-        if (c && c[3] > 0) { rgb = [c[0], c[1], c[2]]; break; }
+        if (!c || c[3] === 0) return; // transparent — contributes no ground
+        const score = coverage(el) - fallbackBias;
+        if (score > bestScore) { bestScore = score; bestRgb = [c[0], c[1], c[2]]; }
+      };
+      consider(document.body, 0.002);
+      consider(document.documentElement, 0.002);
+      for (const el of Array.from(document.querySelectorAll("*")).slice(0, scanLimit)) {
+        if (coverage(el) >= coverMin) consider(el, 0);
       }
       // WCAG relative luminance — perceptual, so #16161a and #0b0e14 both read dark
       const luminance = ([r, g, b]: [number, number, number]): number => {
@@ -188,6 +230,7 @@ async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accent
         };
         return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
       };
+      const rgb = bestRgb;
       const theme = rgb && luminance(rgb) < darkMax ? "dark" : "light";
       let accent: string | null = null;
       for (const el of Array.from(document.querySelectorAll("button, [role=button], input[type=submit]"))) {
@@ -199,7 +242,7 @@ async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accent
         break;
       }
       return { theme, accent };
-    }, { darkMax: DARK_LUMINANCE_MAX });
+    }, { darkMax: DARK_LUMINANCE_MAX, coverMin: SURFACE_COVER_MIN, scanLimit: SURFACE_SCAN_LIMIT });
     return {
       theme: probe.theme === "dark" ? "dark" : "light",
       ...(probe.accent ? { accentColor: probe.accent } : {}),
@@ -245,10 +288,10 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     const id = await el.getAttribute("id").catch(() => null);
     const testid = await el.getAttribute("data-testid").catch(() => null);
     const role = await el.getAttribute("role").catch(() => null);
-    const inputType = await el.getAttribute("type").catch(() => null);
     const aria = await el.getAttribute("aria-label").catch(() => null);
     const placeholder = await el.getAttribute("placeholder").catch(() => null);
     const value = await el.getAttribute("value").catch(() => null);
+    const onclick = await el.getAttribute("onclick").catch(() => null);
     const href = (await el.getAttribute("href").catch(() => null)) ?? undefined;
     const text = (
       (await el.innerText().catch(() => "")) ||
@@ -256,21 +299,29 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
       placeholder || aria || ""
     ).trim().replace(/\s+/g, " ").slice(0, 80);
 
-    // fail-safe: never put a destructive/irreversible control into the inventory
+    // Fail-safe: never put a destructive/irreversible control into the inventory
     // (so the director can't script a click/type on it) unless explicitly opted
-    // in. Checks visible text, aria-label, and value (input buttons). Scoped to
-    // genuine ACTION controls: content/data rows (li[id], tr[id], data-testid
-    // containers) merely select or navigate, so a row NAMED "checkout-api" must
-    // stay filmable while a <button>Delete</button> stays excluded.
-    const isActionControl =
-      tag === "button" ||
-      (tag === "a" && href !== undefined) ||
-      (tag === "input" && ["submit", "button"].includes((inputType ?? "").toLowerCase())) ||
-      role === "button" ||
-      role === "menuitem";
-    if (!allowDestructive && isActionControl && [text, aria, value].some((s) => s && isDestructiveLabel(s))) {
-      if (text) excludedDestructive.push(text);
-      continue;
+    // in. Checks visible text, aria-label, and value (input buttons), on EVERY
+    // crawled candidate — a clickable div[onclick] or [data-testid] can be a real
+    // Delete button just as much as a <button> can. A slug-NAMED content row
+    // ("checkout-api" on an <li>) is the ONE exception: its only lexicon hit is a
+    // service NAME (every destructive-matching token is a lowercase identifier
+    // slug) AND it sits on a passive content container, not an action control.
+    const labels = [text, aria, value].filter((s): s is string => Boolean(s));
+    if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
+      // content containers merely select/navigate; li/tr always qualify, and a
+      // [data-testid] box qualifies only when it is not itself clickable.
+      const contentContainer =
+        tag === "li" || tag === "tr" ||
+        (testid !== null && tag !== "button" && tag !== "a" && tag !== "input" &&
+          role !== "button" && onclick === null);
+      // keep ONLY when the container is passive AND the destructive signal is
+      // confined to slug tokens (stripping them leaves nothing destructive)
+      const slugSafe = contentContainer && labels.every((s) => !isDestructiveLabel(withoutSlugTokens(s)));
+      if (!slugSafe) {
+        if (text) excludedDestructive.push(text);
+        continue;
+      }
     }
 
     // data-testid outranks aria/placeholder/text: it survives live-updating

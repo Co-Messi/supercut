@@ -3,9 +3,26 @@
 
 Pure subtractive/additive synthesis — oscillators, filtered noise, envelopes.
 No vocal source exists, so no vocals/chants/yells are possible. Four moods.
-Outputs 16-bit stereo WAV; ffmpeg encodes the loopable MP3 bed afterward.
+
+End-to-end: for each mood it synthesizes a ~30-40s 16-bit stereo WAV loop, then
+shells out to ffmpeg to self-crossfade that loop to ~92s, loudness-normalize it,
+and encode the committed ``assets/music/<mood>.mp3`` bed — the same pipeline that
+produced the checked-in MP3s (equivalent audio, not necessarily bit-identical).
+
+Dependencies:
+  * Python packages: ``pip install numpy scipy`` (synthesis + WAV writing)
+  * ``ffmpeg`` on PATH (loop-extend + loudnorm + libmp3lame encode)
+
+Usage:
+  python3 tools/synth-music.py assets/music
+
+Writes ``<out-dir>/<mood>.mp3`` for every mood. The intermediate WAVs are staged
+in a temp dir and discarded, so nothing but the MP3 beds lands in the out dir.
 """
+import os
+import subprocess
 import sys
+import tempfile
 import numpy as np
 from scipy import signal as sig
 
@@ -210,9 +227,44 @@ MOODS = {
     ], 41),
 }
 
+# bed shape: loop the source ~3× with a 1s crossfade, trim to ~92s, loudnorm.
+# 3× reaches ≥92s for every mood (momentum's shorter loop lands at ~91s), so the
+# trim caps rather than pads — no silence tail. loudnorm/bitrate match the beds.
+BED_TARGET_S = 92.0
+BED_LOOPS = 3
+BED_CROSSFADE_S = 1.0
+BED_LOUDNORM = "loudnorm=I=-15:TP=-1.5:LRA=9"
+
+def encode_mp3_bed(wav_path, mp3_path,
+                   target_s=BED_TARGET_S, loops=BED_LOOPS, crossfade_s=BED_CROSSFADE_S):
+    """ffmpeg: self-crossfade the WAV loop `loops`× (acrossfade d=1), trim to
+    `target_s`, loudness-normalize, and encode a 192k 44.1k stereo MP3 bed. This
+    is the loop-extend step that turns the short synthesized source into the
+    ~90s bed shipped in assets/music/."""
+    inputs = []
+    for _ in range(loops):
+        inputs += ["-i", wav_path]
+    stages, prev = [], "0"
+    for i in range(1, loops):
+        stages.append(f"[{prev}][{i}]acrossfade=d={crossfade_s}[x{i}]")
+        prev = f"x{i}"
+    stages.append(f"[{prev}]atrim=0:{target_s},{BED_LOUDNORM}[out]")
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *inputs,
+         "-filter_complex", ";".join(stages), "-map", "[out]",
+         "-ar", str(SR), "-ac", "2", "-c:a", "libmp3lame", "-b:a", "192k", mp3_path],
+        check=True,
+    )
+
 if __name__ == "__main__":
     out_dir = sys.argv[1]
-    for mood,(bpm,bars,chords,seed) in MOODS.items():
-        data=build(mood,bpm,bars,None,chords,seed)
-        write_wav(f"{out_dir}/{mood}.wav", data)
-        print(f"{mood}: {len(data)/SR:.1f}s")
+    os.makedirs(out_dir, exist_ok=True)
+    # stage WAVs in a temp dir so only the MP3 beds land beside the committed set
+    with tempfile.TemporaryDirectory() as tmp:
+        for mood,(bpm,bars,chords,seed) in MOODS.items():
+            data=build(mood,bpm,bars,None,chords,seed)
+            wav_path=os.path.join(tmp, f"{mood}.wav")
+            write_wav(wav_path, data)
+            mp3_path=os.path.join(out_dir, f"{mood}.mp3")
+            encode_mp3_bed(wav_path, mp3_path)
+            print(f"{mood}: {len(data)/SR:.1f}s loop -> {mp3_path}")

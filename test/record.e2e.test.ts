@@ -195,7 +195,10 @@ describe("record E2E on fixture app", () => {
     const t2 = timeStamps(e2);
     expect(t1.length).toBe(t2.length);
     for (let i = 0; i < t1.length; i++) {
-      expect(Math.abs(t1[i]! - t2[i]!)).toBeLessThanOrEqual(150);
+      // events now ride the observed wall clock, so identical runs differ by
+      // real scheduling jitter; 250ms matches the render skew gate and holds
+      // under parallel-suite CPU contention (150ms overshot by <1ms under load)
+      expect(Math.abs(t1[i]! - t2[i]!)).toBeLessThanOrEqual(250);
     }
 
     // ---- render the take: full record→render pipeline proof ----

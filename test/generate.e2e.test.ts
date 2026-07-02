@@ -92,9 +92,15 @@ describe("inventory crawler on the fixture app", () => {
     // the search box resolves via data-testid, immune to ticking metrics text
     expect(fleet.inventory.some((i) => i.selector === '[data-testid="service-search"]')).toBe(true);
 
-    // the genuine destructive button stays out, loudly
-    expect(fleet.inventory.some((i) => i.text.includes("Delete service"))).toBe(false);
-    expect(fleet.excludedDestructive).toContain("Delete service");
+    // every genuine destructive control stays out, loudly — including a clickable
+    // div[onclick] (not scoped to <button>) and a hyphen-joined action label
+    for (const label of ["Delete service", "Delete account", "Delete-all"]) {
+      expect(fleet.inventory.some((i) => i.text.includes(label)), `${label} must be excluded`).toBe(false);
+      expect(fleet.excludedDestructive).toContain(label);
+    }
+
+    // the slug-named content row survived the same filter that excluded them
+    expect(fleet.inventory.some((i) => i.text.includes("checkout-api"))).toBe(true);
   }, 60_000);
 });
 

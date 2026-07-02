@@ -52,16 +52,25 @@ export type AppAnalysis = z.infer<typeof appAnalysis>;
  * `` `<selector>` [tag] "text" ``; a model that grabs past the closing backtick
  * appends the ` [tag]…` annotation (e.g. `:nth-match(…, 1) [button]`). Selectors
  * themselves contain `]`/`)`/quotes, so we can't regex-strip safely — instead we
- * accept the LONGEST real inventory selector that `raw` starts with. Only
- * coerces when a genuine selector is a prefix; otherwise returns raw untouched
- * so the whitelist gate still rejects an actual hallucination.
+ * accept the LONGEST real inventory selector that `raw` starts with AND whose
+ * remainder is only the display annotation. A bare `startsWith` heals too much:
+ * `#cta-danger` starts with `#cta`, so prefix-healing would silently rewrite a
+ * hallucinated sibling into a real selector and bypass the whitelist gate. We
+ * only heal when what follows the matched selector is whitespace-then-`[tag]`
+ * (the annotation shape) or nothing — never a selector-continuation character.
  */
+const ANNOTATION_TAIL_RE = /^\s+\[[a-z0-9-]+\]/i;
+
 export function coerceSelector(raw: string, valid: Set<string>): string {
   const s = raw.trim();
   if (valid.has(s)) return s;
   let best = "";
   for (const v of valid) {
-    if (s.startsWith(v) && v.length > best.length) best = v;
+    if (!s.startsWith(v) || v.length <= best.length) continue;
+    const rest = s.slice(v.length);
+    // `#cta-danger` / `#cta2` have a real-selector remainder → leave untouched so
+    // the gate rejects them; only annotation junk or pure whitespace heals
+    if (rest.trim() === "" || ANNOTATION_TAIL_RE.test(rest)) best = v;
   }
   return best || s;
 }

@@ -376,24 +376,30 @@ describe("destructive-action guard (H1)", () => {
     expect(accepted("Sign in", false)).toBe(true); // benign always kept
   });
 
-  it("isDestructiveLabel: standalone verbs/phrases exclude, slug fragments never do", () => {
-    // genuine action labels — still destructive
+  it("isDestructiveLabel: PLAIN lexicon match — fires on any label containing a verb, slug-joined or not", () => {
+    // standalone verbs/phrases
     for (const label of ["Delete account", "Delete", "Remove", "Pay $49", "Cancel subscription", "checkout"]) {
       expect(isDestructiveLabel(label), `expected "${label}" to be destructive`).toBe(true);
     }
-    // content NAMES that merely contain a scary substring — must stay filmable
+    // hyphen/underscore-joined verbs now match too — a bare lexicon test can't
+    // tell a service NAME from a Delete button, so the keep/exclude decision is
+    // made at the filter site (content row vs action control), never here
     for (const label of [
+      "Delete-all",
+      "reset_config",
       "checkout-api",
       "checkout-api 160ms",
-      "payments-worker",
       "delete-log-2024",
       "archive-service Operational",
       "reset_password_flow",
+      "checkout-api Delete",
     ]) {
+      expect(isDestructiveLabel(label), `expected "${label}" to be destructive`).toBe(true);
+    }
+    // labels with no lexicon verb at all stay benign
+    for (const label of ["payments-worker", "auth-gateway", "Sign in", "Search services"]) {
       expect(isDestructiveLabel(label), `expected "${label}" NOT to be destructive`).toBe(false);
     }
-    // a slug AND a real action verb in the same label still excludes
-    expect(isDestructiveLabel("checkout-api Delete")).toBe(true);
   });
 });
 

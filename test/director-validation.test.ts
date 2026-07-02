@@ -62,8 +62,20 @@ describe("analysis validation", () => {
     expect(coerceSelector(':nth-match([data-testid="service-item"], 1) [button]', valid))
       .toBe(':nth-match([data-testid="service-item"], 1)');
     expect(coerceSelector("#cta  [button]", valid)).toBe("#cta");
+    expect(coerceSelector("#cta [input]", valid)).toBe("#cta");
     // an actual hallucination has no inventory prefix → returned as-is → fails the gate
     expect(coerceSelector("#totally-invented", valid)).toBe("#totally-invented");
+  });
+
+  it("does NOT prefix-heal a real-selector remainder — a hallucinated sibling stays rejected", () => {
+    const valid = new Set(["#cta"]);
+    // #cta-danger / #cta2 start with the valid #cta but the tail is selector
+    // continuation, not display annotation → returned as-is → the gate rejects them
+    expect(coerceSelector("#cta-danger", valid)).toBe("#cta-danger");
+    expect(coerceSelector("#cta2", valid)).toBe("#cta2");
+    expect(coerceSelector("#cta_alt", valid)).toBe("#cta_alt");
+    // but the annotation tail on the same base still heals
+    expect(coerceSelector("#cta [button]", valid)).toBe("#cta");
   });
 
   it("validateAnalysis accepts elements that carry the appended annotation (self-heals)", () => {

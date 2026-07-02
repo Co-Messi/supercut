@@ -216,12 +216,12 @@ supercut render   --take out/take --music path/to/your-track.mp3   # your own fi
 Bundled tracks (in `assets/music/` — original instrumentals made for supercut;
 provenance in `assets/music/CREDITS.md`):
 
-| track      | vibe         |
-| ---------- | ------------ |
-| `pulse`    | minimal-tech |
-| `daybreak` | warm         |
-| `midnight` | cinematic    |
-| `momentum` | energetic    |
+| track      | vibe                    |
+| ---------- | ----------------------- |
+| `pulse`    | minimal tech-house      |
+| `daybreak` | bright melodic house    |
+| `midnight` | dark synthwave/techno   |
+| `momentum` | driving minimal techno  |
 
 `--music off` (or omitting the flag) keeps the video silent.
 

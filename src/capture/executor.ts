@@ -495,37 +495,47 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       // ack-AFTER-write: Chromium won't send the next frame until we ack, so
       // awaiting the disk write before acking gives true backpressure (one
       // write in flight) and a failed write can never be silently indexed
+      const handleFrame = async (
+        ev: { data: string; sessionId: number; metadata: { timestamp?: number } },
+        dropping: boolean,
+      ): Promise<void> => {
+        // drop blank frames captured mid-navigation (the scene-change flash)
+        if (dropping) {
+          await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+          return;
+        }
+        // a frame without a CDP timestamp cannot be placed on the timeline —
+        // indexing it at 0 would poison t_source with an epoch-sized negative
+        const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
+        if (!(stampMs > 0)) {
+          await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+          return;
+        }
+        if (firstFrameStamp < 0) {
+          firstFrameStamp = stampMs;
+          signalFirstFrame();
+        }
+        const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
+        try {
+          await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
+          // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
+          // the first-processed frame; a negative t_source would sort to
+          // entry 0 and fail render-plan validation
+          frameIndex.push({ file, t_source: Math.max(0, stampMs - firstFrameStamp) });
+        } catch {
+          writeErrors++;
+        } finally {
+          await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+        }
+      };
       cdp.on("Page.screencastFrame", (ev) => {
-        lastWrite = (async () => {
-          // drop blank frames captured mid-navigation (the scene-change flash)
-          if (isNavigating) {
-            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
-            return;
-          }
-          // a frame without a CDP timestamp cannot be placed on the timeline —
-          // indexing it at 0 would poison t_source with an epoch-sized negative
-          const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
-          if (!(stampMs > 0)) {
-            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
-            return;
-          }
-          if (firstFrameStamp < 0) {
-            firstFrameStamp = stampMs;
-            signalFirstFrame();
-          }
-          const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
-          try {
-            await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
-            // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
-            // the first-processed frame; a negative t_source would sort to
-            // entry 0 and fail render-plan validation
-            frameIndex.push({ file, t_source: Math.max(0, stampMs - firstFrameStamp) });
-          } catch {
-            writeErrors++;
-          } finally {
-            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
-          }
-        })();
+        // CHAIN, never replace: if Chromium ever has >1 unacked frame in
+        // flight, replacing lastWrite would let the finalize await miss an
+        // earlier in-flight write and drop its frame from the index. The
+        // isNavigating flag is sampled at event time (its capture semantics),
+        // and per-frame failures never poison the chain (writeErrors counts).
+        const dropping = isNavigating;
+        lastWrite = lastWrite.then(() => handleFrame(ev, dropping)).catch(() => {});
       });
     }
 

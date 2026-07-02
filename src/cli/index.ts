@@ -16,7 +16,7 @@ const HELP = `supercut — institutional-grade 60s launch videos from your real 
 Usage:
   supercut generate --url <running app URL> [--repo <path>] [--music <track|file|off>]
   supercut record   --recipe <recipe.json> [--out <dir>] [--seed <n>]
-  supercut render   --take <dir> [--out <file.mp4>] [--bg aurora|midnight|dusk|paper|<asset>|<image>] [--music <track|file|off>]
+  supercut render   --take <dir> [--out <file.mp4>] [--bg <wallpaper|palette|image>] [--music <track|file|off>]
   supercut doctor
 
 Run any command with --help for details.`;
@@ -86,7 +86,7 @@ async function main(): Promise<number> {
     case "render": {
       const renderUsage =
         "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
-        "[--bg aurora|midnight|dusk|paper|<image path>] " +
+        "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
         "[--music <bundled track|audio file|off>]";
       // help is a real parsed boolean (see record) — no substring scan
       const { values } = parseArgs({

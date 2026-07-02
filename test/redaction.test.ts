@@ -86,6 +86,19 @@ describe("prompt redaction", () => {
     expect(redactForPrompt(`request id ${uuid}`)).toContain(uuid);
   });
 
+  it("redacts opaque Authorization: Bearer tokens (header form, no :/= separator)", () => {
+    // split literal — see the GitHub-tokens test
+    const token = ["mF_9z-abc", ".DEF_12345"].join("");
+    const out = redactForPrompt(`Authorization: Bearer ${token}`);
+    expect(out).not.toContain(token);
+    expect(out).toContain("Bearer [REDACTED]");
+  });
+
+  it("does NOT redact 'Bearer' in prose", () => {
+    const prose = "the Bearer of good news arrived at ten";
+    expect(redactForPrompt(prose)).toBe(prose);
+  });
+
   it("does NOT redact ordinary base64 image data URIs", () => {
     const dataUri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk";
     expect(redactForPrompt(`<img src="${dataUri}">`)).toContain(dataUri);

@@ -26,7 +26,7 @@
 
 **You built something great. Now you need a launch video — and all you've got is a screen recording, iMovie, and a deadline.**
 
-`supercut` points an AI director at your *running* app. It reads your source, crawls the live UI, decides the 2–4 moments that actually sell the product, drives a real browser to perform them on camera, then renders the whole thing with the Screen-Studio look — spring zoom-to-cursor, motion blur, a padded background, and a clean 1080p60 export.
+`supercut` is a launch video generator for the command line — a Screen Studio alternative that makes a product demo video straight from a URL. Point its AI director at your *running* app: it reads your source, crawls the live UI, decides the 2–4 moments that actually sell the product, drives a real browser to perform them on camera, then renders the whole thing cinematically — spring zoom-to-cursor, motion blur, music, a wallpaper stage, and a clean 1080p60 export.
 
 > Not a screen recording. Not a fake UI mockup. **Your real product**, shot like a launch film — automatically.
 
@@ -173,6 +173,33 @@ config fails loudly rather than guessing.
 Every `generate` run has a hard LLM spend ceiling: 300k tokens by default, tunable with
 `--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0`/`off` disables). The run aborts with a
 per-stage spend breakdown if a misbehaving model would blow past it.
+
+## 🖼 Backgrounds
+
+Every render stages the app window on a background. The default is the bundled
+`cobalt` wallpaper — deep blue-violet waves with strong contrast behind a light
+app window. Pick another with `--bg` (on `render` and `generate`):
+
+```sh
+supercut render --take out/take --bg sunrise            # bundled wallpaper
+supercut render --take out/take --bg midnight           # procedural palette
+supercut render --take out/take --bg path/to/wall.png   # your own image
+```
+
+Bundled wallpapers (in `assets/backgrounds/`):
+
+| wallpaper            | look                        |
+| -------------------- | --------------------------- |
+| `cobalt` *(default)* | deep blue-violet silk waves |
+| `glacier`            | cool blue-violet            |
+| `sunrise`            | warm gradient               |
+| `daydream`           | pastel clouds               |
+| `magenta`            | magenta glow                |
+| `coral`              | pastel coral bloom          |
+| `lavender`           | soft blue-lavender          |
+
+Procedural palettes (generated at render time, no asset): `aurora`, `midnight`,
+`dusk`, `paper`.
 
 ## 🎵 Music
 

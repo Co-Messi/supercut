@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assertSafeNavigationUrl, resolveAndPinHost, urlResolvesPrivate } from "../src/security/url-policy.js";
+import {
+  assertSafeNavigationUrl,
+  hostResolverRule,
+  navigationRequestAllowed,
+  resolveAndPinHost,
+  urlResolvesPrivate,
+} from "../src/security/url-policy.js";
 
 describe("navigation URL policy", () => {
   it("blocks cloud metadata addresses by default", async () => {
@@ -45,11 +51,37 @@ describe("resolve-and-pin (DNS-rebinding defense)", () => {
     expect(pinned).toBeDefined();
     expect(pinned!.hostname).toBe("localhost");
     expect(["127.0.0.1", "::1"]).toContain(pinned!.ip);
-    expect(pinned!.hostResolverRule).toBe(`MAP localhost ${pinned!.ip}`);
+    expect(pinned!.hostResolverRule).toBe(hostResolverRule("localhost", pinned!.ip));
   });
 
   it("rejects hostnames whose addresses are private when the guard is on", async () => {
     await expect(resolveAndPinHost("http://localhost:3000/")).rejects.toThrow(/private network/i);
+  });
+
+  it("formats resolver rules: bare IPv4, bracketed IPv6 (Chromium rejects bare ::1)", () => {
+    expect(hostResolverRule("example.com", "93.184.216.34")).toBe("MAP example.com 93.184.216.34");
+    expect(hostResolverRule("example.com", "::1")).toBe("MAP example.com [::1]");
+    expect(hostResolverRule("example.com", "2606:2800:220:1:248:1893:25c8:1946")).toBe(
+      "MAP example.com [2606:2800:220:1:248:1893:25c8:1946]",
+    );
+  });
+});
+
+describe("navigationRequestAllowed (in-flight route gate)", () => {
+  it("blocks private/metadata/alt-encoded targets before the request leaves the browser", async () => {
+    expect(await navigationRequestAllowed("http://169.254.169.254/latest/meta-data/")).toBe(false);
+    expect(await navigationRequestAllowed("http://127.0.0.1:3000/")).toBe(false);
+    expect(await navigationRequestAllowed("http://[::1]/")).toBe(false);
+    expect(await navigationRequestAllowed("http://0x7f000001/")).toBe(false);
+  });
+
+  it("allows private targets when the guard is explicitly off", async () => {
+    expect(await navigationRequestAllowed("http://127.0.0.1:3000/", { allowPrivateNetwork: true })).toBe(true);
+  });
+
+  it("never throws — malformed and non-http URLs are simply blocked", async () => {
+    expect(await navigationRequestAllowed("not a url")).toBe(false);
+    expect(await navigationRequestAllowed("file:///etc/passwd", { allowPrivateNetwork: true })).toBe(false);
   });
 });
 

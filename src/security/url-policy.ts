@@ -118,6 +118,26 @@ export async function assertSafeNavigationUrl(raw: string, opts: NavigationPolic
   if (opts.finalUrl && opts.finalUrl !== raw) await checkOne(opts.finalUrl, opts, true);
 }
 
+/**
+ * Route-decision for an IN-FLIGHT browser navigation request (Playwright route
+ * handler): may this request leave the browser? Runs the full policy — scheme,
+ * string/IP-literal private checks (synchronous), then DNS resolution — and
+ * never throws, because a route handler must always settle the request.
+ * Post-settle URL checks only run AFTER Chromium fetched a redirect target;
+ * this gate runs BEFORE.
+ */
+export async function navigationRequestAllowed(
+  raw: string,
+  opts: NavigationPolicyOptions = {},
+): Promise<boolean> {
+  try {
+    await assertSafeNavigationUrl(raw, opts);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Does this URL's host name/resolve to a private address? Never throws —
  *  used for advisory hints, not enforcement. */
 export async function urlResolvesPrivate(raw: string): Promise<boolean> {
@@ -163,5 +183,11 @@ export async function resolveAndPinHost(
     }
   }
   const ip = addrs[0]!.address;
-  return { hostname, ip, hostResolverRule: `MAP ${hostname} ${ip}` };
+  return { hostname, ip, hostResolverRule: hostResolverRule(hostname, ip) };
+}
+
+/** Chromium `--host-resolver-rules` MAP entry. IPv6 replacement addresses
+ *  must be bracketed — `MAP host ::1` is malformed and silently ignored. */
+export function hostResolverRule(hostname: string, ip: string): string {
+  return `MAP ${hostname} ${isIP(ip) === 6 ? `[${ip}]` : ip}`;
 }

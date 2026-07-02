@@ -5,7 +5,7 @@
  * construction: it fails the whitelist check and bounces back for retry.
  */
 import { chromium, type Browser, type Page } from "playwright";
-import { assertSafeNavigationUrl, resolveAndPinHost } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, navigationRequestAllowed, resolveAndPinHost } from "../security/url-policy.js";
 
 export interface InventoryItem {
   /** Playwright-compatible selector, verified to resolve on the page */
@@ -277,8 +277,17 @@ export async function crawlApp(
     await ctx.route("**/*", async (route) => {
       const u = route.request().url();
       try {
-        if (route.request().isNavigationRequest() && NON_HTML_EXT.test(new URL(u).pathname)) {
-          return route.abort();
+        if (route.request().isNavigationRequest()) {
+          // guard ON: validate every navigation BEFORE the request leaves the
+          // browser. The post-settle checks below only run AFTER Chromium has
+          // already fetched a 302/meta/JS redirect target — this gate is what
+          // stops the request to a private host from happening at all.
+          if (!allowPrivateNetwork && !(await navigationRequestAllowed(u, { allowPrivateNetwork }))) {
+            return route.abort();
+          }
+          if (NON_HTML_EXT.test(new URL(u).pathname)) {
+            return route.abort();
+          }
         }
       } catch { /* fall through */ }
       return route.continue();

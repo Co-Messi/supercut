@@ -17,6 +17,10 @@ const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const SLACK_TOKEN = /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g;
 const STRIPE_SECRET_KEY = /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g;
 const STRIPE_LIVE_PUBLISHABLE_KEY = /\bpk_live_[A-Za-z0-9]{16,}\b/g;
+// Authorization-header form: "Bearer <opaque token>" has no :/= separator, so
+// the generic key=value rule never sees it. Token must be ≥12 chars of token
+// charset — prose like "Bearer of good news" stays intact.
+const BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const OPENAI_STYLE_KEY = /\bsk-[A-Za-z0-9_-]{10,}\b/g;
 const LONG_HEX = /\b[a-f0-9]{32,}\b/gi;
@@ -34,6 +38,7 @@ export function redactForPrompt(text: string): string {
     .replace(SLACK_TOKEN, "[REDACTED_KEY]")
     .replace(STRIPE_SECRET_KEY, "[REDACTED_KEY]")
     .replace(STRIPE_LIVE_PUBLISHABLE_KEY, "[REDACTED_KEY]")
+    .replace(BEARER_TOKEN, "Bearer [REDACTED]")
     .replace(EMAIL, "[REDACTED_EMAIL]")
     .replace(OPENAI_STYLE_KEY, "[REDACTED_KEY]")
     .replace(LONG_HEX, "[REDACTED_TOKEN]")

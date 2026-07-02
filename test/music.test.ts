@@ -20,6 +20,11 @@ describe("resolveMusicTrack", () => {
     expect(resolveMusicTrack("off", dir)).toBeNull();
   });
 
+  it("the off-sentinel matches like track names do: any case, surrounding space", () => {
+    expect(resolveMusicTrack("OFF", dir)).toBeNull();
+    expect(resolveMusicTrack(" Off ", dir)).toBeNull();
+  });
+
   it("bundled name → bundled path (fuzzy: bare name, any case, with/without extension)", () => {
     expect(resolveMusicTrack("midnight", dir)).toBe(join(dir, "midnight.mp3"));
     expect(resolveMusicTrack("Momentum.mp3", dir)).toBe(join(dir, "momentum.mp3"));

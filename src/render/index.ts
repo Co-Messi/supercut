@@ -55,7 +55,8 @@ export interface RenderResult {
  * bad track from ever reaching the expensive render.
  */
 export function resolveMusicTrack(spec: string | undefined, musicDir?: string): string | null {
-  if (!spec || spec === "off") return null;
+  // the off-sentinel matches like track names do: any case, surrounding space
+  if (!spec || spec.trim().toLowerCase() === "off") return null;
   if (existsSync(spec) && statSync(spec).isFile()) return spec;
   const dir = musicDir ?? fileURLToPath(new URL("../../assets/music", import.meta.url));
   const requested = spec.toLowerCase().replace(/\.[a-z0-9]+$/, "");
@@ -70,6 +71,45 @@ export function resolveMusicTrack(spec: string | undefined, musicDir?: string): 
     `--music "${spec}" is neither an audio file nor a bundled track — ` +
       (names.length ? `bundled tracks: ${names.join(", ")} (or "off")` : `no bundled tracks installed; pass an audio file path or "off"`),
   );
+}
+
+/** the bundled default stage: deep blue-violet waves carry far more contrast
+ *  behind a white app window than the procedural pastels */
+const DEFAULT_BACKGROUND = "cobalt";
+
+/**
+ * Resolve --bg: bundled wallpaper name (fuzzy-matched against
+ * assets/backgrounds/, then assets/ root for muscle-memory), a procedural
+ * palette name, a path to the user's own image — or nothing, which resolves
+ * to the bundled cobalt wallpaper. When the bundled assets are missing (weird
+ * install) the DEFAULT quietly falls back to the procedural "aurora" stage
+ * rather than crashing; an explicit --bg still fails loud downstream.
+ */
+export function resolveBackgroundSpec(
+  background: string | undefined,
+  assetRoots?: string[],
+): { spec: string; isImage: boolean } {
+  const roots =
+    assetRoots ??
+    ["../../assets/backgrounds", "../../assets"].map((rel) => fileURLToPath(new URL(rel, import.meta.url)));
+  let spec = background ?? DEFAULT_BACKGROUND;
+  if (!existsSync(spec)) {
+    const requested = spec.toLowerCase().replace(/\.[a-z0-9]+$/, "");
+    for (const dir of roots) {
+      if (!existsSync(dir)) continue;
+      const hit = readdirSync(dir).find((f) => {
+        const lower = f.toLowerCase();
+        return lower === spec.toLowerCase() || lower.replace(/\.[a-z0-9]+$/, "") === requested;
+      });
+      if (hit) {
+        spec = join(dir, hit);
+        break;
+      }
+    }
+  }
+  const isImage = existsSync(spec) && statSync(spec).isFile();
+  if (!isImage && background === undefined) return { spec: "aurora", isImage: false };
+  return { spec, isImage };
 }
 
 /** gentle loudness normalization + edge fades (skipped on clips too short to
@@ -136,21 +176,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
   const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
 
-  // --bg: palette name, a bundled asset name (fuzzy-matched against assets/),
-  // or a path to the user's own wallpaper image
-  let bgSpec = opts.background ?? "aurora";
-  if (!existsSync(bgSpec)) {
-    const assetsDir = fileURLToPath(new URL("../../assets", import.meta.url));
-    if (existsSync(assetsDir)) {
-      const requested = bgSpec.toLowerCase().replace(/\.[a-z0-9]+$/, "");
-      const hit = readdirSync(assetsDir).find((f) => {
-        const lower = f.toLowerCase();
-        return lower === bgSpec.toLowerCase() || lower.replace(/\.[a-z0-9]+$/, "") === requested;
-      });
-      if (hit) bgSpec = join(assetsDir, hit);
-    }
-  }
-  const bgIsImage = existsSync(bgSpec) && statSync(bgSpec).isFile();
+  const { spec: bgSpec, isImage: bgIsImage } = resolveBackgroundSpec(opts.background);
   // --music: resolved + validated here, before the plan and the browser — a
   // missing track must fail in milliseconds, not after a full encode
   const musicPath = resolveMusicTrack(opts.music);

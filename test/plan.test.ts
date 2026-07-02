@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { assessSkew } from "../src/render/index.js";
 import { buildRenderPlan, defaultLayout, SUBFRAMES } from "../src/render/plan.js";
 import type { EventLog } from "../src/schema/index.js";
 
@@ -42,13 +43,15 @@ describe("buildRenderPlan", () => {
     expect(Math.max(...plan.sourceByFrame)).toBeLessThanOrEqual(frameIndex.length - 1);
   });
 
-  it("camera idles at z=1, zooms toward the click, and returns to overview", () => {
+  it("camera establishes at z=1, zooms toward the click, and returns to overview", () => {
     const plan = buildRenderPlan(clickLog, frameIndex);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
-    // idle well before the event (lead is 600ms; t=300ms ≈ frame 18)
+    // establishing shot: wide through the take's opening (t=300ms ≈ frame 18)
     expect(zAt(10)).toBeCloseTo(1, 1);
-    // near full zoom at the click moment (t=1500ms ≈ frame 90)
-    expect(zAt(95)).toBeGreaterThan(1.4);
+    // still ~wide when the punch window opens (establish ends at 1200ms ≈ frame 72)
+    expect(zAt(72)).toBeLessThan(1.1);
+    // near full zoom once the punch has settled (t≈2100ms ≈ frame 126)
+    expect(zAt(126)).toBeGreaterThan(1.4);
     // returned to overview by the end (dwell 1500 + settle)
     expect(zAt(plan.frames - 1)).toBeLessThan(1.08);
   });
@@ -58,7 +61,7 @@ describe("buildRenderPlan", () => {
     const layout = defaultLayout(viewport);
     const s = layout.content.w / viewport.width;
     const expected = { x: layout.content.x + 700 * s, y: layout.content.y + 330 * s };
-    const i = 95 * SUBFRAMES * 3;
+    const i = 126 * SUBFRAMES * 3; // punch settled (see camera test above)
     expect(Math.abs(plan.camera[i + 1]! - expected.x)).toBeLessThan(30);
     expect(Math.abs(plan.camera[i + 2]! - expected.y)).toBeLessThan(30);
   });
@@ -110,7 +113,7 @@ describe("frame-the-result (4b): camera prefers focus_bbox", () => {
     const plan = buildRenderPlan(focusLog, frameIndex);
     const layout = defaultLayout(viewport);
     const s = layout.content.w / viewport.width;
-    const i = 95 * SUBFRAMES * 3; // ~event moment (t≈1500ms)
+    const i = 126 * SUBFRAMES * 3; // punch settled (~900ms after it opens at 1200ms)
     const cx = plan.camera[i + 1]!;
     const cy = plan.camera[i + 2]!;
     // near the result-region center (960, 590), far from the input center (1820, 60)
@@ -142,6 +145,195 @@ describe("frame-the-result (4b): camera prefers focus_bbox", () => {
   });
 });
 
+describe("framing: establishing shots, size-aware zoom, spatial merging", () => {
+  it("opens each scene wide: z≈1 during the second scene's establishing window", () => {
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
+      { t: 8000, type: "scene", name: "s2", priority: 2 },
+      { t: 9500, type: "click", bbox: [600, 300, 200, 60], selector: "#b", point: [700, 330] },
+    ]);
+    const idx = Array.from({ length: 700 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: i * 17,
+    }));
+    const plan = buildRenderPlan(log, idx);
+    const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
+    // mid-take glide between the scenes sits above 1 (still engaged)…
+    expect(zAt(Math.round(6000 / (1000 / 60)))).toBeGreaterThan(1.05);
+    // …but the second scene OPENS wide: ~1s into its establishing shot
+    expect(zAt(Math.round(8950 / (1000 / 60)))).toBeLessThan(1.06);
+    // then punches back in for its click
+    expect(zAt(Math.round(10600 / (1000 / 60)))).toBeGreaterThan(1.4);
+  });
+
+  it("never punches 1.48 into a full-width hero: plain-bbox zoom is size-aware", () => {
+    const hero = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1500, type: "click", bbox: [0, 100, 1920, 600], selector: "#hero", point: [960, 400] },
+    ]);
+    const plan = buildRenderPlan(hero, frameIndex);
+    const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
+    // a viewport-wide target fits at z ≤ 1 → stays at overview
+    for (let f = 0; f < plan.frames; f += 10) expect(zAt(f)).toBeLessThan(1.05);
+  });
+
+  it("mid-size targets get a fitted punch between 1 and the max", () => {
+    const mid = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1500, type: "click", bbox: [400, 300, 1200, 400], selector: "#panel", point: [960, 500] },
+    ]);
+    const plan = buildRenderPlan(mid, frameIndex);
+    const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
+    const z = zAt(150); // settled well after the punch opens
+    expect(z).toBeGreaterThan(1.2);
+    expect(z).toBeLessThan(1.48);
+  });
+
+  it("merges only nearby beats: far-apart targets widen out between punches", () => {
+    const idx = Array.from({ length: 600 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: i * 17,
+    }));
+    const at = (bbox: [number, number, number, number], point: [number, number]) =>
+      makeLog([
+        { t: 0, type: "scene", name: "s1", priority: 1 },
+        { t: 1500, type: "click", bbox: [50, 50, 100, 40], selector: "#a", point: [100, 70] },
+        { t: 5500, type: "click", bbox, selector: "#b", point },
+      ]);
+    const near = buildRenderPlan(at([300, 200, 100, 40], [350, 220]), idx);
+    const far = buildRenderPlan(at([1700, 900, 100, 40], [1750, 920]), idx);
+    const zAt = (plan: typeof near, frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
+    // midpoint of the gap between the two punches (~4000ms ≈ frame 240)
+    const zNear = zAt(near, 240);
+    const zFar = zAt(far, 240);
+    expect(zNear).toBeGreaterThan(1.35); // bridged: camera stays punched-in
+    expect(zFar).toBeLessThan(1.25); // far: camera widens between beats
+  });
+
+  it("a long focus dwell overlapping a later far beat never drags the camera back", () => {
+    // focus beat top-left at t=2000 (FOCUS_DWELL 4200 → would run to 6200)
+    // overlaps a far plain click at t=4000 (dwell ends 5500): after beat 2's
+    // dwell, the camera must settle out — not re-punch across the page to
+    // beat 1's stale target
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      {
+        t: 2000, type: "click", bbox: [60, 60, 120, 40], selector: "#a", point: [120, 80],
+        focus_bbox: [40, 40, 400, 300],
+      },
+      { t: 4000, type: "click", bbox: [1700, 900, 120, 40], selector: "#b", point: [1760, 920] },
+    ]);
+    const idx = Array.from({ length: 600 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: i * 17,
+    }));
+    const plan = buildRenderPlan(log, idx);
+    const layout = defaultLayout(viewport);
+    const s = layout.content.w / viewport.width;
+    const beat1X = layout.content.x + 240 * s; // beat 1 focus center (css 240)
+    const camAt = (tMs: number) => {
+      const f = Math.round(tMs / (1000 / 60));
+      const i = f * SUBFRAMES * 3;
+      return { z: plan.camera[i]!, fx: plan.camera[i + 1]! };
+    };
+    // during beat 2 the camera is on beat 2's side of the page
+    expect(camAt(5200).fx).toBeGreaterThan(layout.canvasW / 2);
+    // after beat 2's dwell: it settles (z falls) and NEVER pans back to beat 1
+    for (let t = 5600; t <= 9000; t += 200) {
+      expect(Math.abs(camAt(t).fx - beat1X)).toBeGreaterThan(200);
+    }
+    expect(camAt(9000).z).toBeLessThan(1.1); // settling wide, not re-punched
+  });
+});
+
+describe("source cross-blend: nav crossfades + gap smoothing", () => {
+  // 60fps source with a 1000ms capture hole between 2000 and 3000
+  const gapIndex = [
+    ...Array.from({ length: 121 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: Math.round(i * (2000 / 120)),
+    })),
+    ...Array.from({ length: 60 }, (_, i) => ({
+      file: `frames/${String(121 + i).padStart(6, "0")}.png`,
+      t_source: 3000 + Math.round(i * (2000 / 120)),
+    })),
+  ];
+  const frameMs = 1000 / 60;
+  const blendAt = (plan: ReturnType<typeof buildRenderPlan>, tMs: number) => {
+    const f = Math.round(tMs / frameMs);
+    return { srcB: plan.blend[f * 2]!, k: plan.blend[f * 2 + 1]! };
+  };
+
+  it("linearly blends across a short residual (non-nav) source gap", () => {
+    // 60fps source with a 400ms capture hole between 2000 and 2400
+    const shortGapIndex = [
+      ...Array.from({ length: 121 }, (_, i) => ({
+        file: `frames/${String(i).padStart(6, "0")}.png`,
+        t_source: Math.round(i * (2000 / 120)),
+      })),
+      ...Array.from({ length: 60 }, (_, i) => ({
+        file: `frames/${String(121 + i).padStart(6, "0")}.png`,
+        t_source: 2400 + Math.round(i * (2000 / 120)),
+      })),
+    ];
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
+    ]);
+    const plan = buildRenderPlan(log, shortGapIndex);
+    // inside the gap: blends toward the NEXT source by temporal position
+    expect(blendAt(plan, 2100).srcB).toBe(121);
+    expect(blendAt(plan, 2100).k).toBeCloseTo(0.25, 1);
+    expect(blendAt(plan, 2300).k).toBeCloseTo(0.75, 1);
+    // outside the gap: no blend
+    expect(blendAt(plan, 1000).srcB).toBe(-1);
+    expect(blendAt(plan, 3000).srcB).toBe(-1);
+  });
+
+  it("a LONG residual gap holds then fades late — never a seconds-long linear dissolve", () => {
+    // no scene marker near the gap: e.g. slow pre-nav DNS work pushed the real
+    // reload gap outside naive attribution — it must still read as a quick fade
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
+    ]);
+    const plan = buildRenderPlan(log, gapIndex);
+    // early/mid gap: HOLD, no mush
+    expect(blendAt(plan, 2200).srcB).toBe(-1);
+    expect(blendAt(plan, 2500).srcB).toBe(-1);
+    // final ~350ms: quick dissolve
+    expect(blendAt(plan, 2800).srcB).toBe(121);
+    expect(blendAt(plan, 2800).k).toBeCloseTo((2800 - 2650) / 350, 1);
+  });
+
+  it("dense 60fps capture (~17ms spacing) never blends", () => {
+    const log = makeLog([{ t: 0, type: "scene", name: "s1", priority: 1 }]);
+    const dense = Array.from({ length: 200 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: Math.round(i * 16.7),
+    }));
+    const plan = buildRenderPlan(log, dense);
+    for (let f = 0; f < plan.frames; f++) expect(plan.blend[f * 2]).toBe(-1);
+  });
+
+  it("a nav gap holds the last pre-nav frame, then crossfades ~350ms into the new page", () => {
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
+      { t: 1990, type: "scene", name: "s2", priority: 2 }, // right before the gap → it's a navigation
+    ]);
+    const plan = buildRenderPlan(log, gapIndex);
+    // early in the gap: HOLD (no dissolve mush while the page reloads)
+    expect(blendAt(plan, 2200).srcB).toBe(-1);
+    expect(blendAt(plan, 2500).srcB).toBe(-1);
+    // final 350ms: crossfade ramps into the first post-nav frame
+    expect(blendAt(plan, 2800).srcB).toBe(121);
+    expect(blendAt(plan, 2800).k).toBeCloseTo((2800 - 2650) / 350, 1);
+    expect(blendAt(plan, 2980).k).toBeGreaterThan(0.9);
+  });
+});
+
 describe("plan input bounds (PR #1 review)", () => {
   it("throws on a corrupt huge timestamp instead of allocating the moon", () => {
     const evil = makeLog([
@@ -162,6 +354,45 @@ describe("plan input bounds (PR #1 review)", () => {
   it("throws on malformed frame-index entries", () => {
     const bad = [{ file: "", t_source: 0 }];
     expect(() => buildRenderPlan(clickLog, bad)).toThrow(/malformed/);
+  });
+
+  it("accepts a clamped index (capture clamps jittered stamps to t_source 0)", () => {
+    // CDP delivery jitter can stamp a frame before the first-processed one;
+    // the executor clamps those to 0, so duplicates at 0 are a legal index
+    const clamped = [
+      { file: "frames/000000.png", t_source: 0 },
+      { file: "frames/000001.png", t_source: 0 },
+      ...frameIndex.slice(1).map((e, i) => ({ file: `frames/${String(i + 2).padStart(6, "0")}.png`, t_source: e.t_source })),
+    ];
+    expect(() => buildRenderPlan(clickLog, clamped)).not.toThrow();
+  });
+
+  it("skew gate: dense (beacon-era) takes fail hard past 250ms", () => {
+    // 60fps source — clearly a unified-clock take
+    const dense = Array.from({ length: 300 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: Math.round(i * 16.7),
+    }));
+    const lastFrameT = dense[dense.length - 1]!.t_source;
+    const ok = makeLog([{ t: lastFrameT + 200, type: "scene", name: "s", priority: 1 }]);
+    expect(assessSkew(ok, dense).action).toBe("ok");
+    const broken = makeLog([{ t: lastFrameT + 400, type: "scene", name: "s", priority: 1 }]);
+    expect(assessSkew(broken, dense).action).toBe("fail");
+  });
+
+  it("skew gate: legacy sparse takes (pre-unified clock) only warn — back-compat", () => {
+    // ~5fps change-driven capture: events routinely outrun the footage
+    const sparse = Array.from({ length: 25 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: i * 200,
+    }));
+    const lastFrameT = sparse[sparse.length - 1]!.t_source;
+    const skewed = makeLog([{ t: lastFrameT + 3000, type: "scene", name: "s", priority: 1 }]);
+    const verdict = assessSkew(skewed, sparse);
+    expect(verdict.action).toBe("warn"); // renderable, never fatal
+    expect(verdict.skewMs).toBe(3000);
+    const mild = makeLog([{ t: lastFrameT + 400, type: "scene", name: "s", priority: 1 }]);
+    expect(assessSkew(mild, sparse).action).toBe("ok"); // old 500ms threshold
   });
 
   it("merges multiple cursor_path events in time order", () => {

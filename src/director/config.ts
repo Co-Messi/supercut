@@ -64,8 +64,10 @@ export function resolveProvider(
     env.OPENROUTER_API_KEY ? "openrouter" : "",
   ].filter(Boolean);
 
-  if (!explicitProvider && providerKeys.length > 1 && !env.SUPERCUT_API_KEY) {
-    throw new Error("multiple provider keys found; set SUPERCUT_PROVIDER to deepseek or openrouter");
+  // ANY multi-key situation is ambiguous — SUPERCUT_API_KEY must not silently
+  // pick a winner (DeepSeek used to win), so require an explicit provider.
+  if (!explicitProvider && providerKeys.length > 1) {
+    throw new Error("multiple provider keys found; set SUPERCUT_PROVIDER to deepseek, openrouter, or custom");
   }
 
   let provider: ProviderName;
@@ -127,18 +129,14 @@ export interface DotEnvLoadResult {
   reason?: string;
 }
 
-/** Best-effort .env loader. Uses native process.loadEnvFile when present
- *  (Node 20.12+ / 21.7+), else a minimal parser so the package's `node >=20`
- *  engine range actually works on 20.0–20.11. Never silently pretends success. */
+/** Best-effort .env loader. Always uses the internal parser — NOT the native
+ *  process.loadEnvFile — so semantics are identical on every Node ≥20 version:
+ *  a real environment variable always wins over the .env file (the native
+ *  loader can override existing process.env on some versions). */
 export function loadDotEnv(path = ".env"): DotEnvLoadResult {
   if (!existsSync(path)) return { path, loaded: false, reason: "not found" };
-  const native = (process as unknown as { loadEnvFile?: (p: string) => void }).loadEnvFile;
   try {
-    if (typeof native === "function") {
-      native.call(process, path);
-    } else {
-      parseDotEnvInto(readFileSync(path, "utf8"), process.env);
-    }
+    parseDotEnvInto(readFileSync(path, "utf8"), process.env);
     return { path, loaded: true };
   } catch (err) {
     return { path, loaded: false, reason: err instanceof Error ? err.message : String(err) };

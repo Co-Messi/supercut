@@ -1,7 +1,22 @@
 {
   "name": "supercut",
   "version": "0.0.1",
-  "description": "Point it at your app. Get the supercut. Institutional-grade 60s launch videos from your real product.",
+  "description": "AI launch-video generator: films your real web app with a cinematic camera, motion blur, and music — a CLI alternative to Screen Studio for product demos",
+  "keywords": [
+    "launch-video",
+    "product-demo",
+    "screen-recording",
+    "screen-studio-alternative",
+    "demo-video",
+    "marketing-video",
+    "ai-video",
+    "playwright",
+    "webcodecs",
+    "cinematic",
+    "cli",
+    "video-generator",
+    "product-hunt"
+  ],
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -12,7 +27,9 @@
   },
   "files": [
     "dist",
-    "assets"
+    "assets",
+    "examples/demo-app",
+    "examples/demo.recipe.json"
   ],
   "scripts": {
     "build": "tsc",

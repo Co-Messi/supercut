@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
+import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
 import { DESTRUCTIVE_RE } from "../src/director/inventory.js";
 import { writeRecipe } from "../src/director/script.js";
-import { applyVerdicts, deterministicChecks } from "../src/director/qc.js";
+import { applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
 import type { AppAnalysis } from "../src/director/analyze.js";
 import type { PageDigest } from "../src/director/inventory.js";
 import type { RecordResult } from "../src/capture/executor.js";
@@ -279,6 +279,24 @@ describe("destructive-action guard (H1)", () => {
       "Suspend account",
       "Terminate instance",
       "Downgrade plan",
+      // trust-review: state-mutating verbs an accidental click should never fire
+      "Remove",
+      "Remove item",
+      "Reset",
+      "Reset workspace",
+      "Deactivate",
+      "Disable",
+      "Disable 2FA",
+      "Archive",
+      "Archive project",
+      "Erase everything",
+      "Wipe data",
+      "Destroy environment",
+      "Revoke access",
+      "Terminate",
+      "Unsubscribe",
+      "Delete forever",
+      "Close account",
     ]) {
       expect(DESTRUCTIVE_RE.test(label), `expected "${label}" to match`).toBe(true);
     }
@@ -303,16 +321,10 @@ describe("destructive-action guard (H1)", () => {
       "Next",
       "Continue",
       "Get started free",
-      // hero/reversible actions that must stay filmable (narrowed lexicon):
+      // hero-action money moments that must stay filmable:
       "Send",
       "Send message",
-      "Remove",
-      "Remove item",
-      "Reset",
-      "Reset filters",
-      "Archive",
-      "Disable",
-      "Unsubscribe",
+      "Search flights",
       // "transfer" is narrowed to money/ownership phrases — benign transfers stay filmable:
       "Transfer to list",
       "Transfer ticket",
@@ -330,6 +342,55 @@ describe("destructive-action guard (H1)", () => {
     expect(accepted("Delete account", false)).toBe(false); // excluded by default
     expect(accepted("Delete account", true)).toBe(true); // included on opt-in
     expect(accepted("Sign in", false)).toBe(true); // benign always kept
+  });
+});
+
+describe("LLM token budget guard", () => {
+  /** stub that reports provider usage: `perCall` tokens billed per chat call */
+  class MeteredStub implements LlmClient {
+    readonly label = "metered";
+    private used: number | undefined = undefined;
+    constructor(private readonly perCall: number) {}
+    get tokensUsed(): number | undefined {
+      return this.used;
+    }
+    async chat(_opts: ChatOptions): Promise<string> {
+      this.used = (this.used ?? 0) + this.perCall;
+      return "ok";
+    }
+  }
+  const ask = (llm: LlmClient) => llm.chat({ system: "s", user: [{ type: "text", text: "t" }] });
+
+  it("allows calls until cumulative spend reaches the budget, then refuses the next call", async () => {
+    const llm = new BudgetedLlmClient(new MeteredStub(60), 100);
+    await expect(ask(llm)).resolves.toBe("ok"); // 0 spent → allowed, now 60
+    await expect(ask(llm)).resolves.toBe("ok"); // 60 < 100 → allowed, now 120
+    await expect(ask(llm)).rejects.toBeInstanceOf(TokenBudgetExceededError);
+    expect(llm.tokensUsed).toBe(120); // the refused call spent nothing
+  });
+
+  it("names per-stage spend and the flag/env in the error", async () => {
+    const llm = new BudgetedLlmClient(new MeteredStub(60), 100);
+    llm.stage = "analyze";
+    await ask(llm);
+    llm.stage = "script";
+    await ask(llm);
+    await expect(ask(llm)).rejects.toThrow(/analyze 60, script 60/);
+    await expect(ask(llm)).rejects.toThrow(/--max-tokens.*SUPERCUT_MAX_TOKENS/);
+  });
+
+  it("budget 0 disables the cap", async () => {
+    const llm = new BudgetedLlmClient(new MeteredStub(1_000_000), 0);
+    await expect(ask(llm)).resolves.toBe("ok");
+    await expect(ask(llm)).resolves.toBe("ok");
+  });
+
+  it("never blocks a provider that reports no usage (nothing to meter)", async () => {
+    const noUsage: LlmClient = { label: "no-usage", chat: async () => "ok" };
+    const llm = new BudgetedLlmClient(noUsage, 100);
+    for (let i = 0; i < 5; i++) await expect(ask(llm)).resolves.toBe("ok");
+    expect(llm.tokensUsed).toBeUndefined();
+    expect(llm.breakdown()).toBe("no usage reported");
   });
 });
 
@@ -377,5 +438,33 @@ describe("QC verdicts — frozen patch surface", () => {
       { scene: "signup", verdict: "ok", reason: "fine" },
     ]);
     expect(changed).toBe(false);
+  });
+
+  it("verdict schema rejects a degenerate zoom bbox (zero/negative w/h, negative x/y)", () => {
+    const verdict = (zoom: number[]) => ({
+      verdicts: [{ scene: "signup", verdict: "patch", reason: "reframe", patch: { action_index: 0, zoom } }],
+    });
+    expect(() => qcReport.parse(verdict([100, 100, 0, 600]))).toThrow();
+    expect(() => qcReport.parse(verdict([100, 100, 600, -50]))).toThrow();
+    expect(() => qcReport.parse(verdict([-10, 100, 600, 400]))).toThrow();
+    expect(qcReport.parse(verdict([100, 100, 600, 400])).verdicts).toHaveLength(1);
+  });
+
+  it("applyVerdicts drops an invalid zoom patch instead of recording a render-fatal bbox", () => {
+    const { recipe: patched } = applyVerdicts(recipe, [
+      {
+        scene: "signup", verdict: "patch", reason: "reframe",
+        patch: { action_index: 0, zoom: [100, 100, 0, 600] as [number, number, number, number] },
+      },
+    ]);
+    expect(patched.scenes[0]!.actions[0]!.zoom).toBeUndefined();
+
+    const { recipe: good } = applyVerdicts(recipe, [
+      {
+        scene: "signup", verdict: "patch", reason: "reframe",
+        patch: { action_index: 0, zoom: [100, 100, 600, 400] as [number, number, number, number] },
+      },
+    ]);
+    expect(good.scenes[0]!.actions[0]!.zoom).toEqual([100, 100, 600, 400]);
   });
 });

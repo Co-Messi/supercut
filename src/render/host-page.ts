@@ -12,6 +12,14 @@
  * Plain JS in a template string: it is served as a real page, so no TS/esbuild
  * helper traps.
  */
+/** configured encoder bitrate — exported so the orchestrator can verify the
+ *  DELIVERED bitrate against it after the mux */
+export const ENCODER_BITRATE = 16_000_000;
+
+/** in-page cap on buffered encoded output: a 60s 1080p60 take at 16 Mbps is
+ *  ~120MB, so 512MB is generous headroom without risking an in-tab OOM */
+export const MAX_ENCODED_BYTES = 512e6;
+
 export const HOST_PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>supercut render host</title></head>
 <body style="margin:0;background:#111;color:#9a9">
@@ -32,7 +40,7 @@ async function main() {
   }
 
   const plan = await (await fetchOk("/take/render-plan.json")).json();
-  const { fps, frames, layout, background, sourceByFrame, camera, cursor, sourceFiles } = plan;
+  const { fps, frames, layout, background, sourceByFrame, blend, camera, cursor, sourceFiles } = plan;
   const SUB = 8;
   const W = layout.canvasW, H = layout.canvasH;
   const C = layout.content;
@@ -53,7 +61,7 @@ async function main() {
 
   // --- encoder: H.264 annexb so Node can mux the raw stream with ffmpeg -c copy ---
   const chunks = [];
-  const MAX_ENCODED_BYTES = 1.5e9;
+  const ENCODED_BYTES_CAP = ${MAX_ENCODED_BYTES};
   let totalEncodedBytes = 0;
   let encodeError = null;
   const encoder = new VideoEncoder({
@@ -61,8 +69,12 @@ async function main() {
       const buf = new Uint8Array(chunk.byteLength);
       chunk.copyTo(buf);
       totalEncodedBytes += buf.length;
-      if (totalEncodedBytes > MAX_ENCODED_BYTES) {
-        throw new Error("encoded result exceeds 1.5GB cap");
+      if (totalEncodedBytes > ENCODED_BYTES_CAP) {
+        // a throw here vanishes inside the codec callback and the truncated
+        // stream would upload as a "success" — surface it via encodeError,
+        // which the encode loop checks every frame
+        if (!encodeError) encodeError = new Error("encoded result exceeds " + ENCODED_BYTES_CAP + " byte cap");
+        return;
       }
       chunks.push(buf);
     },
@@ -78,7 +90,7 @@ async function main() {
     // B3 (review): lowered 40 Mbps → 16 Mbps to reduce Chromium memory pressure
     // (the encoder buffers chunks in-page; 40 Mbps risked OOM on long takes).
     // 16 Mbps is ample for 1080p60 screen content and still holds fine detail.
-    bitrate: 16_000_000,
+    bitrate: ${ENCODER_BITRATE},
     bitrateMode: "constant",
     avc: { format: "annexb" },
   };
@@ -90,15 +102,22 @@ async function main() {
   }
   encoder.configure(encoderConfig);
 
-  // --- sequential source-frame cache (frames are consumed in order) ---
-  let cachedIdx = -1, cachedBmp = null;
+  // --- sequential source-frame cache (frames are consumed in order; a blended
+  //     frame needs its NEXT source too, so cache by index and prune anything
+  //     behind the playhead — holds at most 2 decoded bitmaps) ---
+  const bmpCache = new Map();
   async function sourceBitmap(idx) {
-    if (idx === cachedIdx) return cachedBmp;
+    let bmp = bmpCache.get(idx);
+    if (bmp) return bmp;
     const resp = await fetchOk("/take/" + sourceFiles[idx]);
-    const bmp = await createImageBitmap(await resp.blob());
-    if (cachedBmp) cachedBmp.close();
-    cachedIdx = idx; cachedBmp = bmp;
+    bmp = await createImageBitmap(await resp.blob());
+    bmpCache.set(idx, bmp);
     return bmp;
+  }
+  function pruneBitmaps(minIdx) {
+    for (const [i, b] of bmpCache) {
+      if (i < minIdx) { b.close(); bmpCache.delete(i); }
+    }
   }
 
   function roundedPath(c, x, y, w, h, r) {
@@ -152,7 +171,12 @@ async function main() {
   const t0 = performance.now();
 
   for (let f = 0; f < frames; f++) {
+    pruneBitmaps(sourceByFrame[f]);
     const bmp = await sourceBitmap(sourceByFrame[f]);
+    // temporal cross-blend: nav crossfades + gap smoothing from the plan
+    const blendIdx = blend[f * 2];
+    const blendK = blend[f * 2 + 1];
+    const bmpB = blendIdx >= 0 && blendK > 0 ? await sourceBitmap(blendIdx) : null;
 
     // 1) motion-blur accumulation on the side canvas: additive 'lighter' at
     //    1/8 alpha per subframe = true average (full opacity where static,
@@ -197,7 +221,17 @@ async function main() {
       // content clipped to rounded window — NO shadow in the blur loop
       roundedPath(actx, C.x, C.y, C.w, C.h, layout.cornerRadius);
       actx.clip();
-      actx.drawImage(bmp, C.x, C.y, C.w, C.h);
+      if (bmpB) {
+        // (1−k)·A + k·B per pass: under 'lighter' both terms scale by 1/passes
+        // and sum to the true average; under single-pass source-over, drawing
+        // A opaque then B at k composes to the exact same lerp
+        actx.globalAlpha = passes > 1 ? (1 - blendK) / passes : 1;
+        actx.drawImage(bmp, C.x, C.y, C.w, C.h);
+        actx.globalAlpha = passes > 1 ? blendK / passes : blendK;
+        actx.drawImage(bmpB, C.x, C.y, C.w, C.h);
+      } else {
+        actx.drawImage(bmp, C.x, C.y, C.w, C.h);
+      }
       actx.restore();
     }
 
@@ -296,7 +330,8 @@ async function main() {
   await encoder.flush();
   if (encodeError) throw encodeError;
   encoder.close();
-  if (cachedBmp) cachedBmp.close();
+  for (const b of bmpCache.values()) b.close();
+  bmpCache.clear();
   if (bgImage) bgImage.close();
 
   const total = chunks.reduce((a, c) => a + c.length, 0);

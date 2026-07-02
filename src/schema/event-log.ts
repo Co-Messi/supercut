@@ -19,8 +19,13 @@ const baseEvent = {
 /** Optional camera target: the result region this action produced (a graph, a
  *  results panel). When present, the renderer frames THIS instead of the
  *  interaction bbox — the cursor stays on the control, the camera holds on the
- *  payoff. Resolved at capture time, so it reflects the post-action layout. */
-const focusBbox = { focus_bbox: bbox.optional() };
+ *  payoff. Resolved at capture time, so it reflects the post-action layout.
+ *  focus_source records which path produced it (observability): a QC zoom
+ *  patch, the script's focus_selector, or the changed-region fallback. */
+const focusBbox = {
+  focus_bbox: bbox.optional(),
+  focus_source: z.enum(["qc", "llm", "mutation"]).optional(),
+};
 
 export const clickEvent = z.object({
   ...baseEvent,

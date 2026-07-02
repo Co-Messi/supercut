@@ -5,7 +5,7 @@
  * construction: it fails the whitelist check and bounces back for retry.
  */
 import { chromium, type Browser, type Page } from "playwright";
-import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, navigationRequestAllowed, resolveAndPinHost } from "../security/url-policy.js";
 
 export interface InventoryItem {
   /** Playwright-compatible selector, verified to resolve on the page */
@@ -57,21 +57,20 @@ const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
  * Opt back in with `allowDestructive`. Word-boundary anchored so legitimate
  * non-destructive actions (Sign in, Submit, Add, Save, Open, View, Create,
  * Next, Continue) do NOT match.
+ *
+ * HONESTY: this filter is BEST-EFFORT and English-only. It matches visible
+ * text / aria-label / value strings — it cannot catch icon-only controls,
+ * non-English labels, or custom wording. Never rely on it as the only guard:
+ * film against a disposable/staging environment, not production data.
  */
-// Deliberately NARROW: only clearly-irreversible / high-blast-radius verbs that
-// are almost never a legitimate demo "money moment". We still do NOT match
-// common, reversible, or hero-action words (send, remove, reset, disable,
-// archive, unsubscribe, save, submit, search) — those are exactly the core
-// interactions a launch video exists to show, and silently dropping a chat
-// app's "Send" or a list's "Remove" would gut the demo.
-// B4 (review): broadened conservatively with publish, transfer, regenerate,
-// suspend, terminate, downgrade — each is irreversible or high blast-radius
-// (goes public, moves money/ownership, throws away generated state, kills
-// access/an account, drops a paid tier) and would almost never be the action
-// you intend to film. Criterion: add a verb ONLY if firing it by accident on a
-// live app is genuinely costly AND it is rarely the intended payoff beat.
+// Lexicon criterion: match a verb when firing it by accident on a live app is
+// costly (loses data/state/access, moves money, goes public) even if some
+// apps use it reversibly — false-drop is loud (logged with an opt-in flag),
+// false-fire is a real mutation. We still do NOT match the hero-action words
+// that carry most demos (send, save, submit, search, publish-adjacent create):
+// silently dropping a chat app's "Send" would gut the video.
 export const DESTRUCTIVE_RE =
-  /\b(delete|deactivate|wipe|erase|destroy|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
+  /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -259,7 +258,15 @@ export async function crawlApp(
   const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   await assertSafeNavigationUrl(appUrl, { allowPrivateNetwork });
 
-  const browser: Browser = await chromium.launch({ headless: true });
+  // guard ON: resolve-and-pin the target host so the browser connects to the
+  // exact IP the policy vetted — a DNS re-resolve can't swap in a private one
+  const launchArgs: string[] = [];
+  if (!allowPrivateNetwork) {
+    const pinned = await resolveAndPinHost(appUrl, { allowPrivateNetwork });
+    if (pinned) launchArgs.push(`--host-resolver-rules=${pinned.hostResolverRule}`);
+  }
+
+  const browser: Browser = await chromium.launch({ headless: true, args: launchArgs });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const digests: PageDigest[] = [];
@@ -270,8 +277,17 @@ export async function crawlApp(
     await ctx.route("**/*", async (route) => {
       const u = route.request().url();
       try {
-        if (route.request().isNavigationRequest() && NON_HTML_EXT.test(new URL(u).pathname)) {
-          return route.abort();
+        if (route.request().isNavigationRequest()) {
+          // guard ON: validate every navigation BEFORE the request leaves the
+          // browser. The post-settle checks below only run AFTER Chromium has
+          // already fetched a 302/meta/JS redirect target — this gate is what
+          // stops the request to a private host from happening at all.
+          if (!allowPrivateNetwork && !(await navigationRequestAllowed(u, { allowPrivateNetwork }))) {
+            return route.abort();
+          }
+          if (NON_HTML_EXT.test(new URL(u).pathname)) {
+            return route.abort();
+          }
         }
       } catch { /* fall through */ }
       return route.continue();
@@ -300,6 +316,9 @@ export async function crawlApp(
         const response = await page.goto(target, { timeout: 15_000, waitUntil: "load" });
         await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         await page.waitForTimeout(400); // settle: load ≠ ready
+        // re-validate where the page SETTLED: a client-side redirect (JS,
+        // meta-refresh) can land somewhere the pre-navigation check never saw
+        await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: page.url() });
       } catch (err) {
         if (digests.length === 0 && queue.length === 0) throw err; // start page must load
         continue;

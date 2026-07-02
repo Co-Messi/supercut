@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumon Metrics</title>
+<!-- Self-contained demo app for the no-LLM quickstart: selectors here
+     (#cta, #email, #join, #task-ship on /dash/) match examples/demo.recipe.json.
+     No build step, no external requests. -->
+<style>
+  :root { --ink:#16161a; --muted:#6b6b70; --accent:#2563eb; --line:#e8e6e0; --bg:#faf9f6 }
+  * { box-sizing:border-box; margin:0 }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased }
+  nav { display:flex; justify-content:space-between; align-items:center;
+        padding:26px 64px; border-bottom:1px solid var(--line) }
+  .brand { font-weight:700; font-size:17px; letter-spacing:-.2px }
+  .brand span { color:var(--accent) }
+  nav .links { font-size:15px; color:var(--muted) }
+  nav .links a { color:inherit; text-decoration:none; margin-left:28px }
+  nav .links a:hover { color:var(--ink) }
+  main { max-width:880px; margin:96px auto 0; padding:0 32px }
+  .kicker { font-size:13px; font-weight:600; letter-spacing:1.4px; text-transform:uppercase;
+            color:var(--accent); margin-bottom:20px }
+  h1 { font-size:58px; letter-spacing:-1.8px; line-height:1.04; font-weight:700 }
+  p.sub { font-size:20px; color:var(--muted); margin:26px 0 44px; max-width:560px; line-height:1.5 }
+  #cta { background:var(--accent); color:#fff; border:0; font:inherit; font-size:17px; font-weight:600;
+         padding:16px 38px; border-radius:10px; cursor:pointer; transition:transform .15s, box-shadow .15s }
+  #cta:hover { transform:translateY(-2px); box-shadow:0 6px 18px rgba(37,99,235,.25) }
+  #signup { margin-top:56px; display:none; gap:12px }
+  #signup.open { display:flex }
+  #email { flex:1; max-width:360px; font:inherit; font-size:16px; padding:14px 18px;
+           border:1.5px solid #d9d7d0; border-radius:10px; background:#fff; outline-color:var(--accent) }
+  #join { background:var(--ink); color:#fff; border:0; font:inherit; padding:14px 30px;
+          border-radius:10px; font-size:16px; font-weight:600; cursor:pointer }
+  #join:hover { background:#000 }
+  #joined { display:none; margin-top:18px; color:var(--accent); font-weight:600 }
+  .proof { display:flex; gap:56px; margin-top:96px; padding-top:36px; border-top:1px solid var(--line) }
+  .proof div strong { display:block; font-size:28px; letter-spacing:-.5px }
+  .proof div span { font-size:14px; color:var(--muted) }
+</style>
+</head>
+<body>
+  <nav>
+    <div class="brand">Lumon <span>Metrics</span></div>
+    <div class="links"><a id="nav-dash" href="/dash/">Live dashboard</a><a href="#pricing">Pricing</a></div>
+  </nav>
+  <main>
+    <div class="kicker">Analytics for operators</div>
+    <h1>Numbers your team<br>actually reads.</h1>
+    <p class="sub">One dashboard for every metric that matters. Set up in two minutes, no SQL required.</p>
+    <button id="cta">Get started free</button>
+    <div id="signup">
+      <input id="email" type="email" placeholder="you@company.com" autocomplete="off">
+      <button id="join">Join</button>
+    </div>
+    <div id="joined">&#10003; You're in — check your inbox.</div>
+    <div class="proof">
+      <div><strong>2 min</strong><span>median setup time</span></div>
+      <div><strong>12,842</strong><span>teams reporting weekly</span></div>
+      <div><strong>99.99%</strong><span>ingest uptime</span></div>
+    </div>
+  </main>
+  <script>
+    document.getElementById("cta").addEventListener("click", () => {
+      document.getElementById("signup").classList.add("open");
+      document.getElementById("email").focus();
+    });
+    document.getElementById("join").addEventListener("click", () => {
+      document.getElementById("joined").style.display = "block";
+    });
+  </script>
+</body>
+</html>

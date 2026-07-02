@@ -12,10 +12,13 @@
  *              └─────────────────────────────────────────────┘
  *
  * A take is ALWAYS a whole-run recording (no per-scene stitching).
- * Timestamp canon: `t` is the scheduled clock; when reality overruns a slot,
- * the remainder of the schedule shifts by whole frames and the shifted times
- * are canonical (design doc, stage 3). On a local fixture nothing overruns,
- * so the scheduled timeline is byte-identical across runs.
+ * Timestamp canon: the schedule clock still paces slots and budget, but event
+ * and cursor `t` are stamped on the OBSERVED clock at actual dispatch time —
+ * anchored to the first screencast frame's CDP timestamp, i.e. the SAME
+ * timeline as frame `t_source`. When reality overruns a slot, the remainder of
+ * the schedule shifts by whole frames and the shifted times are canonical
+ * (design doc, stage 3). On a local fixture the structure and geometry are
+ * byte-identical across runs; `t` carries only wall-clock jitter of a few ms.
  *
  * Capture path: CDP screencast PNG at
  * 2x DPR, ack-throttled, frames streamed straight to disk.
@@ -37,6 +40,118 @@ const ENTRY_NAV_ALLOWANCE_MS = 1_000;
 /** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
  *  a settle pause before the schedule continues */
 const SETTLE_MS = 400;
+
+/**
+ * CDP screencast is change-driven: a static page produces NO compositor
+ * commits, so capture collapses to a few fps and the renderer stretches one
+ * frame across seconds. This rAF beacon — a 1×1px fixed corner element on its
+ * own compositor layer, toggling between two sub-perceptual opacities — forces
+ * one commit per display frame. 1/255 alpha on one pixel is invisible in the
+ * PNGs and below any encoder threshold; pointer-events:none + no layout means
+ * it can never interfere with the page. Injected as an init script so it
+ * survives full navigations; the rAF loop itself survives SPA route changes.
+ */
+const REPAINT_BEACON_ID = "__supercut_repaint_beacon__";
+const REPAINT_BEACON_SCRIPT = `(() => {
+  if (window.__supercutBeacon) return;
+  window.__supercutBeacon = true;
+  let el = null;
+  let flip = false;
+  const tick = () => {
+    if (!el || !el.isConnected) {
+      const root = document.body || document.documentElement;
+      if (root) {
+        el = document.createElement("div");
+        el.id = ${JSON.stringify(REPAINT_BEACON_ID)};
+        el.setAttribute("aria-hidden", "true");
+        el.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;" +
+          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.004;" +
+          "will-change:opacity;contain:strict";
+        root.appendChild(el);
+      }
+    }
+    if (el) {
+      flip = !flip;
+      el.style.opacity = flip ? "0.008" : "0.004";
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+})();`;
+
+/** how long after a click/type the page gets to reveal its result before the
+ *  changed-region union is read (bounded by the action's slot) */
+const MUTATION_WINDOW_MS = 1200;
+/** a changed-region union smaller than this fraction of the viewport is not a
+ *  payoff worth framing (a toast, a counter tick) */
+const MUTATION_MIN_AREA_FRAC = 0.02;
+/** attribute/text churn on elements smaller than this is noise, not a result */
+const MUTATION_MIN_CHURN_AREA_PX = 1024;
+
+/**
+ * Changed-region tracker: records elements mutated/added after an action so
+ * the capture stage can frame the RESULT by default, even when the script
+ * named no focus_selector. Injected as an init script (survives navigations);
+ * armed per action from Node. The repaint beacon excludes itself by id.
+ */
+const MUTATION_OBSERVER_SCRIPT = `(() => {
+  if (window.__supercutMutations) return;
+  const beaconId = ${JSON.stringify(REPAINT_BEACON_ID)};
+  let tracked = null;
+  const observer = new MutationObserver((records) => {
+    if (!tracked) return;
+    for (const r of records) {
+      if (r.type === "childList") {
+        for (const n of r.addedNodes) {
+          if (n.nodeType === 1) tracked.added.add(n);
+          else if (n.parentElement) tracked.mutated.add(n.parentElement);
+        }
+      } else {
+        const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+        if (el) tracked.mutated.add(el);
+      }
+    }
+  });
+  window.__supercutMutations = {
+    arm() {
+      tracked = { added: new Set(), mutated: new Set() };
+      observer.observe(document.documentElement, {
+        subtree: true, childList: true, attributes: true, characterData: true,
+      });
+    },
+    collect(minChurnArea) {
+      if (!tracked) return null;
+      const t = tracked;
+      tracked = null;
+      observer.disconnect();
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      const consider = (el, churnOnly) => {
+        if (!el.isConnected || el.id === beaconId) return;
+        // visibility is evaluated NOW, at collection end — a transient overlay
+        // (toast/popup already removed or mid fade-out, including via an
+        // ancestor's opacity/display) must never become the framed result
+        if (typeof el.checkVisibility === "function" &&
+            !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return;
+        const cs = getComputedStyle(el);
+        if (cs.visibility === "hidden" || cs.display === "none" || Number(cs.opacity) < 0.05) return;
+        const r = el.getBoundingClientRect();
+        const w = Math.min(r.right, vw) - Math.max(r.left, 0);
+        const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        if (w <= 0 || h <= 0) return;
+        if (churnOnly && w * h < minChurnArea) return;
+        x0 = Math.min(x0, Math.max(r.left, 0));
+        y0 = Math.min(y0, Math.max(r.top, 0));
+        x1 = Math.max(x1, Math.min(r.right, vw));
+        y1 = Math.max(y1, Math.min(r.bottom, vh));
+      };
+      for (const el of t.added) consider(el, false);
+      for (const el of t.mutated) if (!t.added.has(el)) consider(el, true);
+      if (x1 <= x0 || y1 <= y0) return null;
+      return [x0, y0, x1 - x0, y1 - y0];
+    },
+  };
+})();`;
 
 export interface RecordOptions {
   recipe: Recipe;
@@ -62,8 +177,10 @@ interface FrameIndexEntry {
   t_source: number;
 }
 
-function roundToFrame(ms: number): number {
-  return Math.round(ms / FRAME_MS) * FRAME_MS;
+/** overrun shifts round UP to the frame grid: rounding down could place the
+ *  shifted clock before an event already stamped at observed time */
+function ceilToFrame(ms: number): number {
+  return Math.ceil(ms / FRAME_MS) * FRAME_MS;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -124,7 +241,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   let page!: Page;
   let cdp!: CDPSession;
 
-  /** scheduled clock (canonical `t`) and wall anchor for observed_t */
+  /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
   let wallStart = 0;
   const cursor = { x: VIEWPORT.width / 2, y: VIEWPORT.height - 100 }; // parked off-content
@@ -132,6 +249,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   let aborted = false;
 
   const observedNow = () => Date.now() - wallStart;
+  /** monotonic stamp: event `t` rides the observed clock; sleep/rounding jitter
+   *  of a few ms must never produce an out-of-order timeline */
+  let lastStampT = 0;
+  const stamp = (t: number): number => (lastStampT = Math.max(lastStampT, t));
 
   async function moveCursor(points: CursorPoint[], baseT: number): Promise<void> {
     const t0 = Date.now();
@@ -166,6 +287,84 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     return { x: box.x, y: box.y, w: box.width, h: box.height };
   }
 
+  type MutationsApi = {
+    __supercutMutations?: {
+      arm: () => void;
+      collect: (minChurnArea: number) => [number, number, number, number] | null;
+    };
+  };
+
+  async function armMutationObserver(): Promise<boolean> {
+    return page
+      .evaluate(() => {
+        const m = (window as unknown as MutationsApi).__supercutMutations;
+        if (!m) return false;
+        m.arm();
+        return true;
+      })
+      .catch(() => false);
+  }
+
+  async function collectMutationBbox(): Promise<[number, number, number, number] | null> {
+    return page
+      .evaluate(
+        (minChurnArea) =>
+          (window as unknown as MutationsApi).__supercutMutations?.collect(minChurnArea) ?? null,
+        MUTATION_MIN_CHURN_AREA_PX,
+      )
+      .catch(() => null);
+  }
+
+  /**
+   * Attach the camera's result target to the event just emitted, by priority:
+   *   1. QC's patched zoom bbox (a verdict from real footage — always wins)
+   *   2. the script's focus_selector, resolved post-action
+   *   3. the changed-region union observed after the action (frame the result
+   *      by default — no LLM cooperation required)
+   * Every miss falls through; focus_source records which path won.
+   */
+  async function resolveFocus(
+    a: Action,
+    widget: [number, number, number, number],
+    armed: boolean,
+    slotEnd: number,
+  ): Promise<void> {
+    const ev = events[events.length - 1];
+    if (!ev || (ev.type !== "click" && ev.type !== "type" && ev.type !== "hover")) return;
+    if (a.zoom) {
+      ev.focus_bbox = a.zoom;
+      ev.focus_source = "qc";
+      return;
+    }
+    let settled = 0;
+    if (a.focus_selector) {
+      await sleep(SETTLE_MS);
+      settled = SETTLE_MS;
+      const fb = await page.locator(a.focus_selector).first().boundingBox().catch(() => null);
+      if (fb && fb.width > 4 && fb.height > 4) {
+        ev.focus_bbox = [fb.x, fb.y, fb.width, fb.height];
+        ev.focus_source = "llm";
+        return;
+      }
+    }
+    if (!armed) return;
+    // let the reaction land, inside the slot (the dwell absorbs this wait)
+    const wait = Math.min(MUTATION_WINDOW_MS - settled, slotEnd - observedNow());
+    if (wait > 0) await sleep(wait);
+    const union = await collectMutationBbox();
+    if (!union) return;
+    const [ux, uy, uw, uh] = union;
+    if (uw * uh < VIEWPORT.width * VIEWPORT.height * MUTATION_MIN_AREA_FRAC) return;
+    // ~the widget itself → the interaction bbox already frames it
+    const [wx, wy, ww, wh] = widget;
+    const pad = 8;
+    const insideWidget =
+      ux >= wx - pad && uy >= wy - pad && ux + uw <= wx + ww + pad && uy + uh <= wy + wh + pad;
+    if (insideWidget) return;
+    ev.focus_bbox = [ux, uy, uw, uh];
+    ev.focus_source = "mutation";
+  }
+
   async function runAction(a: Action): Promise<void> {
     const scheduledT = clock;
     const slotEnd = clock + a.duration_ms;
@@ -186,13 +385,21 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "type": {
         if (!a.selector) throw new Error(`${a.kind} action requires selector`);
         const box = await targetBox(a.selector);
+        // targetBox burns unbounded wall time (waitFor + scroll + settle) —
+        // rebase the action's timeline to observed NOW so cursor + events sit
+        // where the footage actually shows the page reacting, not where the
+        // schedule hoped it would.
+        const startT = Math.max(scheduledT, observedNow());
         const target = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
         const travelBudget = Math.max(250, a.duration_ms * 0.7);
         const points = cursorPath({
           from: { ...cursor }, to: target, targetWidth: box.w,
           maxDurationMs: travelBudget, rng,
         });
-        await moveCursor(points, scheduledT);
+        await moveCursor(points, startT);
+        const armed = a.kind !== "hover" && !a.zoom ? await armMutationObserver() : false;
+        const pathEndT = startT + (points[points.length - 1]?.t ?? 0);
+        const dispatchT = observedNow();
 
         if (a.kind === "click" || a.kind === "type") {
           await cdp.send("Input.dispatchMouseEvent", {
@@ -202,13 +409,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1,
           });
           events.push({
-            t: scheduledT, observed_t: observedNow(), type: "click",
+            t: stamp(Math.max(pathEndT, dispatchT)), observed_t: dispatchT, type: "click",
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
             point: [target.x, target.y],
           });
         } else {
           events.push({
-            t: scheduledT, observed_t: observedNow(), type: "hover",
+            t: stamp(Math.max(pathEndT, dispatchT)), observed_t: dispatchT, type: "hover",
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
           });
         }
@@ -222,7 +429,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             await sleep(perChar);
           }
           events.push({
-            t: scheduledT, observed_t: observedNow(), type: "type",
+            t: stamp(observedNow()), observed_t: observedNow(), type: "type",
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
             textLen: [...text].length, // code points, matching the for...of insertion
           });
@@ -233,82 +440,102 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             await page.keyboard.press("Enter");
           }
         }
-        // 4b — frame the result, not the cursor: if this action names a result
-        // region, resolve its box AFTER the action (and a settle for the payoff
-        // to render) and attach it to the event. The renderer prefers it over
-        // the interaction bbox, so the camera holds on the graph/results the
-        // action produced — not the input box. Unresolvable → silently skip.
-        if (a.focus_selector) {
-          await sleep(SETTLE_MS);
-          const fb = await page.locator(a.focus_selector).first().boundingBox().catch(() => null);
-          const ev = events[events.length - 1];
-          if (fb && fb.width > 4 && fb.height > 4 && ev &&
-              (ev.type === "click" || ev.type === "type" || ev.type === "hover")) {
-            ev.focus_bbox = [fb.x, fb.y, fb.width, fb.height];
-          }
-        }
+        await resolveFocus(a, [box.x, box.y, box.w, box.h], armed, slotEnd);
         break;
       }
       case "scroll": {
         const from: [number, number] = [cursor.x, cursor.y];
-        const steps = 12;
         const totalDy = 600;
-        for (let i = 0; i < steps; i++) {
-          await cdp.send("Input.dispatchMouseEvent", {
-            type: "mouseWheel", x: cursor.x, y: cursor.y,
-            deltaX: 0, deltaY: totalDy / steps,
-          });
-          await sleep(a.duration_ms / steps / 2);
+        // fine-grained eased scroll at ~60Hz across the whole slot: coarse
+        // 50px wheel pops read as content jumps in the footage; many small
+        // ease-in-out deltas capture as continuous motion.
+        const steps = Math.max(2, Math.round(a.duration_ms / FRAME_MS));
+        const ease = (p: number) => (p < 0.5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2);
+        const t0 = Date.now();
+        let sent = 0;
+        for (let i = 1; i <= steps; i++) {
+          const targetDy = Math.round(totalDy * ease(i / steps));
+          const dy = targetDy - sent;
+          if (dy !== 0) {
+            await cdp.send("Input.dispatchMouseEvent", {
+              type: "mouseWheel", x: cursor.x, y: cursor.y,
+              deltaX: 0, deltaY: dy,
+            });
+            sent = targetDy;
+          }
+          const wait = (i / steps) * a.duration_ms - (Date.now() - t0);
+          if (wait > 4) await sleep(wait);
         }
         events.push({
-          t: scheduledT, observed_t: observedNow(), type: "scroll",
+          t: stamp(Math.max(scheduledT, observedNow() - a.duration_ms)), observed_t: observedNow(), type: "scroll",
           from, to: [cursor.x, cursor.y + totalDy],
         });
         break;
       }
     }
 
-    // dwell out the remainder of the slot, then advance the canonical clock;
+    // dwell out the remainder of the slot, then advance the schedule clock;
     // on overrun, shift the schedule by whole frames (timestamp canon)
     const observedEnd = observedNow();
     if (observedEnd < slotEnd) {
       await sleep(slotEnd - observedEnd);
-      clock = slotEnd;
+      clock = stamp(slotEnd);
     } else {
-      clock = roundToFrame(observedEnd);
+      clock = stamp(ceilToFrame(observedEnd));
     }
   }
 
   try {
     page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DPR });
+    if (captureFrames) await page.addInitScript(REPAINT_BEACON_SCRIPT);
+    await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);
 
     if (captureFrames) {
       // ack-AFTER-write: Chromium won't send the next frame until we ack, so
       // awaiting the disk write before acking gives true backpressure (one
       // write in flight) and a failed write can never be silently indexed
+      const handleFrame = async (
+        ev: { data: string; sessionId: number; metadata: { timestamp?: number } },
+        dropping: boolean,
+      ): Promise<void> => {
+        // drop blank frames captured mid-navigation (the scene-change flash)
+        if (dropping) {
+          await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+          return;
+        }
+        // a frame without a CDP timestamp cannot be placed on the timeline —
+        // indexing it at 0 would poison t_source with an epoch-sized negative
+        const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
+        if (!(stampMs > 0)) {
+          await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+          return;
+        }
+        if (firstFrameStamp < 0) {
+          firstFrameStamp = stampMs;
+          signalFirstFrame();
+        }
+        const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
+        try {
+          await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
+          // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
+          // the first-processed frame; a negative t_source would sort to
+          // entry 0 and fail render-plan validation
+          frameIndex.push({ file, t_source: Math.max(0, stampMs - firstFrameStamp) });
+        } catch {
+          writeErrors++;
+        } finally {
+          await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+        }
+      };
       cdp.on("Page.screencastFrame", (ev) => {
-        lastWrite = (async () => {
-          // drop blank frames captured mid-navigation (the scene-change flash)
-          if (isNavigating) {
-            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
-            return;
-          }
-          const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
-          if (firstFrameStamp < 0) {
-            firstFrameStamp = stampMs;
-            signalFirstFrame();
-          }
-          const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
-          try {
-            await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
-            frameIndex.push({ file, t_source: stampMs - firstFrameStamp });
-          } catch {
-            writeErrors++;
-          } finally {
-            await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
-          }
-        })();
+        // CHAIN, never replace: if Chromium ever has >1 unacked frame in
+        // flight, replacing lastWrite would let the finalize await miss an
+        // earlier in-flight write and drop its frame from the index. The
+        // isNavigating flag is sampled at event time (its capture semantics),
+        // and per-frame failures never poison the chain (writeErrors counts).
+        const dropping = isNavigating;
+        lastWrite = lastWrite.then(() => handleFrame(ev, dropping)).catch(() => {});
       });
     }
 
@@ -331,7 +558,15 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       await Promise.race([firstFrameSeen, sleep(3000)]);
       if (firstFrameStamp < 0) console.error("warning: no screencast frame within 3s — page may be fully static");
     }
-    wallStart = Date.now();
+    // one timeline for everything: frame t_source is (CDP timestamp − first
+    // frame's CDP timestamp), so anchoring the observed clock to that same
+    // epoch stamp puts events and cursor on the frame timeline exactly. CDP
+    // timestamps are wall epoch; guard against a pathological clock-domain
+    // mismatch with a plain Date.now() fallback.
+    wallStart =
+      firstFrameStamp > 0 && Math.abs(Date.now() - firstFrameStamp) < 10_000
+        ? firstFrameStamp
+        : Date.now();
 
     for (let i = 0; i < recipe.scenes.length; i++) {
       const scene: Scene = recipe.scenes[i]!;
@@ -349,7 +584,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         continue;
       }
 
-      events.push({ t: clock, observed_t: observedNow(), type: "scene", name: scene.name, priority: scene.priority });
+      events.push({ t: stamp(clock), observed_t: observedNow(), type: "scene", name: scene.name, priority: scene.priority });
 
       try {
         if (i > 0) {
@@ -375,9 +610,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           const target = clock + ENTRY_NAV_ALLOWANCE_MS;
           if (navEnd < target) {
             await sleep(target - navEnd);
-            clock = target;
+            clock = stamp(target);
           } else {
-            clock = roundToFrame(navEnd);
+            clock = stamp(ceilToFrame(navEnd));
           }
         }
         for (const a of scene.entry.prelude) await runAction(a);
@@ -385,7 +620,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         // Hold the scene's final frame; it is validated and budgeted by the schema.
         if (scene.hold_ms > 0) {
           await sleep(scene.hold_ms);
-          clock += scene.hold_ms;
+          clock = stamp(clock + scene.hold_ms);
         }
       } catch (err) {
         failedScenes.push(scene.name);

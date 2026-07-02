@@ -38,7 +38,7 @@ HARD RULES:
 - Do not use mid-scene "goto" actions; each scene starts from its entry.url so selector validation and capture stay coherent.
 - SHOW THE PAYOFF. A product video that types into a box but never reveals the result is worthless. When a "type" goes into a search/query/command field that runs on Enter, set "submit": true so the app actually produces its output (results, a graph, a detail view).
 - FRAME THE RESULT. When an action produces a visible result, set "focus_selector" to the FRAMABLE REGION where that result appears (from the page's regions list). The camera then holds on the payoff (the graph/results), not the input box. Use a region selector ONLY in focus_selector, never as an action "selector".
-- 2-4 scenes, 2-4 actions each, action duration_ms 1200-4000, hold_ms 600-1400.
+- 2-4 scenes, 2-4 actions each, action duration_ms 1200-4000, hold_ms 600-3000. Give the FINAL payoff scene a long hold (2000-3000) so the result breathes; earlier scenes stay 600-1400.
 - total of all durations + holds ≤ 50000 (one minute video with headroom).
 - "type" actions need realistic short text (an email, a search term — match the field). For a search/query field, PREFER a value the app itself suggests — a placeholder example, an example hint near the field, or a visible chip/tag label — so the query is one the product recognizes and actually returns a result for. Do not invent an exotic value the demo may not have data for.
 - Order scenes as a Screen-Studio story: hook → proof/depth → payoff. End on the most visual screen.

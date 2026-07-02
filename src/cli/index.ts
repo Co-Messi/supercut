@@ -14,9 +14,9 @@ import { doctor } from "./doctor.js";
 const HELP = `supercut — institutional-grade 60s launch videos from your real app
 
 Usage:
-  supercut generate --url <running app URL> [--repo <path>]
+  supercut generate --url <running app URL> [--repo <path>] [--music <track|file|off>]
   supercut record   --recipe <recipe.json> [--out <dir>] [--seed <n>]
-  supercut render   --take <dir> [--out <file.mp4>] [--bg aurora|midnight|dusk|paper|<asset>|<image>]
+  supercut render   --take <dir> [--out <file.mp4>] [--bg <wallpaper|palette|image>] [--music <track|file|off>]
   supercut doctor
 
 Run any command with --help for details.`;
@@ -34,12 +34,8 @@ async function main(): Promise<number> {
     case "record": {
       const recordUsage =
         "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]";
-      // A1: subcommands advertised "--help" but strict parseArgs would throw on
-      // it — intercept before parsing and print this command's usage.
-      if (rest.includes("--help") || rest.includes("-h")) {
-        console.log(recordUsage);
-        return 0;
-      }
+      // help is a real parsed boolean, not a substring scan — so a --help that
+      // is actually the VALUE of another flag can't hijack the command.
       const { values } = parseArgs({
         args: rest,
         options: {
@@ -48,8 +44,13 @@ async function main(): Promise<number> {
           seed: { type: "string" },
           "block-private-network": { type: "boolean" },
           "allow-private-network": { type: "boolean" }, // deprecated no-op
+          help: { type: "boolean", short: "h" },
         },
       });
+      if (values.help) {
+        console.log(recordUsage);
+        return 0;
+      }
       if (!values.recipe) {
         console.error(recordUsage);
         return 1;
@@ -85,21 +86,23 @@ async function main(): Promise<number> {
     case "render": {
       const renderUsage =
         "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
-        "[--bg aurora|midnight|dusk|paper|<image path>]";
-      // A1: print this command's usage on --help instead of letting strict
-      // parseArgs throw on the unknown flag.
-      if (rest.includes("--help") || rest.includes("-h")) {
-        console.log(renderUsage);
-        return 0;
-      }
+        "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
+        "[--music <bundled track|audio file|off>]";
+      // help is a real parsed boolean (see record) — no substring scan
       const { values } = parseArgs({
         args: rest,
         options: {
           take: { type: "string" },
           out: { type: "string" },
           bg: { type: "string" },
+          music: { type: "string" },
+          help: { type: "boolean", short: "h" },
         },
       });
+      if (values.help) {
+        console.log(renderUsage);
+        return 0;
+      }
       if (!values.take) {
         console.error(renderUsage);
         return 1;
@@ -111,23 +114,23 @@ async function main(): Promise<number> {
         takeDir: values.take,
         outFile,
         ...(values.bg ? { background: values.bg } : {}),
+        ...(values.music ? { music: values.music } : {}),
       });
       console.log(
         `done in ${(res.wallMs / 1000).toFixed(1)}s — ${res.frames} frames, ` +
-          `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded → ${res.outFile}`,
+          `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded` +
+          (res.music ? `, music: ${res.music}` : "") +
+          ` → ${res.outFile}`,
       );
       return 0;
     }
     case "generate": {
       const generateUsage =
-        "usage: supercut generate --url <running app URL> [--repo <path>] [--out <dir>] " +
-        "[--bg <stage>] [--seed <n>] [--model <id>] [--env-file <file>] [--block-private-network] [--allow-destructive] [--no-vision]";
-      // A1: print this command's usage on --help instead of letting strict
-      // parseArgs throw on the unknown flag.
-      if (rest.includes("--help") || rest.includes("-h")) {
-        console.log(generateUsage);
-        return 0;
-      }
+        "usage: supercut generate --url <running app URL> [--repo <path>] [--app <name>] [--out <dir>] " +
+        "[--bg <stage>] [--music <bundled track|audio file|off>] [--seed <n>] [--model <id>] " +
+        "[--env-file <file>] [--max-tokens <n|off>] " +
+        "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
+      // help is a real parsed boolean (see record) — no substring scan
       const { values } = parseArgs({
         args: rest,
         options: {
@@ -136,10 +139,15 @@ async function main(): Promise<number> {
           app: { type: "string" },
           out: { type: "string" },
           bg: { type: "string" },
+          music: { type: "string" },
           seed: { type: "string" },
           model: { type: "string" },
           "no-vision": { type: "boolean" },
           "env-file": { type: "string" },
+          // hard LLM spend ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
+          // 0 or "off" disables, default 300000
+          "max-tokens": { type: "string" },
+          help: { type: "boolean", short: "h" },
           // private/localhost is ALLOWED BY DEFAULT — filming your own local
           // dev app is the #1 use case. --block-private-network opts into the
           // SSRF guard (for untrusted/public targets). --allow-private-network
@@ -153,6 +161,10 @@ async function main(): Promise<number> {
           yes: { type: "boolean" },
         },
       });
+      if (values.help) {
+        console.log(generateUsage);
+        return 0;
+      }
       if (!values.url) {
         console.error(generateUsage);
         return 1;
@@ -181,14 +193,27 @@ async function main(): Promise<number> {
         console.error(`invalid --seed "${values.seed}" (expected a non-negative integer)`);
         return 1;
       }
+      // flag wins over env; 0 or "off" disables the cap (generate defaults to
+      // 300000). An empty value is treated as unset — Number("") is 0, which
+      // would silently disable the budget.
+      const rawBudget = values["max-tokens"] ?? (process.env.SUPERCUT_MAX_TOKENS || undefined);
+      let maxTokens: number | undefined;
+      if (rawBudget !== undefined && rawBudget.trim() !== "") {
+        maxTokens = rawBudget.toLowerCase() === "off" ? 0 : Number(rawBudget);
+        if (!Number.isInteger(maxTokens) || maxTokens < 0) {
+          console.error(`invalid --max-tokens "${rawBudget}" (expected a non-negative integer or "off")`);
+          return 1;
+        }
+      }
       // privacy notice (informational, NOT a gate — blocking the primary
       // command on --yes was a usability regression). --yes silences it.
       if (!values.yes) {
         console.error(
-          "note: generate sends crawled DOM text" +
-            (values.repo ? " + repo notes" : "") +
-            " to your LLM provider; in vision mode, screenshots of your app are " +
-            "uploaded too. (record/render need no LLM.)",
+          "privacy: generate sends crawled page text" +
+            (values.repo ? " and repo notes" : "") +
+            " to your configured LLM provider. In vision mode, FULL UNREDACTED\n" +
+            "SCREENSHOTS of your app are uploaded too — text redaction is best-effort and cannot cover images.\n" +
+            "Don't film apps showing real customer data or secrets with vision on. (record/render need no LLM.)",
         );
       }
       let provider;
@@ -211,11 +236,13 @@ async function main(): Promise<number> {
         ...(values.repo ? { repoPath: values.repo } : {}),
         ...(values.app ? { appName: values.app } : {}),
         ...(values.bg ? { background: values.bg } : {}),
+        ...(values.music ? { music: values.music } : {}),
         ...(seed !== undefined ? { seed } : {}),
         // default ALLOW; only --block-private-network engages the SSRF guard
         allowPrivateNetwork: !values["block-private-network"],
         // default OFF; --allow-destructive opts into filming destructive controls
         allowDestructive: !!values["allow-destructive"],
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
       });
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;

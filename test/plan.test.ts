@@ -48,11 +48,11 @@ describe("buildRenderPlan", () => {
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
     // establishing shot: wide through the take's opening (t=300ms ≈ frame 18)
     expect(zAt(10)).toBeCloseTo(1, 1);
-    // still ~wide when the punch window opens (establish ends at 1200ms ≈ frame 72)
-    expect(zAt(72)).toBeLessThan(1.1);
+    // still ~wide when the punch window opens (establish ends at 900ms ≈ frame 54)
+    expect(zAt(54)).toBeLessThan(1.1);
     // near full zoom once the punch has settled (t≈2100ms ≈ frame 126)
     expect(zAt(126)).toBeGreaterThan(1.4);
-    // returned to overview by the end (dwell 1500 + settle)
+    // returned to overview by the end (dwell 1200 + settle)
     expect(zAt(plan.frames - 1)).toBeLessThan(1.08);
   });
 
@@ -84,7 +84,8 @@ describe("buildRenderPlan", () => {
 
   it("covers the full take: frames extend past the last event dwell", () => {
     const plan = buildRenderPlan(clickLog, frameIndex);
-    // click at 1500 + dwell 1500 + tail 600 = 3600ms → ≥ 216 frames
+    // take runs to the last source frame (3267ms) + tail 600 → ≥ 216 frames,
+    // comfortably past the click's dwell (ends 1500 + 1200)
     expect(plan.frames).toBeGreaterThanOrEqual(216);
   });
 
@@ -127,9 +128,9 @@ describe("frame-the-result (4b): camera prefers focus_bbox", () => {
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
     const z = zAt(95);
     // a 1200x700 region in 1920x1080 fits at ~1.36x — gentler than the fixed
-    // 1.48 punch-in (proving the fit math), but still a real zoom (>1).
+    // 1.42 punch-in (proving the fit math), but still a real zoom (>1).
     expect(z).toBeGreaterThan(1.05);
-    expect(z).toBeLessThan(1.48);
+    expect(z).toBeLessThan(1.42);
   });
 
   it("holds on the payoff longer than a plain interaction (FOCUS_DWELL)", () => {
@@ -139,9 +140,12 @@ describe("frame-the-result (4b): camera prefers focus_bbox", () => {
     }));
     const plan = buildRenderPlan(focusLog, longIndex);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
-    // still zoomed ~3s after the event (focus dwell 4200ms > plain dwell 1500ms)
-    // event t=1500ms ≈ frame 90; +3000ms ≈ frame 270
-    expect(zAt(270)).toBeGreaterThan(1.05);
+    // event t=1500ms ≈ frame 90; focus dwell 2400ms holds the payoff to ~3900ms.
+    // ~1800ms after the event (frame 198) it's still framed — a plain dwell
+    // (1200ms) would already be releasing by now.
+    expect(zAt(198)).toBeGreaterThan(1.3);
+    // and it has glided back to a relaxed overview by ~2900ms after (frame 264)
+    expect(zAt(264)).toBeLessThan(1.1);
   });
 });
 
@@ -161,13 +165,13 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
     // mid-take glide between the scenes sits above 1 (still engaged)…
     expect(zAt(Math.round(6000 / (1000 / 60)))).toBeGreaterThan(1.05);
-    // …but the second scene OPENS wide: ~1s into its establishing shot
-    expect(zAt(Math.round(8950 / (1000 / 60)))).toBeLessThan(1.06);
+    // …but the second scene OPENS wide: midway through its establishing shot
+    expect(zAt(Math.round(8450 / (1000 / 60)))).toBeLessThan(1.06);
     // then punches back in for its click
     expect(zAt(Math.round(10600 / (1000 / 60)))).toBeGreaterThan(1.4);
   });
 
-  it("never punches 1.48 into a full-width hero: plain-bbox zoom is size-aware", () => {
+  it("never punches 1.42 into a full-width hero: plain-bbox zoom is size-aware", () => {
     const hero = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 1500, type: "click", bbox: [0, 100, 1920, 600], selector: "#hero", point: [960, 400] },
@@ -187,7 +191,7 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
     const z = zAt(150); // settled well after the punch opens
     expect(z).toBeGreaterThan(1.2);
-    expect(z).toBeLessThan(1.48);
+    expect(z).toBeLessThan(1.42);
   });
 
   it("merges only nearby beats: far-apart targets widen out between punches", () => {
@@ -212,8 +216,8 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
   });
 
   it("a long focus dwell overlapping a later far beat never drags the camera back", () => {
-    // focus beat top-left at t=2000 (FOCUS_DWELL 4200 → would run to 6200)
-    // overlaps a far plain click at t=4000 (dwell ends 5500): after beat 2's
+    // focus beat top-left at t=2000 (FOCUS_DWELL 2400 → would run to 4400)
+    // overlaps a far plain click at t=4000 (dwell ends 5200): after beat 2's
     // dwell, the camera must settle out — not re-punch across the page to
     // beat 1's stale target
     const log = makeLog([

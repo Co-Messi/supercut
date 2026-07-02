@@ -1,30 +1,29 @@
 {
   "version": 0,
   "app_url": "http://127.0.0.1:4173",
-  "music_track": "institutional-01",
+  "music_track": "daybreak",
   "scenes": [
     {
-      "name": "landing-cta",
+      "name": "the-pitch-and-signup",
       "priority": 1,
       "entry": { "url": "http://127.0.0.1:4173/", "prelude": [] },
       "depends_on": [],
       "actions": [
-        { "kind": "click", "selector": "#cta", "duration_ms": 1800 },
-        { "kind": "type", "selector": "#email", "text": "ada@lumon.dev", "duration_ms": 2200 },
-        { "kind": "click", "selector": "#join", "duration_ms": 1400 }
+        { "kind": "click", "selector": "#cta", "duration_ms": 1400 },
+        { "kind": "type", "selector": "#email", "text": "ada@lumon.dev", "duration_ms": 1900 },
+        { "kind": "click", "selector": "#join", "focus_selector": "#signup", "duration_ms": 1500 }
       ],
-      "hold_ms": 800
+      "hold_ms": 900
     },
     {
-      "name": "dashboard",
+      "name": "the-live-product",
       "priority": 2,
-      "entry": { "url": "http://127.0.0.1:4173/dash", "prelude": [] },
+      "entry": { "url": "http://127.0.0.1:4173/dash/", "prelude": [] },
       "depends_on": [],
       "actions": [
-        { "kind": "hover", "selector": "#task-ship", "duration_ms": 1600 },
-        { "kind": "wait", "duration_ms": 1200 }
+        { "kind": "hover", "selector": "#task-ship", "focus_selector": "#tasks", "duration_ms": 1600 }
       ],
-      "hold_ms": 600
+      "hold_ms": 1000
     }
   ]
 }

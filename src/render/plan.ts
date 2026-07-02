@@ -148,12 +148,12 @@ interface CameraSegment {
 
 /** MAXIMUM punch-in, reached only for small widgets — a plain bbox is inflated
  *  to a context region and fit-zoomed, so large targets zoom far less */
-const ZOOM_TARGET = 1.48;
+const ZOOM_TARGET = 1.42;
 const ZOOM_LEAD_MS = 600;   // camera starts moving before the click lands
-const ZOOM_DWELL_MS = 1500; // stays on target after the event
+const ZOOM_DWELL_MS = 1200; // stays on target after the event
 /** each scene opens wide: this long at z=1 so the viewer reads the whole page
  *  before the first punch-in (Screen-Studio establishing shot) */
-const ESTABLISH_MS = 1200;
+const ESTABLISH_MS = 900;
 /** a plain interaction bbox is inflated to at least this fraction of the
  *  viewport before fit-zooming — the framed shot always keeps page context,
  *  and a full-width hero gets no punch at all */
@@ -161,7 +161,7 @@ const MIN_CONTEXT_FRAC = 0.55;
 /** bridge nearby punch-ins only when their targets are NEAR: beyond this
  *  fraction of the content diagonal the camera widens between beats instead
  *  of dragging a tight crop across the page */
-const MERGE_DIST_FRAC = 0.35;
+const MERGE_DIST_FRAC = 0.5;
 /** scene-boundary crossfade length (last pre-nav frame → first post-nav
  *  frame) — a deliberate dissolve instead of a freeze-then-snap */
 const CROSSFADE_MS = 350;
@@ -177,13 +177,13 @@ const RESIDUAL_BLEND_MAX_MS = 500;
 const NAV_MARKER_SLACK_MS = 1000;
 /** a framed RESULT (focus_bbox) is the payoff — hold on it longer than a plain
  *  interaction so the viewer reads the graph/results before the camera moves */
-const FOCUS_DWELL_MS = 4200;
+const FOCUS_DWELL_MS = 2400;
 /** a result region should FILL the frame, not be punched-into and cropped:
  *  fit it to this fraction of the viewport (the rest is breathing room) */
 const FOCUS_FILL = 0.88;
 /** segments closer than this bridge into ONE held zoom — the camera glides
  *  between targets instead of pumping out/in per click. */
-const MERGE_GAP_MS = 2600;
+const MERGE_GAP_MS = 3400;
 /** between two scenes (a gap too wide to fully merge) the camera relaxes to this
  *  gentle floor instead of snapping all the way back to z=1 — so it glides scene
  *  to scene rather than pumping fully out then punching back in (which read as a

@@ -163,21 +163,22 @@ describe("record E2E on fixture app", () => {
     expect(hoverEvent.t).toBeGreaterThanOrEqual(scene2T + 1000);
 
     // capture fluency: the repaint beacon must defeat change-driven screencast
-    // starvation — ~60fps average, and no stall outside the one deliberate
+    // starvation — sustained frame flow, and no stall outside the one deliberate
     // frame-suppression window around the scene-2 navigation. Bounds leave
-    // headroom for machine-load jitter (starvation was p95 430ms / max 4.1s;
-    // an occasional ~100ms PNG-write hiccup under parallel test load is not it)
+    // headroom for machine-load jitter (starvation was 1.8-19 fps avg, p95 gap
+    // 430ms, max 4.1s). The fps floor is 30, not ~60: CI runners composite via
+    // SwiftShader on 2 cores and sustain ~47 fps where local hardware does 80+.
     const spanMs = idx[idx.length - 1]!.t_source - idx[0]!.t_source;
     const avgFps = ((idx.length - 1) / spanMs) * 1000;
-    expect(avgFps).toBeGreaterThanOrEqual(50);
+    expect(avgFps).toBeGreaterThanOrEqual(30);
     const dwellGaps: number[] = [];
     for (let i = 1; i < idx.length; i++) {
       const inNavWindow = idx[i]!.t_source > scene2T - 200 && idx[i - 1]!.t_source < scene2T + 2500;
       if (!inNavWindow) dwellGaps.push(idx[i]!.t_source - idx[i - 1]!.t_source);
     }
     dwellGaps.sort((a, b) => a - b);
-    expect(dwellGaps[Math.floor(dwellGaps.length * 0.95)]!).toBeLessThanOrEqual(50);
-    expect(dwellGaps[dwellGaps.length - 1]!).toBeLessThanOrEqual(200);
+    expect(dwellGaps[Math.floor(dwellGaps.length * 0.95)]!).toBeLessThanOrEqual(100);
+    expect(dwellGaps[dwellGaps.length - 1]!).toBeLessThanOrEqual(400);
 
     // clock unification: events are stamped on the frame timeline, so the
     // event timeline may never lead the footage by more than the render gate

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
-import { DESTRUCTIVE_RE } from "../src/director/inventory.js";
+import { DESTRUCTIVE_RE, isDestructiveLabel } from "../src/director/inventory.js";
+import { pickMusic } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
 import type { AppAnalysis } from "../src/director/analyze.js";
@@ -46,6 +47,7 @@ const analysis: AppAnalysis = {
   product_name: "Lumon",
   headline: "Your metrics, the moment you sign up",
   tagline: "Numbers without the setup",
+  music_track: "daybreak",
   money_moments: [
     { title: "Instant signup", caption: "Sign up in one click", why: "shows zero friction", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
     { title: "Typed email", caption: "Your dashboard, instantly", why: "form payoff", page_url: "http://127.0.0.1:9999/", elements: ["#email"] },
@@ -56,7 +58,7 @@ function validRecipeJson(selector: string): string {
   return JSON.stringify({
     version: 0,
     app_url: "http://127.0.0.1:9999",
-    music_track: "institutional-01",
+    music_track: "daybreak",
     scenes: [
       {
         name: "signup",
@@ -159,6 +161,35 @@ describe("script stage — the anti-hallucination gates", () => {
     );
   });
 
+  it("rejects a made-up music track with a corrective error and accepts the retry", async () => {
+    const fake = JSON.parse(validRecipeJson("#cta")) as { music_track: string };
+    fake.music_track = "synthwave-99";
+    const llm = new StubLlm([JSON.stringify(fake), validRecipeJson("#cta")]);
+    const { recipe, attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    expect(recipe.music_track).toBe("daybreak");
+    // retry prompt names the bad track AND the real library so the model can fix it
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("synthwave-99");
+    expect(retryText).toMatch(/"pulse", "daybreak", "midnight", "momentum"/);
+  });
+
+  it('accepts "off" as an explicit silent choice', async () => {
+    const silent = JSON.parse(validRecipeJson("#cta")) as { music_track: string };
+    silent.music_track = "off";
+    const llm = new StubLlm([JSON.stringify(silent)]);
+    const { recipe, attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(1);
+    expect(recipe.music_track).toBe("off");
+  });
+
+  it("passes the analysis's music pick into the script prompt", async () => {
+    const llm = new StubLlm([validRecipeJson("#cta")]);
+    await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    const promptText = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(promptText).toContain('MUSIC: set "music_track" to "daybreak"');
+  });
+
   it("rejects a selector that exists on another page but not the scene's entry page", async () => {
     // #task-ship is real — but only on /dash. Using it in a scene whose
     // entry.url is "/" must fail per-page validation (PR #2 review).
@@ -193,6 +224,7 @@ describe("hidden-element reveal order (B5)", () => {
     product_name: "Reveal",
     headline: "Reveal",
     tagline: "Reveal",
+    music_track: "pulse",
     money_moments: [
       { title: "Open the form", caption: "one click", why: "reveal", page_url: "http://127.0.0.1:9999/", elements: ["#open", "#field"] },
     ],
@@ -202,7 +234,7 @@ describe("hidden-element reveal order (B5)", () => {
     return JSON.stringify({
       version: 0,
       app_url: "http://127.0.0.1:9999",
-      music_track: "institutional-01",
+      music_track: "midnight",
       scenes: [
         {
           name: "reveal",
@@ -338,10 +370,69 @@ describe("destructive-action guard (H1)", () => {
     // mirrors inventory.ts: an element is excluded when it matches and
     // allowDestructive is false; included when allowDestructive is true.
     const accepted = (text: string, allowDestructive: boolean) =>
-      allowDestructive || !DESTRUCTIVE_RE.test(text);
+      allowDestructive || !isDestructiveLabel(text);
     expect(accepted("Delete account", false)).toBe(false); // excluded by default
     expect(accepted("Delete account", true)).toBe(true); // included on opt-in
     expect(accepted("Sign in", false)).toBe(true); // benign always kept
+  });
+
+  it("isDestructiveLabel: standalone verbs/phrases exclude, slug fragments never do", () => {
+    // genuine action labels — still destructive
+    for (const label of ["Delete account", "Delete", "Remove", "Pay $49", "Cancel subscription", "checkout"]) {
+      expect(isDestructiveLabel(label), `expected "${label}" to be destructive`).toBe(true);
+    }
+    // content NAMES that merely contain a scary substring — must stay filmable
+    for (const label of [
+      "checkout-api",
+      "checkout-api 160ms",
+      "payments-worker",
+      "delete-log-2024",
+      "archive-service Operational",
+      "reset_password_flow",
+    ]) {
+      expect(isDestructiveLabel(label), `expected "${label}" NOT to be destructive`).toBe(false);
+    }
+    // a slug AND a real action verb in the same label still excludes
+    expect(isDestructiveLabel("checkout-api Delete")).toBe(true);
+  });
+});
+
+describe("generate music priority (cli > director > none)", () => {
+  // resolver stub shaped like resolveMusicTrack: null for off, path for known,
+  // throw for unknown — pickMusic must never let the throw escape
+  const resolve = (spec: string | undefined): string | null => {
+    if (!spec || spec.trim().toLowerCase() === "off") return null;
+    if (["pulse", "daybreak", "midnight", "momentum"].includes(spec)) return `/assets/music/${spec}.mp3`;
+    throw new Error(`unknown track ${spec}`);
+  };
+
+  it("an explicit --music beats the director's pick", () => {
+    expect(pickMusic("daybreak", "midnight", resolve)).toMatchObject({
+      spec: "daybreak", source: "cli", label: "daybreak (cli)",
+    });
+  });
+
+  it("--music off silences even when the director picked a track", () => {
+    expect(pickMusic("off", "midnight", resolve)).toMatchObject({ spec: undefined, source: "none", label: "none" });
+  });
+
+  it("no --music → the director's track", () => {
+    expect(pickMusic(undefined, "midnight", resolve)).toMatchObject({
+      spec: "midnight", source: "director", label: "midnight (director)",
+    });
+  });
+
+  it('a director "off" → silent, no warning', () => {
+    const choice = pickMusic(undefined, "off", resolve);
+    expect(choice).toMatchObject({ spec: undefined, source: "none" });
+    expect(choice.warning).toBeUndefined();
+  });
+
+  it("an unresolvable director track degrades to a warned silent cut, never a throw", () => {
+    const choice = pickMusic(undefined, "synthwave-99", resolve);
+    expect(choice.spec).toBeUndefined();
+    expect(choice.source).toBe("none");
+    expect(choice.warning).toMatch(/synthwave-99/);
   });
 });
 

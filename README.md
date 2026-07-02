@@ -203,7 +203,8 @@ Procedural palettes (generated at render time, no asset): `aurora`, `midnight`,
 
 ## 🎵 Music
 
-Videos are silent by default. `--music` (on `render` and `generate`) muxes a looped,
+`render` is silent by default; on `generate` the AI director picks the bundled track
+matching your app's look. `--music` (on `render` and `generate`) muxes a looped,
 loudness-normalized track with fade-in/out under the video — never re-encoding the
 video and never changing its length:
 
@@ -223,7 +224,8 @@ provenance in `assets/music/CREDITS.md`):
 | `midnight` | dark synthwave/techno   |
 | `momentum` | driving minimal techno  |
 
-`--music off` (or omitting the flag) keeps the video silent.
+`--music off` forces a silent cut; on `render`, omitting the flag does too. `--music`
+always outranks the director's pick on `generate`.
 
 ## 🔒 Privacy
 

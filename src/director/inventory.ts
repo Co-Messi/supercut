@@ -35,6 +35,13 @@ export interface PageDigest {
   url: string;
   title: string;
   headings: string[];
+  /** effective page background tone — grounds the director's vibe/music
+   *  choices even when the model is text-only (no screenshots). Optional so
+   *  hand-built digests stay valid; the crawler always sets it. */
+  theme?: "dark" | "light";
+  /** accent hint: the first visible button's background color, when one has a
+   *  real (non-transparent) background. Advisory only. */
+  accentColor?: string;
   inventory: InventoryItem[];
   /** framable result/content regions (focus_selector candidates) */
   regions: RegionItem[];
@@ -46,6 +53,10 @@ export interface PageDigest {
 }
 
 const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
+
+/** ceiling on distinct :nth-match entries per duplicated base selector — six
+ *  rows are plenty to tell a switch-between-items story */
+const MAX_SIBLINGS_PER_BASE = 6;
 
 /**
  * Fail-safe-by-default destructive-action lexicon. The director scripts clicks
@@ -71,6 +82,24 @@ const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
 // silently dropping a chat app's "Send" would gut the video.
 export const DESTRUCTIVE_RE =
   /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
+
+/**
+ * A label is destructive only when the lexicon verb stands ALONE — a slug
+ * fragment ("checkout-api", "delete-log-2024") is a content NAME, not an
+ * action. `\b` fires at hyphen boundaries, so a bare regex test erased whole
+ * dashboards whose data happened to contain a scary substring.
+ */
+export function isDestructiveLabel(s: string): boolean {
+  const re = new RegExp(DESTRUCTIVE_RE.source, "gi");
+  for (let m = re.exec(s); m !== null; m = re.exec(s)) {
+    const before = s[m.index - 1];
+    const after = s[m.index + m[0].length];
+    // bordered by -/_ → inside a larger identifier token, keep scanning
+    if ((before !== undefined && /[-_]/.test(before)) || (after !== undefined && /[-_]/.test(after))) continue;
+    return true;
+  }
+  return false;
+}
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -127,8 +156,62 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
   return out.sort((a, b) => b.bbox.w * b.bbox.h - a.bbox.w * a.bbox.h).slice(0, 6);
 }
 
+/** background luminance below this reads as a dark UI. Real dark themes sit
+ *  near 0; ambiguous mid-grays fall through to the safer "light" default. */
+const DARK_LUMINANCE_MAX = 0.35;
+
+/**
+ * Cheap look probe: effective background color (body → html, first
+ * non-transparent) → relative luminance → dark/light, plus the first visible
+ * button's background as an accent hint. Advisory only — any failure defaults
+ * to "light" rather than blocking the crawl.
+ */
+async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accentColor?: string }> {
+  try {
+    const probe = await page.evaluate(({ darkMax }) => {
+      const parse = (c: string): [number, number, number, number] | null => {
+        const m = c.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)/);
+        return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])] : null;
+      };
+      // effective page ground: body first, html as fallback (transparent body)
+      let rgb: [number, number, number] | null = null;
+      for (const el of [document.body, document.documentElement]) {
+        if (!el) continue;
+        const c = parse(getComputedStyle(el).backgroundColor);
+        if (c && c[3] > 0) { rgb = [c[0], c[1], c[2]]; break; }
+      }
+      // WCAG relative luminance — perceptual, so #16161a and #0b0e14 both read dark
+      const luminance = ([r, g, b]: [number, number, number]): number => {
+        const lin = (n: number): number => {
+          const s = n / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+      };
+      const theme = rgb && luminance(rgb) < darkMax ? "dark" : "light";
+      let accent: string | null = null;
+      for (const el of Array.from(document.querySelectorAll("button, [role=button], input[type=submit]"))) {
+        const box = el.getBoundingClientRect();
+        if (box.width < 8 || box.height < 8) continue;
+        const c = parse(getComputedStyle(el).backgroundColor);
+        if (!c || c[3] === 0) continue;
+        accent = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+        break;
+      }
+      return { theme, accent };
+    }, { darkMax: DARK_LUMINANCE_MAX });
+    return {
+      theme: probe.theme === "dark" ? "dark" : "light",
+      ...(probe.accent ? { accentColor: probe.accent } : {}),
+    };
+  } catch {
+    return { theme: "light" };
+  }
+}
+
 async function digestPage(page: Page, withScreenshot: boolean, allowDestructive = false): Promise<PageDigest> {
   const title = await page.title();
+  const { theme, accentColor } = await probeTheme(page);
 
   const headings: string[] = [];
   const hs = page.locator("h1, h2, h3");
@@ -141,6 +224,8 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
   const inventory: InventoryItem[] = [];
   const excludedDestructive: string[] = [];
   const seen = new Set<string>();
+  // distinct :nth-match entries already inventoried per duplicated base selector
+  const siblingCount = new Map<string, number>();
   const els = page.locator(
     "a[href], button, input, textarea, select, [role=button], [role=tab], " +
       // clickable-without-semantics patterns real apps are full of:
@@ -158,6 +243,9 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     const tag = (await el.evaluate((n) => n.tagName).catch(() => "")).toLowerCase();
     if (!tag) continue;
     const id = await el.getAttribute("id").catch(() => null);
+    const testid = await el.getAttribute("data-testid").catch(() => null);
+    const role = await el.getAttribute("role").catch(() => null);
+    const inputType = await el.getAttribute("type").catch(() => null);
     const aria = await el.getAttribute("aria-label").catch(() => null);
     const placeholder = await el.getAttribute("placeholder").catch(() => null);
     const value = await el.getAttribute("value").catch(() => null);
@@ -170,25 +258,45 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
 
     // fail-safe: never put a destructive/irreversible control into the inventory
     // (so the director can't script a click/type on it) unless explicitly opted
-    // in. Checks visible text, aria-label, and value (input buttons).
-    if (!allowDestructive && [text, aria, value].some((s) => s && DESTRUCTIVE_RE.test(s))) {
+    // in. Checks visible text, aria-label, and value (input buttons). Scoped to
+    // genuine ACTION controls: content/data rows (li[id], tr[id], data-testid
+    // containers) merely select or navigate, so a row NAMED "checkout-api" must
+    // stay filmable while a <button>Delete</button> stays excluded.
+    const isActionControl =
+      tag === "button" ||
+      (tag === "a" && href !== undefined) ||
+      (tag === "input" && ["submit", "button"].includes((inputType ?? "").toLowerCase())) ||
+      role === "button" ||
+      role === "menuitem";
+    if (!allowDestructive && isActionControl && [text, aria, value].some((s) => s && isDestructiveLabel(s))) {
       if (text) excludedDestructive.push(text);
       continue;
     }
 
+    // data-testid outranks aria/placeholder/text: it survives live-updating
+    // copy (ticking metrics invalidate a :has-text selector between digest and
+    // verification) and gives same-testid siblings a shared base that the
+    // :nth-match pass below splits into distinct per-row entries.
     let selector: string;
     if (id) selector = `#${id}`;
+    else if (testid) selector = `[data-testid="${cssEscape(testid)}"]`;
     else if (aria) selector = `[aria-label="${cssEscape(aria)}"]`;
     else if (placeholder) selector = `[placeholder="${cssEscape(placeholder)}"]`;
     else if (text) selector = `${tag}:has-text("${cssEscape(text.slice(0, 40))}")`;
     else continue; // nothing stable to target — skip rather than guess
 
     // verify the selector actually resolves to THIS kind of element, and
-    // disambiguate duplicates with :nth-match
+    // disambiguate duplicates with :nth-match — every same-base sibling gets
+    // its OWN entry (bbox + text), because a dashboard story needs "click row
+    // 2, then row 4"; a base whose rows all collapsed to one selector starves
+    // the script of anything to switch between
+    const base = selector;
     const matches = await page.locator(selector).count().catch(() => 0);
     if (matches === 0) continue;
     if (matches > 1) {
       if (!box) continue; // can't disambiguate a hidden duplicate — skip, don't guess
+      // cap per base so one long table can't crowd out the rest of the page
+      if ((siblingCount.get(base) ?? 0) >= MAX_SIBLINGS_PER_BASE) continue;
       // Pick the closest nth-match; a strict ±2px test can miss
       // on sub-pixel rendering and silently fall back to nth=1 = wrong element).
       // Cap the accepted distance so we never inventory a wildly-off element.
@@ -207,6 +315,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
 
     if (seen.has(selector)) continue;
     seen.add(selector);
+    if (matches > 1) siblingCount.set(base, (siblingCount.get(base) ?? 0) + 1);
     inventory.push({
       selector, tag, text,
       bbox: box
@@ -226,7 +335,8 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
   }
 
   return {
-    url: page.url(), title, headings, inventory, regions,
+    url: page.url(), title, headings, theme, inventory, regions,
+    ...(accentColor ? { accentColor } : {}),
     ...(excludedDestructive.length ? { excludedDestructive } : {}),
     ...(screenshotB64 ? { screenshotB64 } : {}),
   };

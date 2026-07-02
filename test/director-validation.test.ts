@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateAnalysis } from "../src/director/analyze.js";
+import { coerceSelector, validateAnalysis } from "../src/director/analyze.js";
 import type { PageDigest } from "../src/director/inventory.js";
 
 const digests: PageDigest[] = [
@@ -13,40 +13,63 @@ const digests: PageDigest[] = [
   },
 ];
 
+// a fully-valid analysis; tests override single fields to isolate each gate
+function validAnalysis(): Record<string, unknown> {
+  return {
+    product_summary: "A useful product with dashboard analytics.",
+    product_name: "Acme",
+    headline: "See your dashboard the moment you arrive",
+    tagline: "Analytics, instantly",
+    music_track: "daybreak",
+    money_moments: [
+      { title: "Arrive", caption: "Land on insight", why: "first moment", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
+      { title: "Start", caption: "Get going", why: "real moment", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
+    ],
+  };
+}
+
 describe("analysis validation", () => {
   it("rejects money moments for non-crawled pages", () => {
-    expect(() =>
-      validateAnalysis(
-        {
-          product_summary: "A useful product with dashboard analytics.",
-          product_name: "Acme",
-          headline: "See your dashboard the moment you arrive",
-          tagline: "Analytics, instantly",
-          money_moments: [
-            { title: "Fake", caption: "Off-page", why: "not crawled", page_url: "http://127.0.0.1:9999/admin", elements: ["#cta"] },
-            { title: "Start", caption: "Get going", why: "real moment", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
-          ],
-        },
-        digests,
-      ),
-    ).toThrow(/not a crawled page/i);
+    const bad = validAnalysis();
+    (bad.money_moments as { page_url: string }[])[0]!.page_url = "http://127.0.0.1:9999/admin";
+    expect(() => validateAnalysis(bad, digests)).toThrow(/not a crawled page/i);
   });
 
   it("rejects selectors not inventoried on the referenced page", () => {
-    expect(() =>
-      validateAnalysis(
-        {
-          product_summary: "A useful product with dashboard analytics.",
-          product_name: "Acme",
-          headline: "See your dashboard the moment you arrive",
-          tagline: "Analytics, instantly",
-          money_moments: [
-            { title: "Fake", caption: "Bad selector", why: "fake selector", page_url: "http://127.0.0.1:9999/", elements: ["#missing"] },
-            { title: "Start", caption: "Get going", why: "real moment", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
-          ],
-        },
-        digests,
-      ),
-    ).toThrow(/not in the inventory/i);
+    const bad = validAnalysis();
+    (bad.money_moments as { elements: string[] }[])[0]!.elements = ["#missing"];
+    expect(() => validateAnalysis(bad, digests)).toThrow(/not in the inventory/i);
+  });
+
+  it("music_track: accepts every bundled track", () => {
+    for (const track of ["pulse", "daybreak", "midnight", "momentum"]) {
+      const a = validateAnalysis({ ...validAnalysis(), music_track: track }, digests);
+      expect(a.music_track).toBe(track);
+    }
+  });
+
+  it("music_track: rejects tracks outside the bundled library (analysis must pick a vibe)", () => {
+    expect(() => validateAnalysis({ ...validAnalysis(), music_track: "institutional-01" }, digests)).toThrow();
+    expect(() => validateAnalysis({ ...validAnalysis(), music_track: "off" }, digests)).toThrow();
+    const missing = validAnalysis();
+    delete missing.music_track; // required — the director always ships a pick
+    expect(() => validateAnalysis(missing, digests)).toThrow();
+  });
+
+  it("heals a selector copied with the trailing [tag] annotation instead of rejecting it", () => {
+    const valid = new Set(['#cta', ':nth-match([data-testid="service-item"], 1)']);
+    // the model grabbed past the closing backtick and appended the display tag
+    expect(coerceSelector(':nth-match([data-testid="service-item"], 1) [button]', valid))
+      .toBe(':nth-match([data-testid="service-item"], 1)');
+    expect(coerceSelector("#cta  [button]", valid)).toBe("#cta");
+    // an actual hallucination has no inventory prefix → returned as-is → fails the gate
+    expect(coerceSelector("#totally-invented", valid)).toBe("#totally-invented");
+  });
+
+  it("validateAnalysis accepts elements that carry the appended annotation (self-heals)", () => {
+    const a = validAnalysis();
+    (a.money_moments as { elements: string[] }[])[0]!.elements = ['#cta [button] "Start"'];
+    const parsed = validateAnalysis(a, digests);
+    expect(parsed.money_moments[0]!.elements).toEqual(["#cta"]);
   });
 });

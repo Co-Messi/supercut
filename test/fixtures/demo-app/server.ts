@@ -123,6 +123,46 @@ const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
+/** fourth route: a DARK service-fleet dashboard shaped like real ops tools —
+ *  six rows sharing one data-testid (each must survive as a distinct
+ *  :nth-match entry), one row NAMED with a destructive-looking slug
+ *  ("checkout-api" must stay filmable), live-ticking latencies (text-based
+ *  selectors self-invalidate), and a genuine Delete button (must be excluded). */
+const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Fleet</title><style>
+  :root { --ink:#e8eaf2; --accent:#5b8cff; --bg:#0b0e14 }
+  * { box-sizing:border-box; margin:0 }
+  body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
+  main { max-width:1000px; margin:40px auto; padding:0 24px }
+  input { width:100%; font-size:16px; padding:12px 16px; background:#141926; color:var(--ink);
+          border:1px solid #232a3d; border-radius:10px; margin-top:16px }
+  ul { list-style:none; padding:0; margin-top:20px }
+  li { background:#11151f; border:1px solid #1d2333; border-radius:10px; padding:14px 18px;
+       margin-bottom:8px; display:flex; justify-content:space-between; cursor:pointer }
+  li:hover { border-color:var(--accent) }
+  #danger { margin-top:28px; background:#3a1420; color:#ff9cae; border:0; padding:12px 22px;
+            border-radius:8px; cursor:pointer }
+</style></head><body>
+  <main>
+    <h2>Service fleet</h2>
+    <input data-testid="service-search" placeholder="Search services…">
+    <ul>
+      <li data-testid="service-item"><span>checkout-api</span><span class="ms">160ms</span></li>
+      <li data-testid="service-item"><span>payments-worker</span><span class="ms">84ms</span></li>
+      <li data-testid="service-item"><span>auth-gateway</span><span class="ms">41ms</span></li>
+      <li data-testid="service-item"><span>search-indexer</span><span class="ms">203ms</span></li>
+      <li data-testid="service-item"><span>media-transcoder</span><span class="ms">330ms</span></li>
+      <li data-testid="service-item"><span>notification-hub</span><span class="ms">57ms</span></li>
+    </ul>
+    <button id="danger">Delete service</button>
+  </main>
+  <script>
+    setInterval(() => {
+      for (const el of document.querySelectorAll(".ms"))
+        el.textContent = (30 + Math.floor(Math.random() * 300)) + "ms";
+    }, 100);
+  </script>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -130,7 +170,10 @@ export interface DemoApp {
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
   const server: Server = createServer((req, res) => {
-    const body = req.url?.startsWith("/dash") ? DASH : req.url?.startsWith("/panel") ? PANEL : LANDING;
+    const body = req.url?.startsWith("/dash") ? DASH
+      : req.url?.startsWith("/panel") ? PANEL
+      : req.url?.startsWith("/fleet") ? FLEET
+      : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);
   });

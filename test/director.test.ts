@@ -4,7 +4,7 @@ import { DESTRUCTIVE_RE, isDestructiveLabel } from "../src/director/inventory.js
 import { pickMusic } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
-import type { AppAnalysis } from "../src/director/analyze.js";
+import { analyzeApp, type AppAnalysis } from "../src/director/analyze.js";
 import type { PageDigest } from "../src/director/inventory.js";
 import type { RecordResult } from "../src/capture/executor.js";
 import type { Recipe } from "../src/schema/index.js";
@@ -303,8 +303,6 @@ describe("destructive-action guard (H1)", () => {
       "Confirm payment",
       "Revoke access",
       // B4 (review): conservatively broadened — irreversible / high-blast-radius
-      "Publish",
-      "Publish to production",
       "Transfer funds",
       "Transfer ownership",
       "Regenerate API key",
@@ -357,6 +355,11 @@ describe("destructive-action guard (H1)", () => {
       "Send",
       "Send message",
       "Search flights",
+      // "publish" is reversible (unpublish exists) and is the payoff beat for
+      // CMS/blog/deploy apps — filmable by default, not in the lexicon
+      "Publish",
+      "Publish to production",
+      "Publish post",
       // "transfer" is narrowed to money/ownership phrases — benign transfers stay filmable:
       "Transfer to list",
       "Transfer ticket",
@@ -439,6 +442,132 @@ describe("generate music priority (cli > director > none)", () => {
     expect(choice.spec).toBeUndefined();
     expect(choice.source).toBe("none");
     expect(choice.warning).toMatch(/synthwave-99/);
+  });
+
+  it("a throwing resolver on the --music (cli) path also degrades to silent, never a throw", () => {
+    // parity with the director branch: the exported function must never let a
+    // resolver throw escape post-spend, even though preflight normally catches
+    // a bad --music first
+    const choice = pickMusic("synthwave-99", "midnight", resolve);
+    expect(choice.spec).toBeUndefined();
+    expect(choice.source).toBe("none");
+    expect(choice.warning).toMatch(/synthwave-99/);
+  });
+});
+
+describe("LLM prompt egress redaction + retry payload", () => {
+  // a full 3-part JWT — the query-string secret the crawler is designed to reach
+  const jwt =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+  it("redacts a query-string token in the page URL (plus title/heading secrets) before the analyze prompt", async () => {
+    const url = `http://127.0.0.1:9999/dash?session=${jwt}`;
+    const secretDigests: PageDigest[] = [
+      {
+        url,
+        title: "Ops console admin@corp.com",
+        headings: ["token=supersecretvalue123456"],
+        theme: "light",
+        inventory: [
+          { selector: "#cta", tag: "button", text: "Get started", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+          { selector: "#go", tag: "button", text: "View report", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+        ],
+      },
+    ];
+    const good = JSON.stringify({
+      product_summary: "A metrics dashboard for busy teams.",
+      product_name: "Lumon",
+      headline: "See your numbers instantly",
+      tagline: "Metrics, live",
+      music_track: "daybreak",
+      money_moments: [
+        { title: "Land", caption: "Insight now", why: "first moment", page_url: url, elements: ["#cta"] },
+        { title: "Report", caption: "See it move", why: "the payoff", page_url: url, elements: ["#go"] },
+      ],
+    });
+    const llm = new StubLlm([good]);
+    await analyzeApp(llm, secretDigests);
+    const prompt = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(prompt).not.toContain(jwt);
+    expect(prompt).not.toContain("admin@corp.com");
+    expect(prompt).not.toContain("supersecretvalue123456");
+    expect(prompt).toContain("[REDACTED_TOKEN]"); // the JWT in ?session=
+    expect(prompt).toContain("[REDACTED_EMAIL]"); // the email in the title
+    expect(prompt).toContain("token=[REDACTED]"); // the assignment in the heading
+  });
+
+  it("redacts a query-string token in the page/app URL before the script prompt", async () => {
+    const url = `http://127.0.0.1:9999/dash?session=${jwt}`;
+    const secretDigests: PageDigest[] = [
+      { url, title: "Dash", headings: ["Live"], inventory: [
+        { selector: "#cta", tag: "button", text: "Start", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+      ] },
+    ];
+    const secretAnalysis: AppAnalysis = {
+      product_summary: "A dashboard product for teams.",
+      product_name: "Lumon",
+      headline: "See it live now",
+      tagline: "Numbers, live",
+      music_track: "daybreak",
+      money_moments: [
+        { title: "Hook", caption: "Land here", why: "the hook beat", page_url: url, elements: ["#cta"] },
+        { title: "Payoff", caption: "See it move", why: "the payoff", page_url: url, elements: ["#cta"] },
+      ],
+    };
+    const recipe = JSON.stringify({
+      version: 0, app_url: url, music_track: "daybreak",
+      scenes: [
+        { name: "hook", priority: 1, entry: { url, prelude: [] }, depends_on: [], actions: [{ kind: "click", selector: "#cta", duration_ms: 1500 }], hold_ms: 400 },
+        { name: "payoff", priority: 2, entry: { url, prelude: [] }, depends_on: [], actions: [{ kind: "click", selector: "#cta", duration_ms: 1500 }], hold_ms: 600 },
+      ],
+    });
+    const llm = new StubLlm([recipe]);
+    await writeRecipe(llm, secretAnalysis, secretDigests, url);
+    const prompt = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(prompt).not.toContain(jwt);
+    expect(prompt).toContain("[REDACTED_TOKEN]");
+  });
+
+  it("sends page screenshots only on the first attempt, never on a schema retry", async () => {
+    const shotDigests: PageDigest[] = [
+      {
+        url: "http://127.0.0.1:9999/",
+        title: "Home",
+        headings: ["Home"],
+        theme: "light",
+        screenshotB64: "AAAA", // stand-in JPEG payload — resent would triple cost
+        inventory: [
+          { selector: "#cta", tag: "button", text: "Start", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+          { selector: "#go", tag: "button", text: "Go", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+        ],
+      },
+    ];
+    const base = {
+      product_summary: "A metrics dashboard for busy teams.",
+      product_name: "Lumon",
+      headline: "See your numbers instantly",
+      tagline: "Metrics, live",
+      music_track: "daybreak",
+    };
+    const invalid = JSON.stringify({
+      ...base,
+      money_moments: [
+        { title: "Land", caption: "Insight now", why: "first moment", page_url: "http://127.0.0.1:9999/", elements: ["#missing"] },
+        { title: "Ship", caption: "See it move", why: "the payoff", page_url: "http://127.0.0.1:9999/", elements: ["#go"] },
+      ],
+    });
+    const valid = JSON.stringify({
+      ...base,
+      money_moments: [
+        { title: "Land", caption: "Insight now", why: "first moment", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
+        { title: "Ship", caption: "See it move", why: "the payoff", page_url: "http://127.0.0.1:9999/", elements: ["#go"] },
+      ],
+    });
+    const llm = new StubLlm([invalid, valid]);
+    await analyzeApp(llm, shotDigests);
+    const hasImage = (call: ChatOptions) => call.user.some((p) => p.type === "image");
+    expect(hasImage(llm.prompts[0]!)).toBe(true); // attempt 0 carries the screenshot
+    expect(hasImage(llm.prompts[1]!)).toBe(false); // the retry is text + feedback only
   });
 });
 

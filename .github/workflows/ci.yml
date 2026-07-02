@@ -11,11 +11,16 @@ permissions:
 jobs:
   typecheck-and-unit:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # exercise the advertised engines floor (>=20) alongside current LTS, so
+        # a Node-20-incompatible API can't slip in against the stated support
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck

@@ -142,9 +142,21 @@ export function pickMusic(
   resolve: (spec: string | undefined) => string | null = resolveMusicTrack,
 ): MusicChoice {
   if (cliMusic !== undefined) {
-    return resolve(cliMusic)
-      ? { spec: cliMusic, source: "cli", label: `${cliMusic} (cli)` }
-      : { spec: undefined, source: "none", label: "none" }; // --music off
+    // a bad --music is normally caught at preflight, but this exported function
+    // must never throw post-spend — mirror the director branch and degrade to a
+    // warned silent cut if the resolver throws.
+    try {
+      return resolve(cliMusic)
+        ? { spec: cliMusic, source: "cli", label: `${cliMusic} (cli)` }
+        : { spec: undefined, source: "none", label: "none" }; // --music off
+    } catch {
+      return {
+        spec: undefined,
+        source: "none",
+        label: "none",
+        warning: `--music "${cliMusic}" is not a bundled track or audio file — rendering silent`,
+      };
+    }
   }
   try {
     return resolve(recipeTrack)

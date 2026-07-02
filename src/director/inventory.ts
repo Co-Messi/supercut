@@ -75,13 +75,15 @@ const MAX_SIBLINGS_PER_BASE = 6;
  * film against a disposable/staging environment, not production data.
  */
 // Lexicon criterion: match a verb when firing it by accident on a live app is
-// costly (loses data/state/access, moves money, goes public) even if some
-// apps use it reversibly — false-drop is loud (logged with an opt-in flag),
-// false-fire is a real mutation. We still do NOT match the hero-action words
-// that carry most demos (send, save, submit, search, publish-adjacent create):
-// silently dropping a chat app's "Send" would gut the video.
+// costly AND hard to undo (loses data/state/access, moves money) — false-drop is
+// loud (logged with an opt-in flag), false-fire is a real, often irreversible
+// mutation. We do NOT match the hero-action words that carry most demos (send,
+// save, submit, search): dropping a chat app's "Send" would gut the video.
+// "publish" is deliberately OUT: it is the payoff beat for CMS/blog/deploy apps
+// and is reversible (unpublish exists), so a `<button>Publish</button>` must stay
+// filmable by default.
 export const DESTRUCTIVE_RE =
-  /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
+  /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
 
 /**
  * PLAIN lexicon match: a label is destructive if it CONTAINS any DESTRUCTIVE_RE
@@ -115,6 +117,11 @@ const CONTENT_SLUG_RE = /^[a-z][a-z0-9]*([-_][a-z0-9]+)+$/;
 function withoutSlugTokens(s: string): string {
   return s.split(/\s+/).filter((tok) => !CONTENT_SLUG_RE.test(tok)).join(" ");
 }
+
+/** ARIA roles that make an element an action target regardless of its tag — a
+ *  destructive-lexicon hit carried by any of these is never a passive content
+ *  row, so it can't earn the slug-name keep exception. */
+const INTERACTIVE_ROLES = new Set(["button", "link", "menuitem", "tab", "option"]);
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -213,7 +220,11 @@ async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accent
       const consider = (el: Element | null, fallbackBias: number): void => {
         if (!el) return;
         const c = parse(getComputedStyle(el).backgroundColor);
-        if (!c || c[3] === 0) return; // transparent — contributes no ground
+        // Skip anything not fully opaque: a full-viewport modal backdrop
+        // (rgba(0,0,0,.5)) can out-cover the page and falsely report "dark" on a
+        // light app. A translucent layer is not the page ground — fall through to
+        // the largest OPAQUE covering element (body/html floor).
+        if (!c || c[3] < 1) return;
         const score = coverage(el) - fallbackBias;
         if (score > bestScore) { bestScore = score; bestRgb = [c[0], c[1], c[2]]; }
       };
@@ -283,7 +294,17 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // a prior revealing action makes them targetable
     const hidden = !box || box.width < 4 || box.height < 4;
 
-    const tag = (await el.evaluate((n) => n.tagName).catch(() => "")).toLowerCase();
+    // one round-trip for tag + the interactivity signals a framework-delegated
+    // handler leaves in the DOM: computed cursor and tabindex reveal a clickable
+    // control even when the onclick ATTR is null (React/Vue/Svelte bind via
+    // addEventListener). Cheap probe — folded into the tagName read.
+    const probe = await el
+      .evaluate((n) => {
+        const e = n as HTMLElement;
+        return { tag: e.tagName, cursor: getComputedStyle(e).cursor, tabIndex: e.tabIndex };
+      })
+      .catch(() => ({ tag: "", cursor: "", tabIndex: -1 }));
+    const tag = probe.tag.toLowerCase();
     if (!tag) continue;
     const id = await el.getAttribute("id").catch(() => null);
     const testid = await el.getAttribute("data-testid").catch(() => null);
@@ -309,12 +330,18 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // slug) AND it sits on a passive content container, not an action control.
     const labels = [text, aria, value].filter((s): s is string => Boolean(s));
     if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
-      // content containers merely select/navigate; li/tr always qualify, and a
-      // [data-testid] box qualifies only when it is not itself clickable.
+      // A genuinely PASSIVE content container has NO interactivity signal of any
+      // kind — an inert display row (a service name, a read-only cell), never an
+      // action control. We must not infer inertness from the onclick ATTR alone:
+      // frameworks bind clicks via addEventListener, so onclick is null even on a
+      // fully clickable destructive control. Require the tag to be non-interactive
+      // AND the role non-interactive AND onclick null AND the computed cursor not
+      // "pointer" AND tabindex < 0. Any one signal → treat as an action control
+      // (safety-first: a clickable row we can't prove benign is excluded).
       const contentContainer =
-        tag === "li" || tag === "tr" ||
-        (testid !== null && tag !== "button" && tag !== "a" && tag !== "input" &&
-          role !== "button" && onclick === null);
+        tag !== "button" && tag !== "a" && tag !== "input" &&
+        (role === null || !INTERACTIVE_ROLES.has(role.toLowerCase())) &&
+        onclick === null && probe.cursor !== "pointer" && probe.tabIndex < 0;
       // keep ONLY when the container is passive AND the destructive signal is
       // confined to slug tokens (stripping them leaves nothing destructive)
       const slugSafe = contentContainer && labels.every((s) => !isDestructiveLabel(withoutSlugTokens(s)));

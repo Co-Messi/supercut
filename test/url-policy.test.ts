@@ -36,6 +36,14 @@ describe("navigation URL policy", () => {
       }),
     ).rejects.toThrow(/redirect/i);
   });
+
+  it("blocks the unspecified IPv6 address (::), a mapped-IPv6 metadata address, and link-local metadata", async () => {
+    // :: is the unspecified address (binds accept loopback), the mapped form
+    // folds to the dotted IPv4, and 169.254.169.254 is the cloud-metadata host
+    await expect(assertSafeNavigationUrl("http://[::]/")).rejects.toThrow(/private network/i);
+    await expect(assertSafeNavigationUrl("http://[::ffff:169.254.169.254]/")).rejects.toThrow(/private network/i);
+    await expect(assertSafeNavigationUrl("http://169.254.169.254/latest/meta-data/")).rejects.toThrow(/private network/i);
+  });
 });
 
 describe("resolve-and-pin (DNS-rebinding defense)", () => {

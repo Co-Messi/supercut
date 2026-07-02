@@ -99,8 +99,23 @@ describe("inventory crawler on the fixture app", () => {
       expect(fleet.excludedDestructive).toContain(label);
     }
 
-    // the slug-named content row survived the same filter that excluded them
+    // a framework-wired clickable div — handler bound via addEventListener, so
+    // the onclick ATTR is null — with a destructive slug label must ALSO be
+    // excluded. The onclick-attr heuristic alone would have KEPT it; the
+    // cursor:pointer interactivity signal is what catches it.
+    expect(fleet.inventory.some((i) => i.text.includes("delete-worker"))).toBe(false);
+    expect(fleet.excludedDestructive).toContain("delete-worker");
+
+    // the slug-named content row survived the same filter that excluded them —
+    // it is genuinely passive (cursor:default, no handler, no role)
     expect(fleet.inventory.some((i) => i.text.includes("checkout-api"))).toBe(true);
+  }, 60_000);
+
+  it("does not misread a light app with a full-viewport translucent overlay as dark", async () => {
+    // a modal backdrop rgba(0,0,0,.55) out-covers the body but is not the page
+    // ground — the probe must skip non-opaque layers and stay "light"
+    const digests = await crawlApp(`${app.url}/overlay`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    expect(digests[0]!.theme).toBe("light");
   }, 60_000);
 });
 

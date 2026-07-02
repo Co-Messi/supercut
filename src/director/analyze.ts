@@ -80,17 +80,33 @@ export function validateAnalysis(raw: unknown, digests: PageDigest[]): AppAnalys
   const byPage = new Map(digests.map((d) => [d.url, new Set(d.inventory.map((i) => i.selector))]));
   // Models often answer with a relative path ("/setup") instead of the full
   // crawled URL. Coerce by pathname match so a correct beat isn't rejected on a
-  // formatting nit — downstream (script.ts) needs the full crawled URL.
-  const byPathname = new Map<string, string>();
+  // formatting nit — downstream (script.ts) needs the full crawled URL. The
+  // crawler keys pages on pathname+search, so ONE pathname can map to several
+  // distinct crawled URLs (/results?view=chart vs ?view=table). Track all
+  // candidates per pathname: a lone candidate coerces; MULTIPLE means a bare
+  // path is ambiguous and must NOT be silently rewritten onto the wrong page.
+  const byPathname = new Map<string, string[]>();
   for (const d of digests) {
-    try { byPathname.set(new URL(d.url).pathname.replace(/\/$/, "") || "/", d.url); } catch { /* skip */ }
+    try {
+      const key = new URL(d.url).pathname.replace(/\/$/, "") || "/";
+      const list = byPathname.get(key) ?? [];
+      if (!list.includes(d.url)) list.push(d.url);
+      byPathname.set(key, list);
+    } catch { /* skip */ }
   }
   for (const moment of parsed.money_moments) {
     if (!byPage.has(moment.page_url)) {
       let key = moment.page_url;
       try { key = new URL(moment.page_url, digests[0]?.url ?? "http://localhost").pathname; } catch { /* keep */ }
-      const full = byPathname.get((key.replace(/\/$/, "") || "/"));
-      if (full) moment.page_url = full;
+      const candidates = byPathname.get((key.replace(/\/$/, "") || "/"));
+      if (candidates && candidates.length > 1) {
+        throw new Error(
+          `money moment "${moment.title}" page_url "${moment.page_url}" is ambiguous — ` +
+            `${candidates.length} crawled pages share that pathname (${candidates.join(", ")}); ` +
+            `use the full URL INCLUDING its query string to pick one`,
+        );
+      }
+      if (candidates && candidates.length === 1) moment.page_url = candidates[0]!;
     }
     const selectors = byPage.get(moment.page_url);
     if (!selectors) {
@@ -114,7 +130,13 @@ function digestText(d: PageDigest): string {
   // look signal: lets a text-only model ground vibe/music choices in the
   // page's actual appearance, not just its copy
   const look = d.theme ? `\ntheme: ${d.theme}${d.accentColor ? ` (accent ${d.accentColor})` : ""}` : "";
-  return `PAGE ${d.url}\ntitle: ${d.title}${look}\nheadings: ${d.headings.join(" | ")}\nelements:\n${inv}`;
+  // URL/title/headings are egress too — a query-string token (?session=<jwt>,
+  // ?token=<key>) or a secret in the title reaches the provider otherwise. Route
+  // them through the same redaction the inventory text/href already gets.
+  const url = redactForPrompt(d.url);
+  const title = redactForPrompt(d.title);
+  const headings = d.headings.map(redactForPrompt).join(" | ");
+  return `PAGE ${url}\ntitle: ${title}${look}\nheadings: ${headings}\nelements:\n${inv}`;
 }
 
 const SYSTEM = `You are the director AND copywriter of a 60-second product launch video — a polished launch film, not a website tour. You study a web product and turn it into a PERSUASIVE STORY with a crystal-clear message: a viewer must understand within seconds what problem it solves and why it's good. Ambiguity is failure.
@@ -140,25 +162,31 @@ export async function analyzeApp(
   digests: PageDigest[],
   repoNotes?: string,
 ): Promise<AppAnalysis> {
-  const parts: ChatPart[] = [];
-  parts.push({
+  const textPart: ChatPart = {
     type: "text",
     text:
       (repoNotes ? `REPO NOTES:\n${repoNotes.slice(0, 4000)}\n\n` : "") +
       digests.map(digestText).join("\n\n"),
-  });
+  };
+  const imageParts: ChatPart[] = [];
   for (const d of digests) {
     if (d.screenshotB64) {
-      parts.push({ type: "text", text: `screenshot of ${d.url}:` });
-      parts.push({ type: "image", dataUrl: `data:image/jpeg;base64,${d.screenshotB64}` });
+      imageParts.push({ type: "text", text: `screenshot of ${redactForPrompt(d.url)}:` });
+      imageParts.push({ type: "image", dataUrl: `data:image/jpeg;base64,${d.screenshotB64}` });
     }
   }
 
   let feedback = "";
   for (let attempt = 0; attempt < 3; attempt++) {
+    // Screenshots are sent ONCE, on attempt 0. A schema-retry resends the text
+    // digest + the corrective feedback but NOT the images — each stateless call
+    // that re-uploads every JPEG would multiply the vision-token bill for a
+    // formatting fix the text feedback already pinpoints. Tradeoff: the retry
+    // reasons from the DOM digest, not the pixels; acceptable because the digest
+    // carries the selectors/labels a correction needs.
     const user: ChatPart[] = feedback
-      ? [...parts, { type: "text", text: `Your previous response was invalid: ${feedback}. Return corrected JSON only.` }]
-      : parts;
+      ? [textPart, { type: "text", text: `Your previous response was invalid: ${feedback}. Return corrected JSON only.` }]
+      : [textPart, ...imageParts];
     // generous budget: a richer source-seeded crawl (many pages) means a bigger
     // prompt AND a bigger response; 4k truncated mid-JSON on real apps
     const raw = await llm.chat({ system: SYSTEM, user, json: true, maxTokens: 8000 });

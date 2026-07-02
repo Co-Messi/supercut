@@ -85,6 +85,9 @@ export const scene = z.object({
 export const recipe = z.object({
   version: z.literal(0),
   app_url: httpUrl,
+  /** deliberately a free string, NOT an enum: hand-written recipes (record
+   *  path) may name custom audio files or anything else for back-compat. The
+   *  bundled-track enum is enforced on the DIRECTOR's output in script.ts. */
   music_track: z.string().min(1),
   scenes: z.array(scene).min(1),
 }).strict();

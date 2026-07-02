@@ -10,16 +10,22 @@
  */
 import { parseRecipe, type Recipe } from "../schema/index.js";
 import { extractJson, type ChatPart, type LlmClient } from "./llm.js";
-import type { AppAnalysis } from "./analyze.js";
+import { MUSIC_TRACKS, coerceSelector, type AppAnalysis } from "./analyze.js";
 import type { PageDigest } from "./inventory.js";
 import { redactForPrompt } from "../security/redaction.js";
+
+// the enum gate lives HERE, not in the recipe schema: hand-written recipes
+// (record path) legitimately carry free-form strings, but the DIRECTOR must
+// name a real bundled track (or "off") so generate never ships a track that
+// doesn't exist
+const DIRECTOR_TRACKS = new Set<string>([...MUSIC_TRACKS, "off"]);
 
 const SYSTEM = `You write filming scripts ("recipes") for supercut, which records a REAL web app with a browser robot and renders a cinematic 60-second launch video. Respond ONLY with a JSON recipe:
 
 {
   "version": 0,
   "app_url": string,
-  "music_track": "institutional-01",
+  "music_track": one of "pulse" | "daybreak" | "midnight" | "momentum" | "off",
   "scenes": [{
     "name": kebab-case string,
     "priority": 1..N (1 = most important, cut last),
@@ -31,17 +37,18 @@ const SYSTEM = `You write filming scripts ("recipes") for supercut, which record
 }
 
 HARD RULES:
-- selectors: COPY EXACTLY from the provided element inventory. Never invent or modify one.
+- selectors: each inventory line is \`<selector>\` [tag] "text". COPY ONLY the exact text INSIDE the backticks — never the [tag] or the "text". Never invent or modify a selector.
 - entry.url: only crawled page URLs.
 - Create EXACTLY one scene per STORYBOARD beat, in the same order. Do not add a generic site-tour scene.
 - Each scene's entry.url must equal that beat's page_url and must include at least one of that beat's money selectors.
 - Do not use mid-scene "goto" actions; each scene starts from its entry.url so selector validation and capture stay coherent.
 - SHOW THE PAYOFF. A product video that types into a box but never reveals the result is worthless. When a "type" goes into a search/query/command field that runs on Enter, set "submit": true so the app actually produces its output (results, a graph, a detail view).
 - FRAME THE RESULT. When an action produces a visible result, set "focus_selector" to the FRAMABLE REGION where that result appears (from the page's regions list). The camera then holds on the payoff (the graph/results), not the input box. Use a region selector ONLY in focus_selector, never as an action "selector".
-- 2-4 scenes, 2-4 actions each, action duration_ms 1200-4000, hold_ms 600-3000. Give the FINAL payoff scene a long hold (2000-3000) so the result breathes; earlier scenes stay 600-1400.
+- EVERY ACTION MUST VISIBLY CHANGE THE SCREEN. An action with no visible reaction films as lag. Prefer clicks that switch views, open panels, or select different items (selecting item A, then item B, re-renders the detail — that IS the story), and types that submit and produce results. Use "hover" ONLY on elements that visibly react to it (menus, rows with hover states), never as a scene's main beat. No "wait" actions unless the app genuinely needs load time.
+- PACING: 2-4 scenes, 2-4 actions each. action duration_ms 900-2500 ("type" may go to 3000 for realistic typing speed). hold_ms 600-1400 for earlier scenes; ONLY the final payoff scene holds longer (1500-2500) so the result breathes. Beats must chain — consecutive actions in a scene flow into each other with no dead multi-second pauses.
 - total of all durations + holds ≤ 50000 (one minute video with headroom).
 - "type" actions need realistic short text (an email, a search term — match the field). For a search/query field, PREFER a value the app itself suggests — a placeholder example, an example hint near the field, or a visible chip/tag label — so the query is one the product recognizes and actually returns a result for. Do not invent an exotic value the demo may not have data for.
-- Order scenes as a Screen-Studio story: hook → proof/depth → payoff. End on the most visual screen.
+- Order scenes as a launch story: hook → proof/depth → payoff. End on the most visual screen, and make the LAST action of the final scene the one that leaves the most impressive state on screen.
 - depends_on only when a later scene NEEDS an earlier scene's state.
 - (HIDDEN until revealed) elements: only use them AFTER an earlier action in the SAME scene reveals them (e.g. click the button that opens the form, then type into its field).`;
 
@@ -83,12 +90,15 @@ export async function writeRecipe(
   const inventoryText = digests
     .map((d) => {
       const els = d.inventory
-        .map((i) => `  ${i.selector}  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
+        .map((i) => `  \`${i.selector}\`  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
         .join("\n");
       const regions = (d.regions ?? []).length
         ? `\n  FRAMABLE REGIONS (focus_selector only — hold the camera here to show a result):\n` +
-          d.regions.map((r) => `    ${r.selector}  [${r.tag}] "${redactForPrompt(r.text)}"`).join("\n")
+          d.regions.map((r) => `    \`${r.selector}\`  [${r.tag}] "${redactForPrompt(r.text)}"`).join("\n")
         : "";
+      // URLs are validation KEYS (entry.url must round-trip against the raw
+      // crawled URL), so they stay unredacted; pages whose URL carries a secret
+      // are dropped in crawlApp, so none reaches this prompt.
       return `PAGE ${d.url}\n${els}${regions}`;
     })
     .join("\n\n");
@@ -105,6 +115,7 @@ export async function writeRecipe(
         analysis.money_moments
           .map((m, i) => `${i + 1}. ${i === 0 ? "HOOK" : i === analysis.money_moments.length - 1 ? "PAYOFF" : "PROOF"} — ${m.title} @ ${m.page_url}; scene must use one of: ${m.elements.join(", ")}`)
           .join("\n") +
+        `\n\nMUSIC: set "music_track" to "${analysis.music_track}" (picked to match the app's look) unless you have a strong reason to choose another bundled track.` +
         `\n\nELEMENT INVENTORY (the ONLY selectors you may use):\n${inventoryText}`,
     },
   ];
@@ -118,6 +129,12 @@ export async function writeRecipe(
 
     try {
       const recipe = parseRecipe(extractJson(raw));
+      if (!DIRECTOR_TRACKS.has(recipe.music_track)) {
+        throw new Error(
+          `music_track "${recipe.music_track}" is not a bundled track — use one of ` +
+            `${MUSIC_TRACKS.map((t) => `"${t}"`).join(", ")}, or "off"`,
+        );
+      }
       if (recipe.scenes.length !== storyboard.length) {
         throw new Error(
           `recipe has ${recipe.scenes.length} scene(s), but storyboard requires exactly ${storyboard.length} scene(s) ` +
@@ -143,10 +160,16 @@ export async function writeRecipe(
         // selectors already targeted by EARLIER actions in this scene — any one
         // of them is a plausible revealer for a later hidden element (B5 review)
         const priorSelectors = new Set<string>();
+        // union of every valid selector on this page (interactables + framable
+        // regions) — the coercion target for a selector copied with trailing junk
+        const pageAllSelectors = new Set<string>([...pageSelectors.keys(), ...pageRegions]);
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
           if (a.kind === "goto") {
             throw new Error(`scene "${scene.name}" uses a mid-scene goto; use a new scene entry.url instead`);
           }
+          // heal an appended ` [tag]` annotation before the whitelist checks
+          if (a.selector) a.selector = coerceSelector(a.selector, pageAllSelectors);
+          if (a.focus_selector) a.focus_selector = coerceSelector(a.focus_selector, pageAllSelectors);
           if (a.selector && !pageSelectors.has(a.selector)) {
             throw new Error(
               `selector "${a.selector}" in scene "${scene.name}" is not on its entry page ${scene.entry.url} — ` +

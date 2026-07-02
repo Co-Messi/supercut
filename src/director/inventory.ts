@@ -6,6 +6,17 @@
  */
 import { chromium, type Browser, type Page } from "playwright";
 import { assertSafeNavigationUrl, navigationRequestAllowed, resolveAndPinHost } from "../security/url-policy.js";
+import { redactForPrompt } from "../security/redaction.js";
+
+/**
+ * True when a page URL carries a secret (token/key/JWT) in its path or query.
+ * A crawled URL is a validation KEY the director must echo back verbatim, so it
+ * can't be redacted in the prompt — instead we drop the whole page (never film a
+ * page whose URL is itself a credential), so the secret never egresses.
+ */
+export function pageUrlHasSecret(url: string): boolean {
+  return redactForPrompt(url) !== url;
+}
 
 export interface InventoryItem {
   /** Playwright-compatible selector, verified to resolve on the page */
@@ -35,6 +46,13 @@ export interface PageDigest {
   url: string;
   title: string;
   headings: string[];
+  /** effective page background tone — grounds the director's vibe/music
+   *  choices even when the model is text-only (no screenshots). Optional so
+   *  hand-built digests stay valid; the crawler always sets it. */
+  theme?: "dark" | "light";
+  /** accent hint: the first visible button's background color, when one has a
+   *  real (non-transparent) background. Advisory only. */
+  accentColor?: string;
   inventory: InventoryItem[];
   /** framable result/content regions (focus_selector candidates) */
   regions: RegionItem[];
@@ -46,6 +64,10 @@ export interface PageDigest {
 }
 
 const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
+
+/** ceiling on distinct :nth-match entries per duplicated base selector — six
+ *  rows are plenty to tell a switch-between-items story */
+const MAX_SIBLINGS_PER_BASE = 6;
 
 /**
  * Fail-safe-by-default destructive-action lexicon. The director scripts clicks
@@ -64,13 +86,29 @@ const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
  * film against a disposable/staging environment, not production data.
  */
 // Lexicon criterion: match a verb when firing it by accident on a live app is
-// costly (loses data/state/access, moves money, goes public) even if some
-// apps use it reversibly — false-drop is loud (logged with an opt-in flag),
-// false-fire is a real mutation. We still do NOT match the hero-action words
-// that carry most demos (send, save, submit, search, publish-adjacent create):
-// silently dropping a chat app's "Send" would gut the video.
+// costly AND hard to undo (loses data/state/access, moves money) — false-drop is
+// loud (logged with an opt-in flag), false-fire is a real, often irreversible
+// mutation. We do NOT match the hero-action words that carry most demos (send,
+// save, submit, search): dropping a chat app's "Send" would gut the video.
+// "publish" is deliberately OUT: it is the payoff beat for CMS/blog/deploy apps
+// and is reversible (unpublish exists), so a `<button>Publish</button>` must stay
+// filmable by default.
 export const DESTRUCTIVE_RE =
-  /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|publish|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
+  /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
+
+/**
+ * PLAIN lexicon match: a label is destructive if it CONTAINS any DESTRUCTIVE_RE
+ * verb — no border exemption. `_` is a regex word char, so `\b` never fires at
+ * an underscore seam ("reset_config"); we normalize `_`→space first so
+ * slug-joined verbs still match. This is deliberately over-inclusive: whether a
+ * slug-shaped CONTENT name ("checkout-api") is kept or excluded is decided at
+ * the filter site (a passive content row survives; an action control never
+ * does), NOT here — a lexicon test alone can't tell a Delete button from a
+ * service row.
+ */
+export function isDestructiveLabel(s: string): boolean {
+  return DESTRUCTIVE_RE.test(s.replace(/_/g, " "));
+}
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -127,8 +165,94 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
   return out.sort((a, b) => b.bbox.w * b.bbox.h - a.bbox.w * a.bbox.h).slice(0, 6);
 }
 
+/** background luminance below this reads as a dark UI. Real dark themes sit
+ *  near 0; ambiguous mid-grays fall through to the safer "light" default. */
+const DARK_LUMINANCE_MAX = 0.35;
+
+/** a background must cover at least this fraction of the viewport to count as a
+ *  dominant surface — below it we're looking at a card/hero, not the ground */
+const SURFACE_COVER_MIN = 0.6;
+/** cap the element scan so the probe stays cheap on huge DOMs */
+const SURFACE_SCAN_LIMIT = 400;
+
+/**
+ * Cheap look probe: the DOMINANT visible background → relative luminance →
+ * dark/light, plus the first visible button's background as an accent hint.
+ * Many React/Next apps leave body/html transparent (or white) and paint the
+ * real surface on #root/main/a full-bleed wrapper, so a body→html-only walk
+ * misreads them "light". We instead take the background of the LARGEST
+ * viewport-covering element, with body/html as the fallback floor. Advisory
+ * only — any failure defaults to "light" rather than blocking the crawl.
+ */
+async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accentColor?: string }> {
+  try {
+    const probe = await page.evaluate(({ darkMax, coverMin, scanLimit }) => {
+      const parse = (c: string): [number, number, number, number] | null => {
+        const m = c.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)/);
+        return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])] : null;
+      };
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const vArea = Math.max(1, vw * vh);
+      const coverage = (el: Element): number => {
+        const r = el.getBoundingClientRect();
+        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        return (w * h) / vArea;
+      };
+      // dominant ground: largest-covered element with a non-transparent bg.
+      // body/html carry a small bias DOWN so a full-bleed painted wrapper wins
+      // ties over a transparent/white body (the misread this fix targets).
+      let bestRgb: [number, number, number] | null = null;
+      let bestScore = -Infinity;
+      const consider = (el: Element | null, fallbackBias: number): void => {
+        if (!el) return;
+        const c = parse(getComputedStyle(el).backgroundColor);
+        // Skip anything not fully opaque: a full-viewport modal backdrop
+        // (rgba(0,0,0,.5)) can out-cover the page and falsely report "dark" on a
+        // light app. A translucent layer is not the page ground — fall through to
+        // the largest OPAQUE covering element (body/html floor).
+        if (!c || c[3] < 1) return;
+        const score = coverage(el) - fallbackBias;
+        if (score > bestScore) { bestScore = score; bestRgb = [c[0], c[1], c[2]]; }
+      };
+      consider(document.body, 0.002);
+      consider(document.documentElement, 0.002);
+      for (const el of Array.from(document.querySelectorAll("*")).slice(0, scanLimit)) {
+        if (coverage(el) >= coverMin) consider(el, 0);
+      }
+      // WCAG relative luminance — perceptual, so #16161a and #0b0e14 both read dark
+      const luminance = ([r, g, b]: [number, number, number]): number => {
+        const lin = (n: number): number => {
+          const s = n / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+      };
+      const rgb = bestRgb;
+      const theme = rgb && luminance(rgb) < darkMax ? "dark" : "light";
+      let accent: string | null = null;
+      for (const el of Array.from(document.querySelectorAll("button, [role=button], input[type=submit]"))) {
+        const box = el.getBoundingClientRect();
+        if (box.width < 8 || box.height < 8) continue;
+        const c = parse(getComputedStyle(el).backgroundColor);
+        if (!c || c[3] === 0) continue;
+        accent = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+        break;
+      }
+      return { theme, accent };
+    }, { darkMax: DARK_LUMINANCE_MAX, coverMin: SURFACE_COVER_MIN, scanLimit: SURFACE_SCAN_LIMIT });
+    return {
+      theme: probe.theme === "dark" ? "dark" : "light",
+      ...(probe.accent ? { accentColor: probe.accent } : {}),
+    };
+  } catch {
+    return { theme: "light" };
+  }
+}
+
 async function digestPage(page: Page, withScreenshot: boolean, allowDestructive = false): Promise<PageDigest> {
   const title = await page.title();
+  const { theme, accentColor } = await probeTheme(page);
 
   const headings: string[] = [];
   const hs = page.locator("h1, h2, h3");
@@ -141,6 +265,8 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
   const inventory: InventoryItem[] = [];
   const excludedDestructive: string[] = [];
   const seen = new Set<string>();
+  // distinct :nth-match entries already inventoried per duplicated base selector
+  const siblingCount = new Map<string, number>();
   const els = page.locator(
     "a[href], button, input, textarea, select, [role=button], [role=tab], " +
       // clickable-without-semantics patterns real apps are full of:
@@ -158,6 +284,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     const tag = (await el.evaluate((n) => n.tagName).catch(() => "")).toLowerCase();
     if (!tag) continue;
     const id = await el.getAttribute("id").catch(() => null);
+    const testid = await el.getAttribute("data-testid").catch(() => null);
     const aria = await el.getAttribute("aria-label").catch(() => null);
     const placeholder = await el.getAttribute("placeholder").catch(() => null);
     const value = await el.getAttribute("value").catch(() => null);
@@ -168,27 +295,45 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
       placeholder || aria || ""
     ).trim().replace(/\s+/g, " ").slice(0, 80);
 
-    // fail-safe: never put a destructive/irreversible control into the inventory
+    // Fail-safe: never put a destructive/irreversible control into the inventory
     // (so the director can't script a click/type on it) unless explicitly opted
-    // in. Checks visible text, aria-label, and value (input buttons).
-    if (!allowDestructive && [text, aria, value].some((s) => s && DESTRUCTIVE_RE.test(s))) {
+    // in. Checks visible text, aria-label, and value (input buttons) on EVERY
+    // crawled candidate. There is NO reliable way to prove an element has no
+    // click handler from page context — addEventListener bindings are invisible
+    // to the DOM and getEventListeners is devtools-only — so any destructive-
+    // lexicon hit is excluded outright. Losing a passive row that merely SHARES a
+    // name with a verb ("checkout-api") is a small price for never scripting a
+    // real Delete/Pay; --allow-destructive re-includes them.
+    const labels = [text, aria, value].filter((s): s is string => Boolean(s));
+    if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
       if (text) excludedDestructive.push(text);
       continue;
     }
 
+    // data-testid outranks aria/placeholder/text: it survives live-updating
+    // copy (ticking metrics invalidate a :has-text selector between digest and
+    // verification) and gives same-testid siblings a shared base that the
+    // :nth-match pass below splits into distinct per-row entries.
     let selector: string;
     if (id) selector = `#${id}`;
+    else if (testid) selector = `[data-testid="${cssEscape(testid)}"]`;
     else if (aria) selector = `[aria-label="${cssEscape(aria)}"]`;
     else if (placeholder) selector = `[placeholder="${cssEscape(placeholder)}"]`;
     else if (text) selector = `${tag}:has-text("${cssEscape(text.slice(0, 40))}")`;
     else continue; // nothing stable to target — skip rather than guess
 
     // verify the selector actually resolves to THIS kind of element, and
-    // disambiguate duplicates with :nth-match
+    // disambiguate duplicates with :nth-match — every same-base sibling gets
+    // its OWN entry (bbox + text), because a dashboard story needs "click row
+    // 2, then row 4"; a base whose rows all collapsed to one selector starves
+    // the script of anything to switch between
+    const base = selector;
     const matches = await page.locator(selector).count().catch(() => 0);
     if (matches === 0) continue;
     if (matches > 1) {
       if (!box) continue; // can't disambiguate a hidden duplicate — skip, don't guess
+      // cap per base so one long table can't crowd out the rest of the page
+      if ((siblingCount.get(base) ?? 0) >= MAX_SIBLINGS_PER_BASE) continue;
       // Pick the closest nth-match; a strict ±2px test can miss
       // on sub-pixel rendering and silently fall back to nth=1 = wrong element).
       // Cap the accepted distance so we never inventory a wildly-off element.
@@ -207,6 +352,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
 
     if (seen.has(selector)) continue;
     seen.add(selector);
+    if (matches > 1) siblingCount.set(base, (siblingCount.get(base) ?? 0) + 1);
     inventory.push({
       selector, tag, text,
       bbox: box
@@ -226,7 +372,8 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
   }
 
   return {
-    url: page.url(), title, headings, inventory, regions,
+    url: page.url(), title, headings, theme, inventory, regions,
+    ...(accentColor ? { accentColor } : {}),
     ...(excludedDestructive.length ? { excludedDestructive } : {}),
     ...(screenshotB64 ? { screenshotB64 } : {}),
   };
@@ -324,6 +471,22 @@ export async function crawlApp(
         continue;
       }
       const digest = await digestPage(page, screenshots, allowDestructive);
+      // never film a page whose settled URL is itself a credential — the URL is
+      // an un-redactable validation key, so drop the page rather than leak it
+      if (pageUrlHasSecret(digest.url)) {
+        if (digests.length === 0 && queue.length === 0) {
+          throw new Error(
+            "the target URL contains a secret in its path or query (a token/key/JWT); " +
+              "supercut won't film a page whose URL is itself a credential — point --url at a " +
+              "token-free URL (film against a local/staging environment)",
+          );
+        }
+        console.error(
+          `  skipped ${new URL(digest.url).pathname} — its URL contains a secret ` +
+            `(won't film a page whose URL is a credential)`,
+        );
+        continue;
+      }
       digests.push(digest);
 
       for (const item of digest.inventory) {

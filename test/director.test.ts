@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
-import { DESTRUCTIVE_RE } from "../src/director/inventory.js";
+import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
+import { pickMusic } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
-import type { AppAnalysis } from "../src/director/analyze.js";
+import { analyzeApp, type AppAnalysis } from "../src/director/analyze.js";
 import type { PageDigest } from "../src/director/inventory.js";
 import type { RecordResult } from "../src/capture/executor.js";
 import type { Recipe } from "../src/schema/index.js";
@@ -46,6 +47,7 @@ const analysis: AppAnalysis = {
   product_name: "Lumon",
   headline: "Your metrics, the moment you sign up",
   tagline: "Numbers without the setup",
+  music_track: "daybreak",
   money_moments: [
     { title: "Instant signup", caption: "Sign up in one click", why: "shows zero friction", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
     { title: "Typed email", caption: "Your dashboard, instantly", why: "form payoff", page_url: "http://127.0.0.1:9999/", elements: ["#email"] },
@@ -56,7 +58,7 @@ function validRecipeJson(selector: string): string {
   return JSON.stringify({
     version: 0,
     app_url: "http://127.0.0.1:9999",
-    music_track: "institutional-01",
+    music_track: "daybreak",
     scenes: [
       {
         name: "signup",
@@ -159,6 +161,35 @@ describe("script stage — the anti-hallucination gates", () => {
     );
   });
 
+  it("rejects a made-up music track with a corrective error and accepts the retry", async () => {
+    const fake = JSON.parse(validRecipeJson("#cta")) as { music_track: string };
+    fake.music_track = "synthwave-99";
+    const llm = new StubLlm([JSON.stringify(fake), validRecipeJson("#cta")]);
+    const { recipe, attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    expect(recipe.music_track).toBe("daybreak");
+    // retry prompt names the bad track AND the real library so the model can fix it
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("synthwave-99");
+    expect(retryText).toMatch(/"pulse", "daybreak", "midnight", "momentum"/);
+  });
+
+  it('accepts "off" as an explicit silent choice', async () => {
+    const silent = JSON.parse(validRecipeJson("#cta")) as { music_track: string };
+    silent.music_track = "off";
+    const llm = new StubLlm([JSON.stringify(silent)]);
+    const { recipe, attempts } = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(attempts).toBe(1);
+    expect(recipe.music_track).toBe("off");
+  });
+
+  it("passes the analysis's music pick into the script prompt", async () => {
+    const llm = new StubLlm([validRecipeJson("#cta")]);
+    await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    const promptText = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(promptText).toContain('MUSIC: set "music_track" to "daybreak"');
+  });
+
   it("rejects a selector that exists on another page but not the scene's entry page", async () => {
     // #task-ship is real — but only on /dash. Using it in a scene whose
     // entry.url is "/" must fail per-page validation (PR #2 review).
@@ -193,6 +224,7 @@ describe("hidden-element reveal order (B5)", () => {
     product_name: "Reveal",
     headline: "Reveal",
     tagline: "Reveal",
+    music_track: "pulse",
     money_moments: [
       { title: "Open the form", caption: "one click", why: "reveal", page_url: "http://127.0.0.1:9999/", elements: ["#open", "#field"] },
     ],
@@ -202,7 +234,7 @@ describe("hidden-element reveal order (B5)", () => {
     return JSON.stringify({
       version: 0,
       app_url: "http://127.0.0.1:9999",
-      music_track: "institutional-01",
+      music_track: "midnight",
       scenes: [
         {
           name: "reveal",
@@ -271,8 +303,6 @@ describe("destructive-action guard (H1)", () => {
       "Confirm payment",
       "Revoke access",
       // B4 (review): conservatively broadened — irreversible / high-blast-radius
-      "Publish",
-      "Publish to production",
       "Transfer funds",
       "Transfer ownership",
       "Regenerate API key",
@@ -325,6 +355,11 @@ describe("destructive-action guard (H1)", () => {
       "Send",
       "Send message",
       "Search flights",
+      // "publish" is reversible (unpublish exists) and is the payoff beat for
+      // CMS/blog/deploy apps — filmable by default, not in the lexicon
+      "Publish",
+      "Publish to production",
+      "Publish post",
       // "transfer" is narrowed to money/ownership phrases — benign transfers stay filmable:
       "Transfer to list",
       "Transfer ticket",
@@ -338,10 +373,214 @@ describe("destructive-action guard (H1)", () => {
     // mirrors inventory.ts: an element is excluded when it matches and
     // allowDestructive is false; included when allowDestructive is true.
     const accepted = (text: string, allowDestructive: boolean) =>
-      allowDestructive || !DESTRUCTIVE_RE.test(text);
+      allowDestructive || !isDestructiveLabel(text);
     expect(accepted("Delete account", false)).toBe(false); // excluded by default
     expect(accepted("Delete account", true)).toBe(true); // included on opt-in
     expect(accepted("Sign in", false)).toBe(true); // benign always kept
+  });
+
+  it("isDestructiveLabel: PLAIN lexicon match — fires on any label containing a verb, slug-joined or not", () => {
+    // standalone verbs/phrases
+    for (const label of ["Delete account", "Delete", "Remove", "Pay $49", "Cancel subscription", "checkout"]) {
+      expect(isDestructiveLabel(label), `expected "${label}" to be destructive`).toBe(true);
+    }
+    // hyphen/underscore-joined verbs match too. A service NAME sharing a word
+    // with a verb ("checkout-api") also matches and IS excluded: there's no way
+    // to prove an element has no click handler from page context, so any
+    // lexicon hit is fail-safe excluded rather than kept on a guess.
+    for (const label of [
+      "Delete-all",
+      "reset_config",
+      "checkout-api",
+      "checkout-api 160ms",
+      "delete-log-2024",
+      "archive-service Operational",
+      "reset_password_flow",
+      "checkout-api Delete",
+    ]) {
+      expect(isDestructiveLabel(label), `expected "${label}" to be destructive`).toBe(true);
+    }
+    // labels with no lexicon verb at all stay benign
+    for (const label of ["payments-worker", "auth-gateway", "Sign in", "Search services"]) {
+      expect(isDestructiveLabel(label), `expected "${label}" NOT to be destructive`).toBe(false);
+    }
+  });
+});
+
+describe("generate music priority (cli > director > none)", () => {
+  // resolver stub shaped like resolveMusicTrack: null for off, path for known,
+  // throw for unknown — pickMusic must never let the throw escape
+  const resolve = (spec: string | undefined): string | null => {
+    if (!spec || spec.trim().toLowerCase() === "off") return null;
+    if (["pulse", "daybreak", "midnight", "momentum"].includes(spec)) return `/assets/music/${spec}.mp3`;
+    throw new Error(`unknown track ${spec}`);
+  };
+
+  it("an explicit --music beats the director's pick", () => {
+    expect(pickMusic("daybreak", "midnight", resolve)).toMatchObject({
+      spec: "daybreak", source: "cli", label: "daybreak (cli)",
+    });
+  });
+
+  it("--music off silences even when the director picked a track", () => {
+    expect(pickMusic("off", "midnight", resolve)).toMatchObject({ spec: undefined, source: "none", label: "none" });
+  });
+
+  it("no --music → the director's track", () => {
+    expect(pickMusic(undefined, "midnight", resolve)).toMatchObject({
+      spec: "midnight", source: "director", label: "midnight (director)",
+    });
+  });
+
+  it('a director "off" → silent, no warning', () => {
+    const choice = pickMusic(undefined, "off", resolve);
+    expect(choice).toMatchObject({ spec: undefined, source: "none" });
+    expect(choice.warning).toBeUndefined();
+  });
+
+  it("an unresolvable director track degrades to a warned silent cut, never a throw", () => {
+    const choice = pickMusic(undefined, "synthwave-99", resolve);
+    expect(choice.spec).toBeUndefined();
+    expect(choice.source).toBe("none");
+    expect(choice.warning).toMatch(/synthwave-99/);
+  });
+
+  it("a throwing resolver on the --music (cli) path also degrades to silent, never a throw", () => {
+    // parity with the director branch: the exported function must never let a
+    // resolver throw escape post-spend, even though preflight normally catches
+    // a bad --music first
+    const choice = pickMusic("synthwave-99", "midnight", resolve);
+    expect(choice.spec).toBeUndefined();
+    expect(choice.source).toBe("none");
+    expect(choice.warning).toMatch(/synthwave-99/);
+  });
+});
+
+describe("LLM prompt egress redaction + retry payload", () => {
+  // a full 3-part JWT — the query-string secret the crawler is designed to reach
+  const jwt =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+  it("redacts title/heading/element secrets but keeps the URL intact as a validation key in the analyze prompt", async () => {
+    // secret-URL pages are dropped upstream in crawlApp (see pageUrlHasSecret +
+    // the e2e drop test), so here the URL is a normal query URL that must
+    // round-trip UNREDACTED (it is the key the recipe's entry.url validates
+    // against); only the display fields (title/headings/element text) are redacted.
+    const url = "http://127.0.0.1:9999/dash?view=chart";
+    const digests: PageDigest[] = [
+      {
+        url,
+        title: "Ops console admin@corp.com",
+        headings: ["token=supersecretvalue123456"],
+        theme: "light",
+        inventory: [
+          { selector: "#cta", tag: "button", text: "Get started", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+          { selector: "#go", tag: "button", text: "View report", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+        ],
+      },
+    ];
+    const good = JSON.stringify({
+      product_summary: "A metrics dashboard for busy teams.",
+      product_name: "Lumon",
+      headline: "See your numbers instantly",
+      tagline: "Metrics, live",
+      music_track: "daybreak",
+      money_moments: [
+        { title: "Land", caption: "Insight now", why: "first moment", page_url: url, elements: ["#cta"] },
+        { title: "Report", caption: "See it move", why: "the payoff", page_url: url, elements: ["#go"] },
+      ],
+    });
+    const llm = new StubLlm([good]);
+    await analyzeApp(llm, digests);
+    const prompt = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(prompt).not.toContain("admin@corp.com");
+    expect(prompt).not.toContain("supersecretvalue123456");
+    expect(prompt).toContain("[REDACTED_EMAIL]"); // the email in the title
+    expect(prompt).toContain("token=[REDACTED]"); // the assignment in the heading
+    expect(prompt).toContain(url); // the URL round-trips unredacted (it is a key)
+  });
+
+  it("keeps the URL intact so the recipe round-trips, while element text stays redacted, in the script prompt", async () => {
+    const url = "http://127.0.0.1:9999/dash?view=chart";
+    const digests: PageDigest[] = [
+      { url, title: "Dash", headings: ["Live"], inventory: [
+        { selector: "#cta", tag: "button", text: `open ${jwt}`, bbox: { x: 1, y: 2, w: 3, h: 4 } },
+      ] },
+    ];
+    const analysis: AppAnalysis = {
+      product_summary: "A dashboard product for teams.",
+      product_name: "Lumon",
+      headline: "See it live now",
+      tagline: "Numbers, live",
+      music_track: "daybreak",
+      money_moments: [
+        { title: "Hook", caption: "Land here", why: "the hook beat", page_url: url, elements: ["#cta"] },
+        { title: "Payoff", caption: "See it move", why: "the payoff", page_url: url, elements: ["#cta"] },
+      ],
+    };
+    const recipe = JSON.stringify({
+      version: 0, app_url: url, music_track: "daybreak",
+      scenes: [
+        { name: "hook", priority: 1, entry: { url, prelude: [] }, depends_on: [], actions: [{ kind: "click", selector: "#cta", duration_ms: 1500 }], hold_ms: 400 },
+        { name: "payoff", priority: 2, entry: { url, prelude: [] }, depends_on: [], actions: [{ kind: "click", selector: "#cta", duration_ms: 1500 }], hold_ms: 600 },
+      ],
+    });
+    const llm = new StubLlm([recipe]);
+    // the recipe echoes the raw URL as entry.url and passes validation (round-trip)
+    await writeRecipe(llm, analysis, digests, url);
+    const prompt = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(prompt).toContain(url); // URL is a key: unredacted, round-trips
+    expect(prompt).not.toContain(jwt); // element TEXT is still redacted
+    expect(prompt).toContain("[REDACTED_TOKEN]");
+  });
+
+  it("pageUrlHasSecret flags a URL carrying a token/key/JWT, not a normal query URL", () => {
+    expect(pageUrlHasSecret(`http://app/dash?session=${jwt}`)).toBe(true);
+    expect(pageUrlHasSecret("http://app/dash?token=supersecretvalue123456")).toBe(true);
+    expect(pageUrlHasSecret("http://app/dash?view=chart&tab=latency")).toBe(false);
+    expect(pageUrlHasSecret("http://127.0.0.1:4100/")).toBe(false);
+  });
+
+  it("sends page screenshots only on the first attempt, never on a schema retry", async () => {
+    const shotDigests: PageDigest[] = [
+      {
+        url: "http://127.0.0.1:9999/",
+        title: "Home",
+        headings: ["Home"],
+        theme: "light",
+        screenshotB64: "AAAA", // stand-in JPEG payload — resent would triple cost
+        inventory: [
+          { selector: "#cta", tag: "button", text: "Start", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+          { selector: "#go", tag: "button", text: "Go", bbox: { x: 1, y: 2, w: 3, h: 4 } },
+        ],
+      },
+    ];
+    const base = {
+      product_summary: "A metrics dashboard for busy teams.",
+      product_name: "Lumon",
+      headline: "See your numbers instantly",
+      tagline: "Metrics, live",
+      music_track: "daybreak",
+    };
+    const invalid = JSON.stringify({
+      ...base,
+      money_moments: [
+        { title: "Land", caption: "Insight now", why: "first moment", page_url: "http://127.0.0.1:9999/", elements: ["#missing"] },
+        { title: "Ship", caption: "See it move", why: "the payoff", page_url: "http://127.0.0.1:9999/", elements: ["#go"] },
+      ],
+    });
+    const valid = JSON.stringify({
+      ...base,
+      money_moments: [
+        { title: "Land", caption: "Insight now", why: "first moment", page_url: "http://127.0.0.1:9999/", elements: ["#cta"] },
+        { title: "Ship", caption: "See it move", why: "the payoff", page_url: "http://127.0.0.1:9999/", elements: ["#go"] },
+      ],
+    });
+    const llm = new StubLlm([invalid, valid]);
+    await analyzeApp(llm, shotDigests);
+    const hasImage = (call: ChatOptions) => call.user.some((p) => p.type === "image");
+    expect(hasImage(llm.prompts[0]!)).toBe(true); // attempt 0 carries the screenshot
+    expect(hasImage(llm.prompts[1]!)).toBe(false); // the retry is text + feedback only
   });
 });
 

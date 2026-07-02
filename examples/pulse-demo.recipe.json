@@ -1,0 +1,20 @@
+{
+  "version": 0,
+  "app_url": "http://127.0.0.1:4100",
+  "music_track": "midnight",
+  "scenes": [
+    {
+      "name": "triage-the-fleet",
+      "priority": 1,
+      "entry": { "url": "http://127.0.0.1:4100/", "prelude": [] },
+      "depends_on": [],
+      "actions": [
+        { "kind": "click", "selector": "[data-testid=\"service-search\"]", "duration_ms": 900 },
+        { "kind": "type", "selector": "[data-testid=\"service-search\"]", "text": "payments", "submit": true, "focus_selector": "[data-testid=\"metrics-panel\"]", "duration_ms": 1700 },
+        { "kind": "click", "selector": ":nth-match([data-testid=\"service-item\"], 1)", "focus_selector": "[data-testid=\"kpi-row\"]", "duration_ms": 1500 },
+        { "kind": "click", "selector": ":nth-match([data-testid=\"service-item\"], 3)", "focus_selector": "[data-testid=\"metrics-panel\"]", "duration_ms": 1500 }
+      ],
+      "hold_ms": 900
+    }
+  ]
+}

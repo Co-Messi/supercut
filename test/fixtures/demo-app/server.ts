@@ -123,6 +123,81 @@ const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
+/** fourth route: a DARK service-fleet dashboard shaped like real ops tools —
+ *  six PASSIVE rows sharing one data-testid (each must survive as a distinct
+ *  :nth-match entry), live-ticking latencies (text-based selectors self-
+ *  invalidate), and destructive controls that must ALL be excluded: a <button>,
+ *  an inline-onclick div, a bare <button>Delete-all</button>, a PASSIVE
+ *  destructive-slug row (<li>delete-log-2024</li> — we can't prove it's inert,
+ *  so it's fail-safe excluded), and a framework-wired "danger-row" div whose
+ *  click is bound via addEventListener with NO onclick attr and NO cursor/
+ *  tabindex/role signal at all — excluded purely by its destructive label. The
+ *  dark surface is painted on a #root wrapper while body/html stay transparent —
+ *  the React/Next shape a body-only theme probe misreads "light", so this
+ *  exercises the largest-surface probe. */
+const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Fleet</title><style>
+  :root { --ink:#e8eaf2; --accent:#5b8cff; --surface:#0b0e14 }
+  * { box-sizing:border-box; margin:0 }
+  body { font-family:-apple-system,'Segoe UI',sans-serif }
+  #root { min-height:100vh; background:var(--surface); color:var(--ink) }
+  main { max-width:1000px; margin:0 auto; padding:40px 24px }
+  input { width:100%; font-size:16px; padding:12px 16px; background:#141926; color:var(--ink);
+          border:1px solid #232a3d; border-radius:10px; margin-top:16px }
+  ul { list-style:none; padding:0; margin-top:20px }
+  li { background:#11151f; border:1px solid #1d2333; border-radius:10px; padding:14px 18px;
+       margin-bottom:8px; display:flex; justify-content:space-between; cursor:default }
+  li:hover { border-color:var(--accent) }
+  #danger, #danger-div { margin-top:28px; background:#3a1420; color:#ff9cae; border:0; padding:12px 22px;
+            border-radius:8px; cursor:pointer }
+</style></head><body>
+  <div id="root">
+  <main>
+    <h2>Service fleet</h2>
+    <input data-testid="service-search" placeholder="Search services…">
+    <ul>
+      <li data-testid="service-item"><span>orders-api</span><span class="ms">160ms</span></li>
+      <li data-testid="service-item"><span>payments-worker</span><span class="ms">84ms</span></li>
+      <li data-testid="service-item"><span>auth-gateway</span><span class="ms">41ms</span></li>
+      <li data-testid="service-item"><span>search-indexer</span><span class="ms">203ms</span></li>
+      <li data-testid="service-item"><span>media-transcoder</span><span class="ms">330ms</span></li>
+      <li data-testid="service-item"><span>notification-hub</span><span class="ms">57ms</span></li>
+    </ul>
+    <ul><li data-testid="log-row"><span>delete-log-2024</span></li></ul>
+    <button id="danger">Delete service</button>
+    <div id="danger-div" data-testid="danger" onclick="return false">Delete account</div>
+    <div data-testid="danger-row">delete-worker</div>
+    <button>Delete-all</button>
+  </main>
+  </div>
+  <script>
+    setInterval(() => {
+      for (const el of document.querySelectorAll(".ms"))
+        el.textContent = (30 + Math.floor(Math.random() * 300)) + "ms";
+    }, 100);
+    // framework-style click binding: no onclick ATTR, handler via addEventListener
+    document.querySelector('[data-testid="danger-row"]').addEventListener("click", () => {});
+  </script>
+</body></html>`;
+
+/** fifth route: a LIGHT app with a full-viewport translucent modal backdrop
+ *  (rgba(0,0,0,.55) over ≥60% of the screen). The backdrop out-covers the body
+ *  but is NOT the page ground — the theme probe must skip non-opaque layers and
+ *  still report "light", not be fooled "dark" by the overlay. */
+const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Overlay</title><style>
+  * { box-sizing:border-box; margin:0 }
+  body { font-family:-apple-system,'Segoe UI',sans-serif; background:#fafaf7; color:#16161a }
+  main { max-width:880px; margin:80px auto; padding:0 32px }
+  #backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55) }
+  #modal { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+           background:#fff; border-radius:14px; padding:32px }
+  #confirm { background:#2563eb; color:#fff; border:0; padding:14px 28px; border-radius:10px;
+             font-weight:600; cursor:pointer }
+</style></head><body>
+  <main><h1>Your workspace is ready.</h1><p>One dashboard for every metric that matters.</p></main>
+  <div id="backdrop"></div>
+  <div id="modal"><h3>Confirm your plan</h3><button id="confirm">Continue</button></div>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -130,7 +205,11 @@ export interface DemoApp {
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
   const server: Server = createServer((req, res) => {
-    const body = req.url?.startsWith("/dash") ? DASH : req.url?.startsWith("/panel") ? PANEL : LANDING;
+    const body = req.url?.startsWith("/dash") ? DASH
+      : req.url?.startsWith("/panel") ? PANEL
+      : req.url?.startsWith("/fleet") ? FLEET
+      : req.url?.startsWith("/overlay") ? OVERLAY
+      : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);
   });

@@ -75,7 +75,9 @@ function isPrivateHostname(hostname: string): boolean {
   h = normalizeHostToIPv4(h);
   if (h === "localhost" || h.endsWith(".localhost")) return true;
   if (h === "0.0.0.0") return true;
-  if (isIP(h) === 6) return h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:");
+  // "::" is the unspecified address (equivalent to 0.0.0.0) — routers/servers
+  // bound to it accept loopback traffic, so treat it as private too.
+  if (isIP(h) === 6) return h === "::1" || h === "::" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:");
   if (isIP(h) === 4) {
     return (
       inCidr(h, "10.0.0.0", 8) ||

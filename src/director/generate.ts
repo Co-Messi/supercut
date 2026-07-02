@@ -122,6 +122,56 @@ async function preflight(url: string, allowPrivateNetwork: boolean): Promise<voi
   }
 }
 
+export interface MusicChoice {
+  /** value handed to the renderer (undefined → silent cut) */
+  spec: string | undefined;
+  source: "cli" | "director" | "none";
+  /** summary label, e.g. `midnight (director)` or `none` */
+  label: string;
+  warning?: string;
+}
+
+/**
+ * Music priority: explicit --music (validated at preflight) > the director's
+ * recipe pick > silent. An unresolvable director track degrades to a warning
+ * and a silent cut — a music nit must NEVER fail a run after LLM/capture spend.
+ */
+export function pickMusic(
+  cliMusic: string | undefined,
+  recipeTrack: string,
+  resolve: (spec: string | undefined) => string | null = resolveMusicTrack,
+): MusicChoice {
+  if (cliMusic !== undefined) {
+    // a bad --music is normally caught at preflight, but this exported function
+    // must never throw post-spend — mirror the director branch and degrade to a
+    // warned silent cut if the resolver throws.
+    try {
+      return resolve(cliMusic)
+        ? { spec: cliMusic, source: "cli", label: `${cliMusic} (cli)` }
+        : { spec: undefined, source: "none", label: "none" }; // --music off
+    } catch {
+      return {
+        spec: undefined,
+        source: "none",
+        label: "none",
+        warning: `--music "${cliMusic}" is not a bundled track or audio file — rendering silent`,
+      };
+    }
+  }
+  try {
+    return resolve(recipeTrack)
+      ? { spec: recipeTrack, source: "director", label: `${recipeTrack} (director)` }
+      : { spec: undefined, source: "none", label: "none" }; // director chose "off"
+  } catch {
+    return {
+      spec: undefined,
+      source: "none",
+      label: "none",
+      warning: `recipe music_track "${recipeTrack}" is not a bundled track or audio file — rendering silent`,
+    };
+  }
+}
+
 function repoNotes(repoPath: string): string | undefined {
   for (const f of ["README.md", "readme.md", "package.json"]) {
     const p = join(repoPath, f);
@@ -268,6 +318,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
   log("⑤ render…");
   const outFile = join(opts.outDir, "final.mp4");
+  const music = pickMusic(opts.music, recipe.music_track);
+  if (music.warning) log(`   warning: ${music.warning}`);
   // NO on-screen text. supercut is a pure product demo — the product is the
   // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
   // it; nothing is ever drawn over the app. (The director still writes copy in
@@ -276,9 +328,9 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     takeDir,
     outFile,
     ...(opts.background ? { background: opts.background } : {}),
-    ...(opts.music ? { music: opts.music } : {}),
+    ...(music.spec ? { music: music.spec } : {}),
   });
-  log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB)`);
+  log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
 
   writeFileSync(
     join(opts.outDir, "director-report.json"),

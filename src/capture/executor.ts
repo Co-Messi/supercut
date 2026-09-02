@@ -232,6 +232,11 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   // guard ON: resolve-and-pin every recipe host so the browser connects to the
   // exact IPs the policy vetted — a DNS re-resolve mid-run can't swap in a
   // private one (same defense the crawler applies).
+  // Note: this re-resolves hosts that assertRecipeNavigationPolicy above
+  // already resolved — a second lookup and a small TOCTOU window between the
+  // two. Deliberate: the assert is a pure yes/no policy check, the pin is the
+  // one whose answer the browser actually connects to, and collapsing them
+  // would couple the policy module to Chromium launch-arg formatting.
   const launchArgs: string[] = [];
   if (!allowPrivateNetwork) {
     const rules: string[] = [];

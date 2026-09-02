@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertSafeNavigationUrl,
+  createRequestGate,
   hostResolverRule,
   navigationRequestAllowed,
   resolveAndPinHost,
@@ -101,5 +102,54 @@ describe("urlResolvesPrivate (advisory hint)", () => {
 
   it("never throws — malformed input is simply not private", async () => {
     await expect(urlResolvesPrivate("not a url")).resolves.toBe(false);
+  });
+});
+
+describe("request gate — every request type, not just navigations (H4)", () => {
+  it("blocks a subresource request to a private host while the guard is on", async () => {
+    const gate = createRequestGate({ allowPrivateNetwork: false });
+    // the SSRF classic: a crawled page fetch()es cloud metadata / loopback
+    expect(await gate.allows("http://169.254.169.254/latest/meta-data/iam/")).toBe(false);
+    expect(await gate.allows("http://127.0.0.1:8080/internal.js")).toBe(false);
+    expect(await gate.allows("http://[::1]/img.png")).toBe(false);
+    expect(await gate.allows("http://0x7f000001/x")).toBe(false);
+  });
+
+  it("allows everything when the guard is off, resolving nothing", async () => {
+    let resolves = 0;
+    const gate = createRequestGate({
+      allowPrivateNetwork: true,
+      isPrivateHost: async () => { resolves++; return true; },
+    });
+    expect(await gate.allows("http://127.0.0.1:3000/app.js")).toBe(true);
+    expect(resolves).toBe(0);
+  });
+
+  it("fails closed on non-http(s) and malformed URLs while the guard is on", async () => {
+    const gate = createRequestGate({ allowPrivateNetwork: false });
+    expect(await gate.allows("file:///etc/passwd")).toBe(false);
+    expect(await gate.allows("not a url")).toBe(false);
+  });
+
+  it("caches the DNS verdict per host so subresources don't become a DNS storm", async () => {
+    const lookups: string[] = [];
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async (h) => { lookups.push(h); return h === "internal.corp"; },
+    });
+    expect(await gate.allows("http://internal.corp/a.png")).toBe(false);
+    expect(await gate.allows("http://internal.corp/b.png")).toBe(false);
+    expect(await gate.allows("http://internal.corp/api/steal")).toBe(false);
+    expect(await gate.allows("https://cdn.example/lib.js")).toBe(true);
+    expect(await gate.allows("https://cdn.example/style.css")).toBe(true);
+    expect(lookups).toEqual(["internal.corp", "cdn.example"]);
+  });
+
+  it("fails closed when the resolver itself throws", async () => {
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async () => { throw new Error("resolver down"); },
+    });
+    expect(await gate.allows("http://flaky.example/x.js")).toBe(false);
   });
 });

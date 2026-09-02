@@ -5,7 +5,7 @@
  * construction: it fails the whitelist check and bounces back for retry.
  */
 import { chromium, type Browser, type Page } from "playwright";
-import { assertSafeNavigationUrl, navigationRequestAllowed, resolveAndPinHost } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, createRequestGate, resolveAndPinHost } from "../security/url-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 /**
@@ -419,24 +419,24 @@ export async function crawlApp(
     const digests: PageDigest[] = [];
     const visited = new Set<string>();
 
-    // block downloads outright so a stray file link can't hang/crash the crawl
+    // guard ON: EVERY request type — navigation, fetch/XHR, <img>, <script>,
+    // <link>, form POST — is policy-checked BEFORE it leaves the browser, with
+    // per-host DNS verdicts cached for the run. The old handler checked
+    // navigations only, so a crawled page could fetch() cloud metadata or probe
+    // RFC1918 hosts via subresources while the CLI reported the guard engaged.
+    // The post-settle URL checks below only run AFTER Chromium has fetched a
+    // 302/meta/JS redirect target — this gate is what stops the request itself.
+    // Also blocks download navigations so a stray file link can't crash the crawl.
+    const gate = createRequestGate({ allowPrivateNetwork });
     const ctx = page.context();
     await ctx.route("**/*", async (route) => {
       const u = route.request().url();
+      if (!(await gate.allows(u))) return route.abort();
       try {
-        if (route.request().isNavigationRequest()) {
-          // guard ON: validate every navigation BEFORE the request leaves the
-          // browser. The post-settle checks below only run AFTER Chromium has
-          // already fetched a 302/meta/JS redirect target — this gate is what
-          // stops the request to a private host from happening at all.
-          if (!allowPrivateNetwork && !(await navigationRequestAllowed(u, { allowPrivateNetwork }))) {
-            return route.abort();
-          }
-          if (NON_HTML_EXT.test(new URL(u).pathname)) {
-            return route.abort();
-          }
+        if (route.request().isNavigationRequest() && NON_HTML_EXT.test(new URL(u).pathname)) {
+          return route.abort();
         }
-      } catch { /* fall through */ }
+      } catch { /* unparseable URL: the gate already vetted it when engaged */ }
       return route.continue();
     });
 

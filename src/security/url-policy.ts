@@ -150,6 +150,50 @@ export async function urlResolvesPrivate(raw: string): Promise<boolean> {
   }
 }
 
+/**
+ * Per-run request gate for a Playwright route handler: decides whether ANY
+ * in-flight browser request — navigation, fetch/XHR, <img>, <script>, <link>,
+ * form POST — may leave the browser under the private-network policy. The
+ * navigation-only check this replaces left every subresource free to reach
+ * private hosts while the CLI reported the guard as engaged.
+ *
+ * DNS verdicts are cached per host for the lifetime of the gate, so enforcing
+ * on every subresource doesn't become a per-request DNS storm. Fail-closed:
+ * an unparseable URL or a throwing check blocks the request while the guard
+ * is engaged. With the guard off it allows everything and resolves nothing.
+ */
+export interface RequestGate {
+  allows(url: string): Promise<boolean>;
+}
+
+export function createRequestGate(opts: {
+  allowPrivateNetwork: boolean;
+  /** injectable for tests; defaults to the module's DNS-backed private check */
+  isPrivateHost?: (hostname: string) => Promise<boolean>;
+}): RequestGate {
+  const isPrivate = opts.isPrivateHost ?? resolvesPrivate;
+  const verdicts = new Map<string, Promise<boolean>>();
+  return {
+    async allows(raw: string): Promise<boolean> {
+      if (opts.allowPrivateNetwork) return true;
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        return false;
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+      const host = url.hostname;
+      let verdict = verdicts.get(host);
+      if (!verdict) {
+        verdict = isPrivate(host).then((p) => !p, () => false);
+        verdicts.set(host, verdict);
+      }
+      return verdict;
+    },
+  };
+}
+
 export interface PinnedHost {
   hostname: string;
   /** the exact address that passed validation */

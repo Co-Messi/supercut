@@ -363,6 +363,22 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     for (const v of notOk) log(`   ${v.verdict.toUpperCase()} "${v.scene}": ${v.reason}`);
 
     const applied = applyVerdicts(recipe, verdicts);
+    if (applied.allCut) {
+      // Refusing to render an empty video is right; discarding a recorded,
+      // renderable take after the full crawl + both LLM stages + a complete
+      // capture is not. Preserve every artifact, then fail with the way out.
+      writeFileSync(join(opts.outDir, "recipe.json"), JSON.stringify(recipe, null, 2));
+      writeFileSync(
+        join(opts.outDir, "director-report.json"),
+        JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
+      );
+      throw new Error(
+        `QC cut every scene (${applied.cut.join(", ")}) — refusing to render an empty video. ` +
+          `The recorded take is preserved at ${takeDir} (recipe.json and director-report.json ` +
+          `sit beside it); inspect the verdicts, and render it anyway with: ` +
+          `supercut render --take ${takeDir}`,
+      );
+    }
     if (!applied.changed || retakes >= MAX_RETAKES) {
       if (retakes >= MAX_RETAKES) {
         log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
@@ -381,6 +397,16 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   }
 
   writeFileSync(join(opts.outDir, "recipe.json"), JSON.stringify(recipe, null, 2));
+  // report + usage BEFORE render: runs that die in stage 5 used to be exactly
+  // the runs with no report and no spend line — the ones that need them most
+  writeFileSync(
+    join(opts.outDir, "director-report.json"),
+    JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
+  );
+  {
+    const tokens = llm.tokensUsed;
+    log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens (${llm.breakdown()})` : "unavailable"}`);
+  }
 
   log("⑤ render…");
   const outFile = join(opts.outDir, "final.mp4");
@@ -397,15 +423,6 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     ...(music.spec ? { music: music.spec } : {}),
   });
   log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
-
-  writeFileSync(
-    join(opts.outDir, "director-report.json"),
-    JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
-  );
-
-  // best-effort cost telemetry (the hard cap lives in BudgetedLlmClient)
-  const tokens = llm.tokensUsed;
-  log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens (${llm.breakdown()})` : "unavailable"}`);
 
   return { outFile, recipe, analysis, retakes, verdictLog };
 }

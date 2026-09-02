@@ -257,6 +257,54 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(await probeStreams(res.outFile)).toEqual(["video:h264"]);
   }, 300_000);
 
+  it("preserves the recorded take + artifacts when QC cuts every scene (M4)", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-allcut-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        product_name: "Lumon",
+        headline: "Your team's numbers, live in seconds",
+        tagline: "Metrics without the setup",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", caption: "Start in one click", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0,
+        app_url: app.url,
+        music_track: "daybreak",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 0 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
+        ],
+      }),
+      // ④ vision QC condemns everything
+      JSON.stringify({
+        verdicts: [
+          { scene: "signup", verdict: "cut", reason: "blank frame" },
+          { scene: "dashboard", verdict: "cut", reason: "error page" },
+        ],
+      }),
+    ]);
+
+    await expect(
+      generate({ llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: () => {} }),
+    ).rejects.toThrow(/QC cut every scene.*preserved at/s);
+
+    // the take survived, and the run left enough on disk to debug + render it
+    expect(existsSync(join(outDir, "take-0", "events.json"))).toBe(true);
+    expect(existsSync(join(outDir, "take-0", "frames-index.json"))).toBe(true);
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.verdictLog.flat().filter((v: { verdict: string }) => v.verdict === "cut")).toHaveLength(2);
+    expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
+  }, 300_000);
+
   it("--dry-run writes the recipe + preview and never films (H6)", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-dry-"));
     dirs.push(outDir);

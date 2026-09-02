@@ -657,10 +657,22 @@ describe("QC verdicts — frozen patch surface", () => {
     ]);
   });
 
-  it("cutting a parent cascades to dependents", () => {
-    expect(() =>
-      applyVerdicts(twoSceneRecipe, [{ scene: "signup", verdict: "cut", reason: "broken" }]),
-    ).toThrow(/cut every scene/); // both die → empty video refused
+  it("cutting a parent cascades to dependents; a total cut is flagged, not thrown (M4)", () => {
+    // both scenes die → allCut is flagged and the input recipe comes back
+    // UNCHANGED, so the caller can preserve the recorded take instead of
+    // losing it to an exception after the full capture spend
+    const applied = applyVerdicts(twoSceneRecipe, [{ scene: "signup", verdict: "cut", reason: "broken" }]);
+    expect(applied.allCut).toBe(true);
+    expect(applied.cut.sort()).toEqual(["child", "signup"]);
+    expect(applied.recipe).toBe(twoSceneRecipe); // never an empty-scene recipe
+    expect(applied.changed).toBe(false);
+  });
+
+  it("a partial cut is not allCut", () => {
+    const applied = applyVerdicts(twoSceneRecipe, [{ scene: "child", verdict: "cut", reason: "broken" }]);
+    expect(applied.allCut).toBe(false);
+    expect(applied.recipe.scenes.map((s) => s.name)).toEqual(["signup"]);
+    expect(applied.changed).toBe(true);
   });
 
   it("applies hold_ms patches without touching actions or order", () => {

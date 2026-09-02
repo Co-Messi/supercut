@@ -196,6 +196,11 @@ export interface AppliedVerdicts {
   recipe: Recipe;
   changed: boolean;
   cut: string[];
+  /** every scene was cut (directly or via cascade). `recipe` is returned
+   *  UNCHANGED in that case — an empty recipe must never escape — and the
+   *  caller decides what to do with the recorded take. Rendering an empty
+   *  video is wrong, but so is discarding a recorded, renderable artifact. */
+  allCut: boolean;
 }
 
 /** Apply verdicts within the frozen patch surface. Cutting cascades to dependents. */
@@ -241,6 +246,10 @@ export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): Applied
       return out;
     });
 
-  if (scenes.length === 0) throw new Error("QC cut every scene — refusing to render an empty video");
-  return { recipe: { ...recipe, scenes }, changed, cut: [...cutSet] };
+  if (scenes.length === 0) {
+    // flag it rather than throwing: the caller holds a recorded take that is
+    // still renderable, and only the caller can preserve it properly
+    return { recipe, changed: false, cut: [...cutSet], allCut: true };
+  }
+  return { recipe: { ...recipe, scenes }, changed, cut: [...cutSet], allCut: false };
 }

@@ -381,13 +381,25 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     // beacon dead, page never committing frames) renders as a slideshow no
     // amount of QC patching can save — fail here, not after vision tokens.
     {
-      const frameIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
-      const health = assessCaptureHealth(result.eventLog, frameIndex);
-      if (health.action === "fail" && process.env.SUPERCUT_ALLOW_SPARSE !== "1") {
-        throw new Error(
-          `generate: ${health.reason}. The app may suspend rendering when headless, or the repaint ` +
-            `beacon failed to attach — try re-running; SUPERCUT_ALLOW_SPARSE=1 forces a render anyway.`,
-        );
+      const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
+      // shape guard mirrors renderTake's: a non-array would make `.length`
+      // undefined and the sparse comparison silently false — gate passed.
+      // record() just wrote this file, so today it can't happen; the guard is
+      // for whatever writes it tomorrow.
+      if (!Array.isArray(rawIndex)) throw new Error("generate: frames-index.json is not an array");
+      const health = assessCaptureHealth(result.eventLog, rawIndex);
+      if (health.action === "fail") {
+        if (process.env.SUPERCUT_ALLOW_SPARSE === "1") {
+          // LOUD, matching render/index.ts: someone who exported the variable
+          // once to salvage an old take must not keep generating starved
+          // videos with no line saying the health gate is off
+          console.error(`[generate] WARNING: ${health.reason} (continuing: SUPERCUT_ALLOW_SPARSE=1)`);
+        } else {
+          throw new Error(
+            `generate: ${health.reason}. The app may suspend rendering when headless, or the repaint ` +
+              `beacon failed to attach — try re-running; SUPERCUT_ALLOW_SPARSE=1 forces a render anyway.`,
+          );
+        }
       }
     }
 

@@ -123,6 +123,39 @@ afterAll(async () => {
 });
 
 describe("record E2E on fixture app", () => {
+  it("render fails fast on an in-page FATAL (missing frames) instead of waiting out the timeout (M9)", async () => {
+    // a take whose index points at frame files that don't exist: the host page
+    // dies on the first fetch, and the crash/console hooks must surface it in
+    // seconds — the raw temp stream must also be cleaned up on that path
+    const takeDir = mkdtempSync(join(tmpdir(), "supercut-fatal-"));
+    dirs.push(takeDir);
+    writeFileSync(
+      join(takeDir, "events.json"),
+      JSON.stringify({
+        version: 0,
+        t_source_unified: true,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 300, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(takeDir, "frames-index.json"),
+      JSON.stringify([
+        { file: "frames/000000.png", t_source: 0 },
+        { file: "frames/000001.png", t_source: 500 },
+      ]),
+    );
+    const t0 = Date.now();
+    await expect(
+      renderTake({ takeDir, outFile: join(takeDir, "final.mp4") }),
+    ).rejects.toThrow(/FATAL/);
+    expect(Date.now() - t0).toBeLessThan(60_000); // fail-fast, not timeout-wait
+  }, 90_000);
+
   it("refuses a private-network recipe when the guard is engaged (H5)", async () => {
     const out = mkdtempSync(join(tmpdir(), "supercut-guard-"));
     dirs.push(out);

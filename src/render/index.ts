@@ -42,7 +42,8 @@ export interface RenderOptions {
   /** bundled track name (assets/music/), a path to an audio file, or
    *  "off"/absent for a silent video (the default) */
   music?: string;
-  /** ms; encoding 60s of footage is expected to finish well within 5 min */
+  /** ms; when unset, sized from the plan's frame count (≥5 min floor) so a
+   *  long take's legitimately slow encode isn't killed by a flat ceiling */
   timeoutMs?: number;
 }
 
@@ -225,7 +226,6 @@ export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]
 
 export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const { takeDir, outFile } = opts;
-  const timeoutMs = opts.timeoutMs ?? 300_000;
   const t0 = Date.now();
 
   // Fail before expensive work: output dir + take shape.
@@ -267,6 +267,12 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   });
 
   const planJson = JSON.stringify(plan);
+
+  // timeout sized from the work: the adaptive blur loop can reach dozens of
+  // draw passes per frame, so a legitimately slow long render must not be
+  // killed by a flat ceiling after all the capture/LLM spend that fed it.
+  // 200ms/frame ≈ 12 min for a full 3600-frame take; 5 min stays the floor.
+  const timeoutMs = opts.timeoutMs ?? Math.max(300_000, plan.frames * 200);
 
   // Clock-vs-frame skew gate (assessed in assessSkew, below).
   {
@@ -402,6 +408,15 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
           if (text.includes("FATAL")) fatal = text;
           else if (process.env.SUPERCUT_VERBOSE) console.log(text);
         }
+      });
+      // a hard tab death (OOM, GPU process crash) emits no console line at
+      // all — without these hooks the orchestrator waited out the full render
+      // timeout for a page that could never answer
+      page.on("crash", () => {
+        fatal = "[render] FATAL: renderer tab crashed (out of memory or GPU process death)";
+      });
+      page.on("pageerror", (err) => {
+        if (!fatal) fatal = `[render] FATAL: uncaught in-page error: ${err.message}`;
       });
       await page.goto(`http://127.0.0.1:${port}/?t=${token}`);
 

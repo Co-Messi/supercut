@@ -166,6 +166,9 @@ export interface RecordOptions {
 export interface RecordResult {
   eventLog: EventLog;
   frameCount: number;
+  /** frames captured per second of take time (frame + event span). ~60 on a
+   *  healthy beacon-era capture; near zero when the screencast starved. */
+  avgSourceFps: number;
   failedScenes: string[];
   aborted: boolean;
   outDir: string;
@@ -653,6 +656,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   const eventLog: EventLog = {
     version: 0,
+    // clock declaration (schema): event `t` shares the frame t_source timeline.
+    // The render stage keys its skew/health gates off this marker — never off
+    // the capture's frame rate — so a starved take can't pass as "legacy".
+    t_source_unified: true,
     viewport: { width: VIEWPORT.width, height: VIEWPORT.height, dpr: DPR },
     fps: FPS,
     events,
@@ -665,5 +672,15 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   frameIndex.sort((a, b) => a.t_source - b.t_source);
   writeFileSync(join(outDir, "frames-index.json"), JSON.stringify(frameIndex));
 
-  return { eventLog, frameCount: frameIndex.length, failedScenes, aborted, outDir };
+  // capture-health telemetry: frames per second of take time. The span uses
+  // BOTH clocks (last frame t_source and last event t) so a capture that
+  // stalled early — few frames, but a long event timeline — reads as sparse
+  // instead of hiding behind its own short frame span.
+  let maxEventT = 0;
+  for (const e of events) maxEventT = Math.max(maxEventT, e.t);
+  const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
+  const spanMs = Math.max(lastFrameT, maxEventT);
+  const avgSourceFps = spanMs > 0 ? (frameIndex.length / spanMs) * 1000 : 0;
+
+  return { eventLog, frameCount: frameIndex.length, avgSourceFps, failedScenes, aborted, outDir };
 }

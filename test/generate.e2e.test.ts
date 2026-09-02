@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -256,6 +256,57 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     // cli "off" outranks the director's "midnight": video stream only
     expect(await probeStreams(res.outFile)).toEqual(["video:h264"]);
   }, 300_000);
+
+  it("--dry-run writes the recipe + preview and never films (H6)", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-dry-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        product_name: "Lumon",
+        headline: "Your team's numbers, live in seconds",
+        tagline: "Metrics without the setup",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", caption: "Start in one click", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta", "#email"] },
+          { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0,
+        app_url: app.url,
+        music_track: "daybreak",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [
+              { kind: "click", selector: "#cta", duration_ms: 1500 },
+              { kind: "type", selector: "#email", text: "ada@lumon.dev", submit: true, duration_ms: 1800 },
+            ], hold_ms: 400 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1400 }], hold_ms: 400 },
+        ],
+      }),
+    ]);
+
+    const logs: string[] = [];
+    const res = await generate({
+      llm, url: app.url, outDir, seed: 7, dryRun: true,
+      allowPrivateNetwork: true, log: (m) => logs.push(m),
+    });
+
+    // nothing filmed, nothing rendered — but the recipe artifact exists
+    expect(res.outFile).toBe("");
+    expect(llm.calls).toBe(2); // analyze + script only, no QC
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
+    expect(existsSync(join(outDir, "take-0"))).toBe(false);
+    expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.dryRun).toBe(true);
+    // the preview surfaces every action, including the full typed text + Enter
+    const preview = logs.join("\n");
+    expect(preview).toContain('type #email "ada@lumon.dev" then press Enter');
+    expect(preview).toContain("click #cta");
+  }, 120_000);
 
   it("fails fast on an unreachable app URL (before any LLM call)", async () => {
     const llm = new ScriptedLlm(() => []);

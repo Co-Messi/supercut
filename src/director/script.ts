@@ -9,7 +9,7 @@
  * (max 4 attempts), so bad output never reaches the capture stage.
  */
 import { parseRecipe, type Recipe } from "../schema/index.js";
-import { extractJson, type ChatPart, type LlmClient } from "./llm.js";
+import { extractJson, UNTRUSTED_RULES, wrapUntrusted, type ChatPart, type LlmClient } from "./llm.js";
 import { MUSIC_TRACKS, coerceSelector, type AppAnalysis } from "./analyze.js";
 import type { PageDigest } from "./inventory.js";
 import { redactForPrompt } from "../security/redaction.js";
@@ -50,7 +50,9 @@ HARD RULES:
 - "type" actions need realistic short text (an email, a search term — match the field). For a search/query field, PREFER a value the app itself suggests — a placeholder example, an example hint near the field, or a visible chip/tag label — so the query is one the product recognizes and actually returns a result for. Do not invent an exotic value the demo may not have data for.
 - Order scenes as a launch story: hook → proof/depth → payoff. End on the most visual screen, and make the LAST action of the final scene the one that leaves the most impressive state on screen.
 - depends_on only when a later scene NEEDS an earlier scene's state.
-- (HIDDEN until revealed) elements: only use them AFTER an earlier action in the SAME scene reveals them (e.g. click the button that opens the form, then type into its field).`;
+- (HIDDEN until revealed) elements: only use them AFTER an earlier action in the SAME scene reveals them (e.g. click the button that opens the form, then type into its field).
+
+${UNTRUSTED_RULES}`;
 
 export interface ScriptResult {
   recipe: Recipe;
@@ -116,7 +118,7 @@ export async function writeRecipe(
           .map((m, i) => `${i + 1}. ${i === 0 ? "HOOK" : i === analysis.money_moments.length - 1 ? "PAYOFF" : "PROOF"} — ${m.title} @ ${m.page_url}; scene must use one of: ${m.elements.join(", ")}`)
           .join("\n") +
         `\n\nMUSIC: set "music_track" to "${analysis.music_track}" (picked to match the app's look) unless you have a strong reason to choose another bundled track.` +
-        `\n\nELEMENT INVENTORY (the ONLY selectors you may use):\n${inventoryText}`,
+        `\n\nELEMENT INVENTORY (the ONLY selectors you may use):\n${wrapUntrusted(inventoryText)}`,
     },
   ];
 

@@ -68,10 +68,16 @@ export interface GenerateOptions {
   /** hard cumulative token ceiling for the run's LLM calls (prompt+completion,
    *  provider-reported). 0 disables. Default: 300000. */
   maxTokens?: number;
+  /** preview mode: run analyze + script, print the FULL action list (every
+   *  selector, every typed string), write recipe.json — and stop before the
+   *  capture browser ever touches the app. The recipe can be reviewed and then
+   *  filmed with `supercut record --recipe <dir>/recipe.json`. */
+  dryRun?: boolean;
   log?: (msg: string) => void;
 }
 
 export interface GenerateResult {
+  /** empty string on a --dry-run (nothing was filmed or rendered) */
   outFile: string;
   recipe: Recipe;
   analysis: AppAnalysis;
@@ -172,6 +178,33 @@ export function pickMusic(
   }
 }
 
+/**
+ * Human-readable action list for a recipe — one line per action, including
+ * every `type` string and submit flag. Printed before capture on every run
+ * (and as the payload of --dry-run) so the operator can see exactly what the
+ * director is about to do to the live app; a prompt-injected `type` payload
+ * has to survive being shown to a human first.
+ */
+export function formatRecipePreview(recipe: Recipe): string[] {
+  const lines: string[] = [];
+  for (const [i, scene] of recipe.scenes.entries()) {
+    lines.push(
+      `scene ${i + 1} "${scene.name}" @ ${scene.entry.url}` +
+        (scene.depends_on.length ? ` (after ${scene.depends_on.join(", ")})` : ""),
+    );
+    for (const a of [...scene.entry.prelude, ...scene.actions]) {
+      let desc = a.kind as string;
+      if (a.kind === "goto" && a.url) desc += ` ${a.url}`;
+      if (a.selector) desc += ` ${a.selector}`;
+      if (a.kind === "type") desc += ` "${a.text ?? ""}"${a.submit ? " then press Enter" : ""}`;
+      desc += ` (${a.duration_ms}ms${a.focus_selector ? `, focus ${a.focus_selector}` : ""})`;
+      lines.push(`  · ${desc}`);
+    }
+    if (scene.hold_ms > 0) lines.push(`  · hold ${scene.hold_ms}ms`);
+  }
+  return lines;
+}
+
 function repoNotes(repoPath: string): string | undefined {
   for (const f of ["README.md", "readme.md", "package.json"]) {
     const p = join(repoPath, f);
@@ -263,6 +296,25 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   llm.stage = "script";
   const { recipe: firstRecipe, attempts } = await writeRecipe(llm, analysis, digests, opts.url);
   log(`   recipe valid after ${attempts} attempt(s): ${firstRecipe.scenes.length} scenes`);
+  // full action preview BEFORE the capture browser touches the app — every
+  // selector and every typed string is on the record for the operator
+  for (const line of formatRecipePreview(firstRecipe)) log(`   ${line}`);
+
+  if (opts.dryRun) {
+    writeFileSync(join(opts.outDir, "recipe.json"), JSON.stringify(firstRecipe, null, 2));
+    writeFileSync(
+      join(opts.outDir, "director-report.json"),
+      JSON.stringify(
+        { analysis, recipe: firstRecipe, retakes: 0, verdictLog: [], llm: opts.llm.label, dryRun: true },
+        null,
+        2,
+      ),
+    );
+    const tokensDry = llm.tokensUsed;
+    log(`LLM usage: ${tokensDry !== undefined ? `~${tokensDry} tokens (${llm.breakdown()})` : "unavailable"}`);
+    log(`dry run: recipe written to ${join(opts.outDir, "recipe.json")} — nothing was filmed`);
+    return { outFile: "", recipe: firstRecipe, analysis, retakes: 0, verdictLog: [] };
+  }
 
   let recipe = firstRecipe;
   let retakes = 0;

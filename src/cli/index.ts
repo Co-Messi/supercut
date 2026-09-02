@@ -129,7 +129,7 @@ async function main(): Promise<number> {
       const generateUsage =
         "usage: supercut generate --url <running app URL> [--repo <path>] [--app <name>] [--out <dir>] " +
         "[--bg <stage>] [--music <bundled track|audio file|off>] [--seed <n>] [--model <id>] " +
-        "[--env-file <file>] [--max-tokens <n|off>] " +
+        "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] " +
         "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
       // help is a real parsed boolean (see record) — no substring scan
       const { values } = parseArgs({
@@ -148,6 +148,9 @@ async function main(): Promise<number> {
           // hard LLM spend ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
           // 0 or "off" disables, default 300000
           "max-tokens": { type: "string" },
+          // preview: analyze + script only; print every action (incl. typed
+          // text), write recipe.json, and stop before capture touches the app
+          "dry-run": { type: "boolean" },
           help: { type: "boolean", short: "h" },
           // private/localhost is ALLOWED BY DEFAULT — filming your own local
           // dev app is the #1 use case. --block-private-network opts into the
@@ -244,7 +247,12 @@ async function main(): Promise<number> {
         // default OFF; --allow-destructive opts into filming destructive controls
         allowDestructive: !!values["allow-destructive"],
         ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(values["dry-run"] ? { dryRun: true } : {}),
       });
+      if (values["dry-run"]) {
+        console.log(`\nsupercut: dry run complete — review the recipe, then film it with:\n  supercut record --recipe ${(values.out ?? "out/generate")}/recipe.json`);
+        return 0;
+      }
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;
     }

@@ -73,6 +73,10 @@ export interface GenerateOptions {
    *  capture browser ever touches the app. The recipe can be reviewed and then
    *  filmed with `supercut record --recipe <dir>/recipe.json`. */
   dryRun?: boolean;
+  /** skip the preflight HTTP reachability probe. Escape hatch for apps the
+   *  bare-fetch probe misjudges (aggressive UA gating, unusual status codes at
+   *  `/`); the ffmpeg check and all URL policy checks still run. */
+  skipPreflight?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -85,7 +89,12 @@ export interface GenerateResult {
   verdictLog: SceneVerdict[][];
 }
 
-async function preflight(url: string, allowPrivateNetwork: boolean): Promise<void> {
+async function preflight(
+  url: string,
+  allowPrivateNetwork: boolean,
+  opts: { skipReachability?: boolean; log?: (msg: string) => void } = {},
+): Promise<void> {
+  const log = opts.log ?? ((m: string) => console.error(`[generate] ${m}`));
   // app reachable — error in seconds, never after 10 minutes of work.
   // Follow redirects MANUALLY and validate EVERY hop BEFORE the request: a
   // default `fetch` follows 3xx automatically, so a public URL that 302s to
@@ -93,35 +102,56 @@ async function preflight(url: string, allowPrivateNetwork: boolean): Promise<voi
   // have made the internal request before any post-hoc check. SSRF-guard errors
   // propagate as-is (a security failure, not "cannot reach"); only network
   // errors get the friendly reachability message.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    let current = url;
-    let status = 0;
-    for (let hop = 0; hop < 6; hop++) {
-      await assertSafeNavigationUrl(current, { allowPrivateNetwork });
-      let res: Response;
-      try {
-        res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
-      } catch (err) {
+  if (!opts.skipReachability) {
+    // even when the probe is skipped, the URL itself is still policy-checked
+    // by the caller and the crawl; here it gates the probe's own fetch
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      let current = url;
+      let status = 0;
+      for (let hop = 0; hop < 6; hop++) {
+        await assertSafeNavigationUrl(current, { allowPrivateNetwork });
+        let res: Response;
+        try {
+          res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
+        } catch (err) {
+          throw new Error(
+            `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+          );
+        }
+        status = res.status;
+        const loc = res.headers.get("location");
+        if (status >= 300 && status < 400 && loc) {
+          current = new URL(loc, current).href;
+          continue;
+        }
+        break;
+      }
+      // 401/403 at the root is NORMAL for the "film your own dev app" case —
+      // basic auth, a dev proxy, an SSO shim, an API-first backend. And this
+      // probe is a bare Node fetch (no browser UA, no cookies) while the crawl
+      // is Chromium, so a UA-gating edge can 403 a URL Chromium loads fine.
+      // Warn and continue; if the wall is real the crawl shows it in seconds.
+      // Everything else >= 400 is as doomed as it looks (a 404/410/5xx start
+      // page films as an error screen) and used to surface only deep in the
+      // crawl — fail here instead. --skip-preflight overrides the whole probe.
+      if (status === 401 || status === 403) {
+        log(
+          `preflight warning: ${url} responded ${status} — continuing (auth walls at the root are ` +
+            `normal for private dev apps, and this probe carries no browser UA or cookies). ` +
+            `If the whole app is behind that wall, the crawl will come back empty.`,
+        );
+      } else if (status >= 400) {
         throw new Error(
-          `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+          `app at ${url} responded ${status} — point --url at a page that loads, ` +
+            `or pass --skip-preflight if you know better`,
         );
       }
-      status = res.status;
-      const loc = res.headers.get("location");
-      if (status >= 300 && status < 400 && loc) {
-        current = new URL(loc, current).href;
-        continue;
-      }
-      break;
+      if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
+    } finally {
+      clearTimeout(timer);
     }
-    // 4xx is as doomed as 5xx for filming: a 404/401 start page films as an
-    // error screen, and the failure used to surface only deep in the crawl
-    if (status >= 400) throw new Error(`app at ${url} responded ${status} — point --url at a page that loads`);
-    if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
-  } finally {
-    clearTimeout(timer);
   }
   try {
     await exec("ffmpeg", ["-version"]);
@@ -242,7 +272,11 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   log("preflight…");
   // a bad --music must die here, not after the LLM crawl and capture spend
   resolveMusicTrack(opts.music);
-  await preflight(opts.url, opts.allowPrivateNetwork ?? true);
+  if (opts.skipPreflight) log("   note: --skip-preflight — not probing the app URL before the crawl");
+  await preflight(opts.url, opts.allowPrivateNetwork ?? true, {
+    ...(opts.skipPreflight ? { skipReachability: true } : {}),
+    log: (m) => log(`   ${m}`),
+  });
   if ((opts.allowPrivateNetwork ?? true) && !(await urlResolvesPrivate(opts.url))) {
     log("hint: target resolves to a public address — pass --block-private-network when filming untrusted targets");
   }

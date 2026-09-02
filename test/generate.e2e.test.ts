@@ -364,3 +364,66 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(llm.calls).toBe(0);
   }, 30_000);
 });
+
+describe("preflight status handling", () => {
+  /** serves /s/<code> with that status (and a tiny html body) */
+  let statusServer: { url: string; close: () => Promise<void> };
+
+  beforeAll(async () => {
+    const { createServer } = await import("node:http");
+    const srv = createServer((req, res) => {
+      const code = Number(/^\/s\/(\d{3})/.exec(req.url ?? "")?.[1] ?? 200);
+      res.writeHead(code, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!doctype html><html><body><h1>status page</h1></body></html>");
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const { port } = srv.address() as { port: number };
+    statusServer = {
+      url: `http://127.0.0.1:${port}`,
+      close: () => new Promise((r) => srv.close(() => r())),
+    };
+  });
+
+  afterAll(async () => {
+    await statusServer.close();
+  });
+
+  function tryGenerate(url: string, extra: { skipPreflight?: boolean } = {}) {
+    const logs: string[] = [];
+    const llm = new ScriptedLlm(() => []);
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-preflight-"));
+    dirs.push(outDir);
+    const run = generate({
+      llm, url, outDir, allowPrivateNetwork: true, vision: false,
+      log: (m) => logs.push(m), ...extra,
+    });
+    return { run, logs, llm };
+  }
+
+  it("404, 410, and 5xx roots are fatal before any LLM call", async () => {
+    for (const code of [404, 410, 500, 503]) {
+      const { run, llm } = tryGenerate(`${statusServer.url}/s/${code}`);
+      await expect(run).rejects.toThrow(new RegExp(`responded ${code}`));
+      expect(llm.calls).toBe(0);
+    }
+  }, 60_000);
+
+  it("401/403 warn and CONTINUE — an auth wall at the root must not block filming your own app", async () => {
+    for (const code of [401, 403]) {
+      const { run, logs } = tryGenerate(`${statusServer.url}/s/${code}`);
+      // getting PAST preflight means the run dies later, in analyze, when the
+      // deliberately-empty scripted LLM runs out — not on a preflight error
+      await expect(run).rejects.toThrow(/scripted LLM exhausted/);
+      const all = logs.join("\n");
+      expect(all).toMatch(new RegExp(`preflight warning: .*responded ${code}`));
+    }
+  }, 120_000);
+
+  it("--skip-preflight bypasses the reachability probe entirely (escape hatch)", async () => {
+    // a 500 root would be fatal — with the override the run proceeds to the
+    // crawl and dies in analyze instead, proving the probe never gated it
+    const { run, logs } = tryGenerate(`${statusServer.url}/s/500`, { skipPreflight: true });
+    await expect(run).rejects.toThrow(/scripted LLM exhausted/);
+    expect(logs.join("\n")).toContain("--skip-preflight");
+  }, 120_000);
+});

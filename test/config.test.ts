@@ -66,6 +66,43 @@ describe("provider resolution", () => {
     expect(process.env.SUPERCUT_MODEL).toBe("original");
   });
 
+  it("custom provider refuses to fall back to a provider-scoped key (H3)", () => {
+    // a leftover DeepSeek key must never be sent as a bearer token to an
+    // arbitrary custom base URL — this used to resolve silently
+    expect(() =>
+      resolved({
+        SUPERCUT_PROVIDER: "custom",
+        DEEPSEEK_API_KEY: "leftover-deepseek-key",
+        SUPERCUT_LLM_BASE_URL: "https://gateway.example/v1",
+        SUPERCUT_MODEL: "some-model",
+      }),
+    ).toThrow(/SUPERCUT_API_KEY is required.*never sent to a custom endpoint/s);
+    expect(() =>
+      resolved({
+        SUPERCUT_PROVIDER: "custom",
+        OPENROUTER_API_KEY: "leftover-or-key",
+        SUPERCUT_LLM_BASE_URL: "https://gateway.example/v1",
+        SUPERCUT_MODEL: "some-model",
+      }),
+    ).toThrow(/SUPERCUT_API_KEY is required/);
+  });
+
+  it("summary names the env var that supplied the credential", () => {
+    const ds = resolved({ DEEPSEEK_API_KEY: "deepseek-key" });
+    expect(ds.keySource).toBe("DEEPSEEK_API_KEY");
+    expect(ds.summary).toContain("key from DEEPSEEK_API_KEY");
+
+    const custom = resolved({
+      SUPERCUT_PROVIDER: "custom",
+      SUPERCUT_API_KEY: "custom-key",
+      DEEPSEEK_API_KEY: "leftover", // present but must NOT be used
+      SUPERCUT_LLM_BASE_URL: "https://gateway.example/v1",
+      SUPERCUT_MODEL: "local-model",
+    });
+    expect(custom.keySource).toBe("SUPERCUT_API_KEY");
+    expect(custom.summary).toContain("key from SUPERCUT_API_KEY");
+  });
+
   it("requires an explicit model for custom OpenAI-compatible endpoints", () => {
     expect(() =>
       resolved({

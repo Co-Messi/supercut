@@ -156,6 +156,50 @@ describe("record E2E on fixture app", () => {
     expect(Date.now() - t0).toBeLessThan(60_000); // fail-fast, not timeout-wait
   }, 90_000);
 
+  it("render surfaces an ffmpeg mux failure (undecodable music) as a real error (M5)", async () => {
+    // a tiny but VALID take: two real 1x1 PNGs, short timeline (below the
+    // health gate's judgeable floor). The encode succeeds; the mux is handed a
+    // "music" file that exists but is not audio, so ffmpeg exits non-zero at
+    // the very last step — that must reject, not hang or succeed silently.
+    const takeDir = mkdtempSync(join(tmpdir(), "supercut-badmux-"));
+    dirs.push(takeDir);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const framesDir = join(takeDir, "frames");
+    const { mkdirSync: mkdir } = await import("node:fs");
+    mkdir(framesDir, { recursive: true });
+    writeFileSync(join(framesDir, "000000.png"), png);
+    writeFileSync(join(framesDir, "000001.png"), png);
+    writeFileSync(
+      join(takeDir, "events.json"),
+      JSON.stringify({
+        version: 0,
+        t_source_unified: true,
+        viewport: { width: 1920, height: 1080, dpr: 2 },
+        fps: 60,
+        events: [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 300, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(takeDir, "frames-index.json"),
+      JSON.stringify([
+        { file: "frames/000000.png", t_source: 0 },
+        { file: "frames/000001.png", t_source: 500 },
+      ]),
+    );
+    const notAudio = join(takeDir, "not-audio.mp3");
+    writeFileSync(notAudio, "this is not an audio file");
+
+    await expect(
+      renderTake({ takeDir, outFile: join(takeDir, "final.mp4"), music: notAudio }),
+    ).rejects.toThrow(/ffmpeg/i);
+  }, 120_000);
+
   it("refuses a private-network recipe when the guard is engaged (H5)", async () => {
     const out = mkdtempSync(join(tmpdir(), "supercut-guard-"));
     dirs.push(out);

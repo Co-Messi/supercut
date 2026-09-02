@@ -84,3 +84,15 @@ describe("extractAppRoutes", () => {
     rmSync(empty, { recursive: true, force: true });
   });
 });
+
+describe("walk budget (M11)", () => {
+  it("stops enumerating at maxFiles instead of walking a monorepo unbounded", () => {
+    // the fixture tree holds well over 3 files; a budget of 3 must bound the
+    // enumeration (and therefore the routes derived from it)
+    const routes = extractAppRoutes(root, { maxFiles: 3 });
+    expect(routes.length).toBeLessThanOrEqual(3);
+    // and the default budget still finds everything the other tests rely on
+    const full = extractAppRoutes(root);
+    expect(full.length).toBeGreaterThan(routes.length);
+  });
+});

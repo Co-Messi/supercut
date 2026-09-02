@@ -258,14 +258,20 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   // every LLM call in the run goes through the budget guard (analyze, script,
   // and vision QC all receive this wrapper) — no stage can spend past the cap
   const llm = new BudgetedLlmClient(opts.llm, budget);
-  // spend summary: provider-reported when available, the budget guard's local
-  // estimate otherwise — "unavailable" only when nothing was called at all
+  // spend summary. The budget is ENFORCED against meteredTokens (provider-
+  // reported where available, locally estimated where not), so that is the
+  // headline number; on a mixed-reporting provider a diverging provider total
+  // is shown alongside instead of silently replacing the enforced one —
+  // "unavailable" only when nothing was called at all.
   const usageLine = (): string => {
+    const metered = llm.meteredTokens;
     const reported = llm.tokensUsed;
-    if (reported !== undefined) return `~${reported} tokens (${llm.breakdown()})`;
-    return llm.meteredTokens > 0
-      ? `~${llm.meteredTokens} tokens (locally estimated — provider reported no usage; ${llm.breakdown()})`
-      : "unavailable";
+    if (metered <= 0) return reported !== undefined ? `~${reported} tokens (${llm.breakdown()})` : "unavailable";
+    if (reported === undefined) {
+      return `~${metered} tokens (locally estimated — provider reported no usage; ${llm.breakdown()})`;
+    }
+    if (reported === metered) return `~${reported} tokens (${llm.breakdown()})`;
+    return `~${metered} tokens metered against the budget (provider reported ${reported}; ${llm.breakdown()})`;
   };
   mkdirSync(opts.outDir, { recursive: true });
 

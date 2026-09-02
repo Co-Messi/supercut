@@ -144,10 +144,17 @@ export type OpenRouterConfig = OpenAICompatibleConfig;
 /** Thrown when a run's cumulative token spend hits the hard budget. */
 export class TokenBudgetExceededError extends Error {}
 
-/** local estimation constants: ~4 chars/token for text, a flat per-image floor
- *  (a 1024-wide jpeg bills on the order of a thousand tokens on vision APIs) */
+/** local estimation constants: ~4 chars/token for text, plus a flat per-image
+ *  charge. The image constant is a CEILING, not a mean — it feeds the
+ *  pre-send refusal, so it must round UP to the most expensive plausible
+ *  provider for a 1920x1080 frame: OpenAI high-detail scales to 1365x768 →
+ *  6 tiles → 6×170+85 ≈ 1105; Anthropic bills ≈ (w×h)/750 after scaling to
+ *  1568 on the long edge ≈ 1840; Gemini differs again. 2000 covers all of
+ *  them with margin and still leaves the 300k default budget plenty of room
+ *  for a 12-image QC pass (~24k). Sized to the mean instead, the check waves
+ *  through the exact overshoot it exists to refuse. */
 const CHARS_PER_TOKEN = 4;
-const IMAGE_TOKEN_ESTIMATE = 1_100;
+const IMAGE_TOKEN_ESTIMATE = 2_000;
 
 /** Rough local token estimate for a call's prompt side. Used to (a) meter
  *  providers that never report usage, and (b) refuse a call whose own size

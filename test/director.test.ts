@@ -644,7 +644,7 @@ describe("LLM token budget guard", () => {
     let sent = 0;
     const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };
     const llm = new BudgetedLlmClient(noUsage, 3000);
-    // 4 images ≈ 4×1100 estimated tokens > 3000 budget: the pre-call size
+    // 4 images ≈ 4×2000 estimated tokens > 3000 budget: the pre-call size
     // check must refuse it — the old running-total-only check let one vision
     // call overshoot an almost-spent budget arbitrarily
     const images = Array.from({ length: 4 }, () => ({
@@ -654,6 +654,19 @@ describe("LLM token budget guard", () => {
       llm.chat({ system: "s", user: [{ type: "text", text: "judge these" }, ...images] }),
     ).rejects.toThrow(/estimated at ~\d+ more prompt tokens/);
     expect(sent).toBe(0); // never reached the provider
+  });
+
+  it("the per-image estimate is a cross-provider ceiling, not a mean", async () => {
+    const { estimateTokens } = await import("../src/director/llm.js");
+    // a 1920x1080 frame bills ~1105 on OpenAI high-detail but ~1840 on
+    // Anthropic ((w×h)/750 after the 1568 long-edge scale). The estimate
+    // feeds a pre-send REFUSAL, so it must round up to the most expensive
+    // plausible provider — an estimate sized to the cheapest one waves
+    // through the exact overshoot it exists to refuse.
+    const oneImage = estimateTokens({
+      system: "", user: [{ type: "image", dataUrl: "data:image/jpeg;base64,AAAA" }],
+    });
+    expect(oneImage).toBeGreaterThanOrEqual(1840);
   });
 });
 

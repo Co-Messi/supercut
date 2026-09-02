@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
-import { assertSafeNavigationUrl, createRequestGate, resolveAndPinHost } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
 
 const VIEWPORT = { width: 1920, height: 1080 };
 const DPR = 2;
@@ -533,6 +533,12 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         if (!(await gate.allows(route.request().url()))) return route.abort();
         return route.continue();
       });
+      // WebSocket upgrades bypass ctx.route — gate them separately
+      if (!(await gateWebSockets(page.context(), gate))) {
+        console.error(
+          "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+        );
+      }
     }
     if (captureFrames) await page.addInitScript(REPAINT_BEACON_SCRIPT);
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);

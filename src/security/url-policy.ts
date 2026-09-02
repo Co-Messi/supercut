@@ -36,7 +36,9 @@ function inCidr(ip: string, base: string, bits: number): boolean {
  * was vetted. Both the director's crawler and the capture executor apply it
  * to their browser launches (the executor pins every recipe host); both also
  * install a `createRequestGate` route handler so in-flight requests to
- * unpinned hosts are policy-checked before they leave the browser.
+ * unpinned hosts are policy-checked before they leave the browser, and a
+ * `gateWebSockets` handler for the WebSocket upgrades that route interception
+ * cannot see.
  */
 function normalizeHostToIPv4(h: string): string {
   // whole-host bare decimal integer, e.g. "2130706433" → "127.0.0.1"
@@ -155,7 +157,9 @@ export async function urlResolvesPrivate(raw: string): Promise<boolean> {
  * in-flight browser request — navigation, fetch/XHR, <img>, <script>, <link>,
  * form POST — may leave the browser under the private-network policy. The
  * navigation-only check this replaces left every subresource free to reach
- * private hosts while the CLI reported the guard as engaged.
+ * private hosts while the CLI reported the guard as engaged. (WebSocket
+ * upgrades never reach a route handler — gateWebSockets below covers those
+ * with the same gate.)
  *
  * DNS verdicts are cached per host for the lifetime of the gate, so enforcing
  * on every subresource doesn't become a per-request DNS storm. Fail-closed:
@@ -192,6 +196,51 @@ export function createRequestGate(opts: {
       return verdict;
     },
   };
+}
+
+/** structural slice of Playwright's WebSocketRoute — keeps this module free
+ *  of a hard playwright type dependency */
+interface WebSocketRouteLike {
+  url(): string;
+  connectToServer(): unknown;
+  close(options?: { code?: number; reason?: string }): Promise<void>;
+}
+
+/**
+ * Gate WebSocket connections under the same policy as createRequestGate.
+ * `ctx.route("**\/*")` cannot intercept WebSocket upgrades — Playwright's
+ * routeWebSocket (shipped in 1.48) can, so without this a page could open a
+ * socket to a private host with the guard nominally engaged. Allowed sockets
+ * are connected straight through (`connectToServer()` with no message
+ * handlers installed = Playwright forwards frames both ways untouched);
+ * blocked sockets are never connected and close with 1008 (policy violation).
+ *
+ * Feature-detected rather than assumed: the declared peer floor is ^1.53.0
+ * so routeWebSocket is always there in practice, but a caller running an
+ * unexpected build must WARN that WebSockets are ungated, not crash. Returns
+ * true when the gate was installed.
+ */
+export async function gateWebSockets(
+  target: {
+    routeWebSocket?: (
+      url: RegExp,
+      handler: (ws: WebSocketRouteLike) => unknown,
+    ) => Promise<void>;
+  },
+  gate: RequestGate,
+): Promise<boolean> {
+  if (typeof target.routeWebSocket !== "function") return false;
+  await target.routeWebSocket(/.*/, async (ws) => {
+    // the gate speaks http(s): map the ws scheme before asking it, so the
+    // same host verdict (and per-host DNS cache) covers both request kinds
+    const httpUrl = ws.url().replace(/^ws(s?):/i, (_m, s) => (s ? "https:" : "http:"));
+    if (await gate.allows(httpUrl)) {
+      ws.connectToServer();
+    } else {
+      await ws.close({ code: 1008, reason: "blocked by private-network policy" });
+    }
+  });
+  return true;
 }
 
 export interface PinnedHost {

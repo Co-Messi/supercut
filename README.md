@@ -140,8 +140,11 @@ node dist/cli/index.js generate --url https://untrusted.example --block-private-
 (`--allow-private-network` is a deprecated no-op kept for back-compat. With the guard on,
 both the crawler and the `record` stage resolve-and-pin their target hosts' DNS so a
 rebinding hostname can't swap in a private IP mid-run, and every in-flight browser
-request — navigations from clicked links and submits, `fetch`/XHR, images, scripts —
-is checked against the policy before it leaves the browser.)
+request — navigations from clicked links and submits, `fetch`/XHR, images, scripts,
+and WebSocket connections — is checked against the policy before it leaves the
+browser. WebSocket gating relies on Playwright's `routeWebSocket`; if you run supercut
+against a Playwright older than 1.48 it prints a warning and WebSocket connections are
+**not** policy-checked.)
 
 > ⚠️ **supercut drives and may MUTATE the target app** — it performs real clicks and
 > typing on whatever you point it at. Destructive controls (Delete, Remove, Pay, …)

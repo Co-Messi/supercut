@@ -5,7 +5,7 @@
  * construction: it fails the whitelist check and bounces back for retry.
  */
 import { chromium, type Browser, type Page } from "playwright";
-import { assertSafeNavigationUrl, createRequestGate, resolveAndPinHost } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 /**
@@ -459,6 +459,14 @@ export async function crawlApp(
       } catch { /* unparseable URL: the gate already vetted it when engaged */ }
       return route.continue();
     });
+    // WebSocket upgrades bypass ctx.route — gate them separately (guard ON
+    // only: with the guard off the gate allows everything anyway, so don't
+    // proxy sockets for nothing)
+    if (!allowPrivateNetwork && !(await gateWebSockets(ctx, gate))) {
+      console.error(
+        "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+      );
+    }
 
     // start page first, then source-derived routes (same-origin only), then
     // link-discovered pages. Seeds ensure functional panels get crawled even

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertSafeNavigationUrl,
   createRequestGate,
+  gateWebSockets,
   hostResolverRule,
   navigationRequestAllowed,
   resolveAndPinHost,
@@ -151,5 +152,70 @@ describe("request gate — every request type, not just navigations (H4)", () =>
       isPrivateHost: async () => { throw new Error("resolver down"); },
     });
     expect(await gate.allows("http://flaky.example/x.js")).toBe(false);
+  });
+});
+
+describe("WebSocket gate — upgrades bypass route interception", () => {
+  /** minimal fake of Playwright's routeWebSocket surface: capture the handler,
+   *  then feed it fake WebSocketRoute objects and observe connect vs close */
+  function fakeWsTarget() {
+    let handler: ((ws: {
+      url(): string;
+      connectToServer(): unknown;
+      close(o?: { code?: number; reason?: string }): Promise<void>;
+    }) => unknown) | undefined;
+    const target = {
+      routeWebSocket: async (_url: RegExp, h: typeof handler) => { handler = h; },
+    };
+    const drive = async (url: string) => {
+      const calls: { connected: boolean; closed?: { code?: number; reason?: string } } = { connected: false };
+      await handler!({
+        url: () => url,
+        connectToServer: () => { calls.connected = true; return {}; },
+        close: async (o?: { code?: number; reason?: string }) => { calls.closed = o ?? {}; },
+      });
+      return calls;
+    };
+    return { target, drive };
+  }
+
+  it("blocks ws:// to a private host (never connected, closed with 1008) and passes a public one through", async () => {
+    const asked: string[] = [];
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async (h) => { asked.push(h); return h === "127.0.0.1"; },
+    });
+    const { target, drive } = fakeWsTarget();
+    expect(await gateWebSockets(target, gate)).toBe(true);
+
+    const blocked = await drive("ws://127.0.0.1:8080/socket");
+    expect(blocked.connected).toBe(false);
+    expect(blocked.closed?.code).toBe(1008);
+
+    const allowed = await drive("wss://api.example/live");
+    expect(allowed.connected).toBe(true);
+    expect(allowed.closed).toBeUndefined();
+    // the ws/wss scheme was mapped to http(s) before the gate saw it: the gate
+    // rejects non-http(s) outright, so reaching isPrivateHost proves the map
+    expect(asked).toEqual(["127.0.0.1", "api.example"]);
+  });
+
+  it("shares the gate's per-host DNS cache with plain requests", async () => {
+    const lookups: string[] = [];
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async (h) => { lookups.push(h); return false; },
+    });
+    const { target, drive } = fakeWsTarget();
+    await gateWebSockets(target, gate);
+    await gate.allows("https://api.example/prefetch.js");
+    const ws = await drive("wss://api.example/live");
+    expect(ws.connected).toBe(true);
+    expect(lookups).toEqual(["api.example"]); // one lookup covered both
+  });
+
+  it("reports (not throws) when routeWebSocket is unavailable, so callers can warn", async () => {
+    const gate = createRequestGate({ allowPrivateNetwork: false });
+    expect(await gateWebSockets({}, gate)).toBe(false);
   });
 });

@@ -135,26 +135,23 @@ const SKEW_FAIL_MS = 250;
 /** legacy skew tolerance: pre-unified-clock takes stamped events on a
  *  separate wall accumulator; anything past this was already warn-worthy */
 const SKEW_LEGACY_WARN_MS = 500;
-/** takes below this average source fps predate the repaint beacon (change-
- *  driven capture) — their event clock was never unified with t_source, so
- *  large skew is expected and must stay renderable (events.json back-compat) */
-const LEGACY_FPS_CEILING = 20;
 
 /**
- * Clock-vs-frame skew gate. Unified-clock takes stamp events on the same
- * timeline as frame `t_source` (anchored to the first screencast frame), so
- * the event timeline running well past the footage means the take is broken —
- * fail. Legacy sparse takes keep the old non-fatal warning.
+ * Clock-vs-frame skew gate. Unified-clock takes (the events.json carries
+ * `t_source_unified: true` — the built-in recorder always writes it) stamp
+ * events on the same timeline as frame `t_source`, so the event timeline
+ * running well past the footage means the take is broken — fail. Legacy takes
+ * (no marker) never unified their clocks, so skew is expected there and only
+ * warns. Legacy-ness comes from the schema declaration, NEVER from inferring
+ * it off the capture's frame rate: a starved capture must not be able to
+ * reclassify itself as "legacy" and dodge the gate.
  */
 export function assessSkew(log: EventLog, frameIndex: FrameIndexEntry[]): SkewVerdict {
   const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
-  const firstFrameT = frameIndex.length ? frameIndex[0]!.t_source : 0;
   let maxEventT = 0;
   for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
   const skewMs = maxEventT - lastFrameT;
-  const spanMs = lastFrameT - firstFrameT;
-  const avgFps = spanMs > 0 ? ((frameIndex.length - 1) / spanMs) * 1000 : 0;
-  const legacy = avgFps < LEGACY_FPS_CEILING;
+  const legacy = log.t_source_unified !== true;
   let action: SkewVerdict["action"] = "ok";
   if (legacy) {
     if (skewMs > SKEW_LEGACY_WARN_MS) action = "warn";
@@ -162,6 +159,59 @@ export function assessSkew(log: EventLog, frameIndex: FrameIndexEntry[]): SkewVe
     action = "fail";
   }
   return { skewMs, maxEventT, lastFrameT, action };
+}
+
+export interface CaptureHealth {
+  frames: number;
+  /** take duration on the shared timeline: max(last frame t_source, last event t) */
+  durationMs: number;
+  /** duration × declared fps — what a healthy capture would have produced */
+  expectedFrames: number;
+  avgSourceFps: number;
+  action: "ok" | "fail";
+  reason?: string;
+}
+
+/** a take must carry at least this fraction of duration × fps in real frames.
+ *  Healthy beacon-era captures sit near 1.0; a slow CI disk may throttle the
+ *  ack-gated screencast well below 60fps, so the floor is deliberately
+ *  generous — a starved capture (beacon dead, page static) sits under 0.01. */
+const MIN_CAPTURE_RATIO = 0.2;
+/** short takes produce few frames legitimately (startup jitter dominates);
+ *  the ratio gate only engages once the take is long enough to judge */
+const MIN_JUDGEABLE_MS = 2_000;
+
+/**
+ * Deterministic capture-health gate: did the capture actually capture?
+ * Compares frames on disk against what the take's duration and declared fps
+ * demand. This is the check the skew gate can't do — a capture that starved
+ * (repaint beacon failed, page never committed frames) produces a "clean"
+ * event timeline over almost no footage, and rendering it yields a slideshow
+ * with a camera gliding over stills. That must be refused, not warned about.
+ */
+export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]): CaptureHealth {
+  const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
+  let maxEventT = 0;
+  for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
+  const durationMs = Math.max(lastFrameT, maxEventT);
+  const expectedFrames = Math.round((durationMs / 1000) * log.fps);
+  const avgSourceFps = durationMs > 0 ? (frameIndex.length / durationMs) * 1000 : 0;
+  const health: CaptureHealth = {
+    frames: frameIndex.length,
+    durationMs,
+    expectedFrames,
+    avgSourceFps,
+    action: "ok",
+  };
+  if (durationMs < MIN_JUDGEABLE_MS) return health;
+  if (frameIndex.length < expectedFrames * MIN_CAPTURE_RATIO) {
+    health.action = "fail";
+    health.reason =
+      `capture is sparse: ${frameIndex.length} frame(s) over ${(durationMs / 1000).toFixed(1)}s ` +
+      `(avg ${avgSourceFps.toFixed(1)} fps source; a healthy ${log.fps}fps capture would carry ` +
+      `~${expectedFrames}) — the video would be stills with a camera gliding over them`;
+  }
+  return health;
 }
 
 export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
@@ -175,6 +225,27 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
   const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+
+  // Capture-health gate: refuse a take whose footage can't carry its own
+  // timeline. Printed regardless of outcome so the one diagnostic that reveals
+  // a starved capture — average source fps — is always on the record.
+  {
+    const health = assessCaptureHealth(log, frameIndex);
+    console.error(
+      `[render] capture health: ${health.frames} frames over ${(health.durationMs / 1000).toFixed(1)}s ` +
+        `(avg ${health.avgSourceFps.toFixed(1)} fps source)`,
+    );
+    if (health.action === "fail") {
+      if (process.env.SUPERCUT_ALLOW_SPARSE === "1") {
+        console.error(`[render] WARNING: ${health.reason} (continuing: SUPERCUT_ALLOW_SPARSE=1)`);
+      } else {
+        throw new Error(
+          `render: ${health.reason}. Re-record the take; for a genuinely sparse take ` +
+            `(e.g. a pre-beacon recorder) set SUPERCUT_ALLOW_SPARSE=1 to render it anyway.`,
+        );
+      }
+    }
+  }
 
   const { spec: bgSpec, isImage: bgIsImage } = resolveBackgroundSpec(opts.background);
   // --music: resolved + validated here, before the plan and the browser — a

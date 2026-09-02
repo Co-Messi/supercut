@@ -77,7 +77,8 @@ async function main(): Promise<number> {
       }
       const res = await record({ recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"] });
       console.log(
-        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames, ` +
+        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames ` +
+          `(avg ${res.avgSourceFps.toFixed(1)} fps source), ` +
           `${res.eventLog.events.length} events` +
           (res.failedScenes.length ? `, FAILED scenes: ${res.failedScenes.join(", ")}` : ""),
       );

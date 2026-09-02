@@ -144,8 +144,11 @@ describe("record E2E on fixture app", () => {
       expect(idx[i]!.t_source).toBeGreaterThanOrEqual(idx[i - 1]!.t_source);
     }
 
-    // schema-valid event log with the expected interaction events
+    // schema-valid event log with the expected interaction events, declaring
+    // the unified clock (the render gates key off this marker, not off fps)
     const log = parseEventLog(JSON.parse(readFileSync(join(out1, "events.json"), "utf8")));
+    expect(log.t_source_unified).toBe(true);
+    expect(r1.avgSourceFps).toBeGreaterThanOrEqual(30); // healthy takes report their fps
     const types = log.events.map((e) => e.type);
     expect(types.filter((t) => t === "scene")).toHaveLength(2);
     expect(types).toContain("click");

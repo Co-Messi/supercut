@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { record, type RecordResult } from "../capture/index.js";
-import { renderTake, resolveMusicTrack } from "../render/index.js";
+import { assessCaptureHealth, renderTake, resolveMusicTrack } from "../render/index.js";
 import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { crawlApp, type PageDigest } from "./inventory.js";
@@ -275,10 +275,24 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     rmSync(takeDir, { recursive: true, force: true });
     log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
     result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
+    log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
     if (result.aborted) {
       throw new Error(
         `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
       );
+    }
+    // capture-health gate, BEFORE any QC spend: a starved capture (repaint
+    // beacon dead, page never committing frames) renders as a slideshow no
+    // amount of QC patching can save — fail here, not after vision tokens.
+    {
+      const frameIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
+      const health = assessCaptureHealth(result.eventLog, frameIndex);
+      if (health.action === "fail" && process.env.SUPERCUT_ALLOW_SPARSE !== "1") {
+        throw new Error(
+          `generate: ${health.reason}. The app may suspend rendering when headless, or the repaint ` +
+            `beacon failed to attach — try re-running; SUPERCUT_ALLOW_SPARSE=1 forces a render anyway.`,
+        );
+      }
     }
 
     log("④ qc: deterministic checks…");

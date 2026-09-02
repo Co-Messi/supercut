@@ -395,6 +395,16 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
   // Full Chromium: the stripped headless shell has no WebCodecs.
   const browser = await chromium.launch({ headless: true, channel: "chromium" });
+  // (review) the watchdog timeout and the fatal-poll loop below are REFERENCED
+  // timers: left running after the encode settles, they keep the event loop
+  // alive. The CLI exits via process.exitCode (never process.exit(), which can
+  // truncate piped stdout), so a surviving multi-minute watchdog made a
+  // successful `supercut render` print its result and then appear to hang
+  // until the timer fired. Track both here and stop them in the finally that
+  // already owns teardown, so every exit path — success, timeout, in-page
+  // FATAL, result-stream failure — leaves no timer behind.
+  let watchdog: NodeJS.Timeout | undefined;
+  let raceSettled = false;
   // B2 (review): outer try wraps the encode + mux so the temp raw file is
   // unlinked on EVERY exit path — render timeout, in-page FATAL, "no encoded
   // output", or an ffmpeg mux failure all flow through the finally below.
@@ -422,19 +432,29 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
       await Promise.race([
         resultReceived,
-        new Promise<never>((_, rej) =>
-          setTimeout(() => rej(new Error(`render timed out after ${timeoutMs}ms${fatal ? ` (${fatal})` : ""}`)), timeoutMs),
-        ),
+        new Promise<never>((_, rej) => {
+          watchdog = setTimeout(() => rej(new Error(`render timed out after ${timeoutMs}ms${fatal ? ` (${fatal})` : ""}`)), timeoutMs);
+        }),
         (async () => {
-          // poll for an in-page fatal so we fail fast instead of waiting out the timeout
+          // poll for an in-page fatal so we fail fast instead of waiting out
+          // the timeout. The sleep timer is unref'd and the loop watches
+          // raceSettled: when the race settles some OTHER way (watchdog fired,
+          // result stream errored) the loop must stop too, or its 500ms ticks
+          // keep the drained process alive forever on the failure path.
           for (;;) {
-            await new Promise((r) => setTimeout(r, 500));
+            await new Promise((r) => setTimeout(r, 500).unref());
+            if (raceSettled) return;
             if (fatal) throw new Error(fatal);
             if (resultReady) return;
           }
         })(),
       ]);
     } finally {
+      // stop the watchdog + poll loop FIRST (see the declaration above): the
+      // race has settled, and any timer that survives this block outlives the
+      // render and blocks natural process exit.
+      raceSettled = true;
+      clearTimeout(watchdog);
       // guard close: if browser.close() throws, server.close() must still run,
       // else the loopback render server leaks the port until process exit.
       await browser.close().catch(() => {});

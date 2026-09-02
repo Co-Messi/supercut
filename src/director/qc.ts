@@ -198,14 +198,28 @@ export interface AppliedVerdicts {
   recipe: Recipe;
   changed: boolean;
   cut: string[];
-  /** every scene was cut (directly or via cascade). `recipe` is returned
-   *  UNCHANGED in that case — an empty recipe must never escape — and the
-   *  caller decides what to do with the recorded take. Rendering an empty
-   *  video is wrong, but so is discarding a recorded, renderable artifact. */
-  allCut: boolean;
 }
 
-/** Apply verdicts within the frozen patch surface. Cutting cascades to dependents. */
+/**
+ * Thrown when the verdicts cut every scene (directly or via cascade). A typed
+ * throw instead of a flag on the return value: an earlier draft returned the
+ * ORIGINAL recipe with `changed: false` plus an `allCut` marker, which fails
+ * open for any caller that predates the marker — `if (!applied.changed)
+ * proceed to render` turns "cut everything" into "cut nothing" and renders
+ * the full uncut recipe. applyVerdicts is public API; its contract stays
+ * "a non-empty recipe or an exception". The caller that holds a recorded
+ * take catches THIS error specifically and preserves the artifacts (the take
+ * is renderable — refusing an empty video must not discard it).
+ */
+export class AllScenesCutError extends Error {
+  constructor(readonly cut: string[]) {
+    super(`QC cut every scene (${cut.join(", ")}) — refusing to produce an empty recipe`);
+    this.name = "AllScenesCutError";
+  }
+}
+
+/** Apply verdicts within the frozen patch surface. Cutting cascades to
+ *  dependents. Throws AllScenesCutError when nothing survives. */
 export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): AppliedVerdicts {
   const cutSet = new Set(verdicts.filter((v) => v.verdict === "cut").map((v) => v.scene));
   // dependency cascade
@@ -248,10 +262,6 @@ export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): Applied
       return out;
     });
 
-  if (scenes.length === 0) {
-    // flag it rather than throwing: the caller holds a recorded take that is
-    // still renderable, and only the caller can preserve it properly
-    return { recipe, changed: false, cut: [...cutSet], allCut: true };
-  }
-  return { recipe: { ...recipe, scenes }, changed, cut: [...cutSet], allCut: false };
+  if (scenes.length === 0) throw new AllScenesCutError([...cutSet]);
+  return { recipe: { ...recipe, scenes }, changed, cut: [...cutSet] };
 }

@@ -3,7 +3,7 @@ import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOpti
 import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
 import { pickMusic } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
-import { applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
+import { AllScenesCutError, applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
 import { analyzeApp, type AppAnalysis } from "../src/director/analyze.js";
 import type { PageDigest } from "../src/director/inventory.js";
 import type { RecordResult } from "../src/capture/executor.js";
@@ -681,22 +681,28 @@ describe("QC verdicts — frozen patch surface", () => {
     ]);
   });
 
-  it("cutting a parent cascades to dependents; a total cut is flagged, not thrown (M4)", () => {
-    // both scenes die → allCut is flagged and the input recipe comes back
-    // UNCHANGED, so the caller can preserve the recorded take instead of
-    // losing it to an exception after the full capture spend
-    const applied = applyVerdicts(twoSceneRecipe, [{ scene: "signup", verdict: "cut", reason: "broken" }]);
-    expect(applied.allCut).toBe(true);
-    expect(applied.cut.sort()).toEqual(["child", "signup"]);
-    expect(applied.recipe).toBe(twoSceneRecipe); // never an empty-scene recipe
-    expect(applied.changed).toBe(false);
+  it("cutting a parent cascades to dependents; a total cut throws a TYPED error (M4)", () => {
+    // both scenes die → applyVerdicts must THROW, never return. An earlier
+    // draft returned the original recipe with changed:false + an allCut flag,
+    // which fails open: any caller that predates the flag proceeds on
+    // `!applied.changed` and renders the full UNCUT recipe — QC's "cut
+    // everything" silently inverted into "cut nothing". The typed error
+    // carries the cut list so the orchestrator can preserve the take.
+    let thrown: unknown;
+    try {
+      applyVerdicts(twoSceneRecipe, [{ scene: "signup", verdict: "cut", reason: "broken" }]);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AllScenesCutError);
+    expect((thrown as AllScenesCutError).cut.sort()).toEqual(["child", "signup"]);
   });
 
-  it("a partial cut is not allCut", () => {
+  it("a partial cut returns the surviving scenes, no throw", () => {
     const applied = applyVerdicts(twoSceneRecipe, [{ scene: "child", verdict: "cut", reason: "broken" }]);
-    expect(applied.allCut).toBe(false);
     expect(applied.recipe.scenes.map((s) => s.name)).toEqual(["signup"]);
     expect(applied.changed).toBe(true);
+    expect(applied.cut).toEqual(["child"]);
   });
 
   it("applies hold_ms patches without touching actions or order", () => {

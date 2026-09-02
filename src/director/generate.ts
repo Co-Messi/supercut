@@ -20,7 +20,7 @@ import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { crawlApp, type PageDigest } from "./inventory.js";
 import { BudgetedLlmClient, type LlmClient } from "./llm.js";
-import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
+import { AllScenesCutError, applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
 import { assertSafeNavigationUrl, urlResolvesPrivate } from "../security/url-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
@@ -372,8 +372,11 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     }
     for (const v of notOk) log(`   ${v.verdict.toUpperCase()} "${v.scene}": ${v.reason}`);
 
-    const applied = applyVerdicts(recipe, verdicts);
-    if (applied.allCut) {
+    let applied: ReturnType<typeof applyVerdicts>;
+    try {
+      applied = applyVerdicts(recipe, verdicts);
+    } catch (err) {
+      if (!(err instanceof AllScenesCutError)) throw err;
       // Refusing to render an empty video is right; discarding a recorded,
       // renderable take after the full crawl + both LLM stages + a complete
       // capture is not. Preserve every artifact, then fail with the way out.
@@ -383,7 +386,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
         JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
       );
       throw new Error(
-        `QC cut every scene (${applied.cut.join(", ")}) — refusing to render an empty video. ` +
+        `QC cut every scene (${err.cut.join(", ")}) — refusing to render an empty video. ` +
           `The recorded take is preserved at ${takeDir} (recipe.json and director-report.json ` +
           `sit beside it); inspect the verdicts, and render it anyway with: ` +
           `supercut render --take ${takeDir}`,

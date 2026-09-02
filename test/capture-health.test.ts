@@ -73,6 +73,34 @@ describe("assessCaptureHealth", () => {
     const log = makeLog([{ t: 9_800, type: "scene", name: "s1", priority: 1 }], { fps: 30 });
     expect(assessCaptureHealth(log, idx).action).toBe("ok");
   });
+
+  it("counts cursor_path point timestamps: a take whose only late timeline is cursor points cannot dodge the gate", () => {
+    // third-party take: every event `t` sits near 0 (a cursor_path container
+    // is stamped t=0), but the points run to 30s — and buildRenderPlan sizes
+    // the output off that final point. Duration must follow the points, or
+    // this reads as a sub-2s take, skips the ratio gate, and renders 30s of
+    // held stills.
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 0, type: "cursor_path", points: [[0, 100, 100], [15_000, 400, 300], [30_000, 800, 600]] },
+    ]);
+    const health = assessCaptureHealth(log, frames(3, 100));
+    expect(health.durationMs).toBe(30_000);
+    expect(health.expectedFrames).toBe(1800);
+    expect(health.action).toBe("fail");
+    expect(health.reason).toMatch(/sparse/i);
+  });
+
+  it("cursor points aligned with real footage do not fire the gate (built-in recorder shape)", () => {
+    // the built-in recorder's cursor points end where the frames end — the
+    // fix must not reclassify healthy takes
+    const idx = frames(600, 1000 / 60); // 10s at 60fps
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 0, type: "cursor_path", points: [[0, 100, 100], [9_900, 500, 400]] },
+    ]);
+    expect(assessCaptureHealth(log, idx).action).toBe("ok");
+  });
 });
 
 describe("renderTake capture-health gate", () => {

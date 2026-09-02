@@ -202,7 +202,19 @@ const MIN_JUDGEABLE_MS = 2_000;
 export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]): CaptureHealth {
   const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
   let maxEventT = 0;
-  for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
+  for (const e of log.events) {
+    maxEventT = Math.max(maxEventT, e.t);
+    // (review) a cursor_path container is stamped t=0 while its POINTS carry
+    // the real timeline — and buildRenderPlan extends the output to the final
+    // point. Judging duration off container `t` alone let a take whose only
+    // late timestamps are cursor points read as "under two seconds", skip the
+    // ratio gate, and render exactly the held-stills slideshow this gate
+    // exists to refuse. Points are schema-validated monotonic, so the last
+    // one is the segment's max.
+    if (e.type === "cursor_path" && e.points.length > 0) {
+      maxEventT = Math.max(maxEventT, e.points[e.points.length - 1]![0]);
+    }
+  }
   const durationMs = Math.max(lastFrameT, maxEventT);
   const expectedFrames = Math.round((durationMs / 1000) * log.fps);
   const avgSourceFps = durationMs > 0 ? (frameIndex.length / durationMs) * 1000 : 0;

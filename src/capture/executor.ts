@@ -159,13 +159,14 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
-  /** Allow localhost/RFC1918/link-local navigation. Defaults to TRUE — filming
-   *  your own local dev app is the primary use case, and this matches both the
-   *  CLI (--block-private-network opts the guard in) and generate()'s default;
-   *  the library and the CLI previously disagreed about the default, which an
-   *  embedder would have inherited. Pass false for untrusted targets: the
-   *  recipe's URLs are then policy-checked, the target hosts are DNS
-   *  resolve-and-pinned, and every in-flight request is gated. */
+  /** Allow localhost/RFC1918/link-local navigation. Defaults to FALSE: the
+   *  library fails closed and callers opt in. Every caller in this repo
+   *  (generate(), the CLI) passes the value explicitly — the CLI allows by
+   *  default and --block-private-network opts the guard in — so the default
+   *  exists only for external embedders, and for them the safe direction is
+   *  closed (matching crawlApp()'s default). With the guard on, the recipe's
+   *  URLs are policy-checked, the target hosts are DNS resolve-and-pinned,
+   *  and every in-flight request is gated. */
   allowPrivateNetwork?: boolean;
 }
 
@@ -221,7 +222,7 @@ async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork:
 export async function record(opts: RecordOptions): Promise<RecordResult> {
   const { recipe, outDir } = opts;
   const captureFrames = opts.captureFrames ?? true;
-  const allowPrivateNetwork = opts.allowPrivateNetwork ?? true;
+  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   const rng = makeRng(opts.seed ?? 1);
 
   await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork);

@@ -208,6 +208,17 @@ describe("record E2E on fixture app", () => {
     ).rejects.toThrow(/private network/i);
   }, 30_000);
 
+  it("record() fails closed when allowPrivateNetwork is omitted (library default)", async () => {
+    // the CLI and generate() both pass the value explicitly; the default only
+    // ever reaches external embedders, and for them it must be the guard ON —
+    // matching crawlApp(), which has always defaulted closed
+    const out = mkdtempSync(join(tmpdir(), "supercut-default-"));
+    dirs.push(out);
+    await expect(
+      record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false }),
+    ).rejects.toThrow(/private network/i);
+  }, 30_000);
+
   it("produces valid events.json + frames, twice, with identical scheduled timelines", async () => {
     const recipe = demoRecipe(app.url);
 
@@ -377,11 +388,8 @@ describe("record E2E on fixture app", () => {
 
     const out = mkdtempSync(join(tmpdir(), "supercut-fail-"));
     dirs.push(out);
-    // captureFrames off: this test is about failure policy, not pixels.
-    // allowPrivateNetwork deliberately OMITTED: the library default is
-    // allow (matching generate() and the CLI) — this run against a
-    // localhost fixture locks that default in place.
-    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false });
+    // captureFrames off: this test is about failure policy, not pixels
+    const res = await record({ recipe, outDir: out, seed: 1, captureFrames: false, allowPrivateNetwork: true });
 
     expect(res.failedScenes).toContain("broken");
     expect(res.failedScenes).toContain("child-of-broken");

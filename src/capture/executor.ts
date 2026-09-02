@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
-import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, createRequestGate, resolveAndPinHost } from "../security/url-policy.js";
 
 const VIEWPORT = { width: 1920, height: 1080 };
 const DPR = 2;
@@ -159,7 +159,13 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
-  /** allow localhost/RFC1918/cloud-metadata navigation; off by default for safety */
+  /** Allow localhost/RFC1918/link-local navigation. Defaults to TRUE — filming
+   *  your own local dev app is the primary use case, and this matches both the
+   *  CLI (--block-private-network opts the guard in) and generate()'s default;
+   *  the library and the CLI previously disagreed about the default, which an
+   *  embedder would have inherited. Pass false for untrusted targets: the
+   *  recipe's URLs are then policy-checked, the target hosts are DNS
+   *  resolve-and-pinned, and every in-flight request is gated. */
   allowPrivateNetwork?: boolean;
 }
 
@@ -215,16 +221,40 @@ async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork:
 export async function record(opts: RecordOptions): Promise<RecordResult> {
   const { recipe, outDir } = opts;
   const captureFrames = opts.captureFrames ?? true;
-  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
+  const allowPrivateNetwork = opts.allowPrivateNetwork ?? true;
   const rng = makeRng(opts.seed ?? 1);
 
   await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork);
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
+  // guard ON: resolve-and-pin every recipe host so the browser connects to the
+  // exact IPs the policy vetted — a DNS re-resolve mid-run can't swap in a
+  // private one (same defense the crawler applies).
+  const launchArgs: string[] = [];
+  if (!allowPrivateNetwork) {
+    const rules: string[] = [];
+    const seenHosts = new Set<string>();
+    const recipeUrls: string[] = [];
+    for (const scene of recipe.scenes) {
+      recipeUrls.push(scene.entry.url);
+      for (const action of [...scene.entry.prelude, ...scene.actions]) {
+        if (action.kind === "goto" && action.url) recipeUrls.push(action.url);
+      }
+    }
+    for (const u of recipeUrls) {
+      const host = new URL(u).hostname;
+      if (seenHosts.has(host)) continue;
+      seenHosts.add(host);
+      const pinned = await resolveAndPinHost(u, { allowPrivateNetwork });
+      if (pinned) rules.push(pinned.hostResolverRule);
+    }
+    if (rules.length > 0) launchArgs.push(`--host-resolver-rules=${rules.join(",")}`);
+  }
+
   // launch is the only setup outside try/finally; everything else (newPage,
   // CDP session) lives inside so a setup failure can't leak the browser
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, args: launchArgs });
 
   const events: KnownEvent[] = [];
   const pathPoints: [number, number, number][] = []; // [t, x, y] global cursor track
@@ -490,6 +520,19 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   try {
     page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DPR });
+    // guard ON: gate EVERY in-flight request (clicked links, Enter submits,
+    // redirects, subresources) — assertSafeNavigationUrl only covers entry/goto
+    // URLs known from the recipe, but a click on an a[href] or a submit
+    // navigates with no pre-check. Installed ONLY when the guard is engaged:
+    // route interception funnels every request through Node, and the default
+    // local-app path must not pay that tax during a 60fps capture.
+    if (!allowPrivateNetwork) {
+      const gate = createRequestGate({ allowPrivateNetwork });
+      await page.context().route("**/*", async (route) => {
+        if (!(await gate.allows(route.request().url()))) return route.abort();
+        return route.continue();
+      });
+    }
     if (captureFrames) await page.addInitScript(REPAINT_BEACON_SCRIPT);
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);

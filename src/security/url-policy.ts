@@ -33,10 +33,10 @@ function inCidr(ip: string, base: string, bits: number): boolean {
  * connect time — resolve-time TOCTOU): when the guard is ON, `resolveAndPinHost`
  * below resolves once, validates the addresses, and yields a Chromium
  * `--host-resolver-rules` mapping so the browser connects to the exact IP that
- * was vetted. The director's crawler applies it; the capture executor's
- * browser launch (src/capture/executor.ts) does not yet accept launch args, so
- * record-stage navigations are still validated as strings + post-redirect
- * final URLs only — rebinding remains possible there.
+ * was vetted. Both the director's crawler and the capture executor apply it
+ * to their browser launches (the executor pins every recipe host); both also
+ * install a `createRequestGate` route handler so in-flight requests to
+ * unpinned hosts are policy-checked before they leave the browser.
  */
 function normalizeHostToIPv4(h: string): string {
   // whole-host bare decimal integer, e.g. "2130706433" → "127.0.0.1"

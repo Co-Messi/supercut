@@ -130,9 +130,10 @@ node dist/cli/index.js generate --url https://untrusted.example --block-private-
 ```
 
 (`--allow-private-network` is a deprecated no-op kept for back-compat. With the guard on,
-the crawler also resolves-and-pins the target host's DNS so a rebinding hostname can't
-swap in a private IP mid-run; the `record` stage's browser does not pin yet, so its
-navigations are validated as URLs only.)
+both the crawler and the `record` stage resolve-and-pin their target hosts' DNS so a
+rebinding hostname can't swap in a private IP mid-run, and every in-flight browser
+request — navigations from clicked links and submits, `fetch`/XHR, images, scripts —
+is checked against the policy before it leaves the browser.)
 
 > ⚠️ **supercut drives and may MUTATE the target app** — it performs real clicks and
 > typing on whatever you point it at. Destructive controls (Delete, Remove, Pay, …)

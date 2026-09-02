@@ -53,4 +53,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: npm test -- --run test/record.e2e.test.ts test/generate.e2e.test.ts
+      # filter by the *.e2e.test.ts naming convention (not an explicit file
+      # list) so a new e2e file cannot be silently skipped here — the same
+      # rule the unit job above already follows in the other direction
+      - run: npm test -- --run e2e.test

@@ -262,17 +262,19 @@ ${UNTRUSTED_END}`;
 
 /**
  * Pull the first JSON object out of a model response — tolerates ```json
- * fences and prose around the object, balanced-brace scan.
+ * fences and prose around the object, balanced-brace scan. Fences are NOT
+ * stripped: a leading fence sits before the first `{` and a trailing one after
+ * the balanced close, so the scan never sees them — while a global strip
+ * silently deleted a literal triple-backtick INSIDE a JSON string value.
  */
 export function extractJson(text: string): unknown {
-  const cleaned = text.replace(/```(?:json)?/g, "");
-  const start = cleaned.indexOf("{");
+  const start = text.indexOf("{");
   if (start < 0) throw new Error("no JSON object found in LLM response");
   let depth = 0;
   let inString = false;
   let escape = false;
-  for (let i = start; i < cleaned.length; i++) {
-    const ch = cleaned[i];
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
     if (escape) { escape = false; continue; }
     if (ch === "\\") { escape = true; continue; }
     if (ch === '"') inString = !inString;
@@ -280,7 +282,7 @@ export function extractJson(text: string): unknown {
     if (ch === "{") depth++;
     if (ch === "}") {
       depth--;
-      if (depth === 0) return JSON.parse(cleaned.slice(start, i + 1));
+      if (depth === 0) return JSON.parse(text.slice(start, i + 1));
     }
   }
   throw new Error("unterminated JSON object in LLM response");

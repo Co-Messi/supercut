@@ -805,3 +805,21 @@ describe("prompt-injection hardening (H6)", () => {
     expect(lines.some((l) => l.includes("hold 600ms"))).toBe(true);
   });
 });
+
+describe("low-tier audit fixes", () => {
+  it("cssIdent escapes ids that would break the #id selector position", async () => {
+    const { cssIdent } = await import("../src/director/inventory.js");
+    expect(cssIdent("cta")).toBe("cta");
+    expect(cssIdent("cta-primary_2")).toBe("cta-primary_2");
+    expect(cssIdent("a.b:c")).toBe("a\\.b\\:c");
+    expect(cssIdent("row,1")).toBe("row\\,1");
+    expect(cssIdent("1st")).toBe("\\31 st"); // leading digit → code-point escape
+  });
+
+  it("extractJson preserves a literal triple-backtick inside a JSON string value", () => {
+    const raw = '{"snippet":"use ```json fences``` here"}';
+    expect(extractJson(raw)).toEqual({ snippet: "use ```json fences``` here" });
+    // fenced responses still parse (fence sits outside the balanced braces)
+    expect(extractJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
+  });
+});

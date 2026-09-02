@@ -34,7 +34,7 @@ describe("buildRenderPlan", () => {
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
 
-  it("maps output frames to source frames by nearest-hold", () => {
+  it("maps output frames to source frames by floor-hold (previous frame held)", () => {
     const plan = buildRenderPlan(clickLog, frameIndex);
     // output frame at t=0 → source 0; t=100ms (frame 6) → source with t_source ≤ 100 → idx 3 (99ms)
     expect(plan.sourceByFrame[0]).toBe(0);
@@ -358,6 +358,15 @@ describe("plan input bounds (PR #1 review)", () => {
   it("throws on malformed frame-index entries", () => {
     const bad = [{ file: "", t_source: 0 }];
     expect(() => buildRenderPlan(clickLog, bad)).toThrow(/malformed/);
+  });
+
+  it("constrains frame files to the frames/ namespace", () => {
+    // the host page fetches /take/<file> — a hand-edited index must not be
+    // able to point the fetch at other take artifacts
+    for (const file of ["render-plan.json", "../events.json", "frames/../events.json", "frames/a/b.png"]) {
+      expect(() => buildRenderPlan(clickLog, [{ file, t_source: 0 }])).toThrow(/frames\//);
+    }
+    expect(() => buildRenderPlan(clickLog, [{ file: "frames/000000.png", t_source: 0 }])).not.toThrow();
   });
 
   it("accepts a clamped index (capture clamps jittered stamps to t_source 0)", () => {

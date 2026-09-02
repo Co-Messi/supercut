@@ -19,9 +19,11 @@ import type { RecordResult } from "../capture/executor.js";
 
 const exec = promisify(execFile);
 
-// a zoom patch flows into the event log's focus_bbox, whose schema demands
-// nonneg x/y and positive w/h (mirrors recipe.ts) — a hallucinated degenerate
-// bbox must die HERE, not at render time after all the capture spend
+// a zoom patch flows into the event log's focus_bbox. The event-log schema
+// itself only demands positive w/h (x/y may be negative there; plan.ts clamps
+// the focus point to the viewport) — but the QC patch surface is stricter and
+// mirrors the recipe's zoom rule (nonneg x/y too), so a hallucinated
+// degenerate bbox dies HERE, not at render time after all the capture spend
 const finiteNum = z.number().finite();
 
 export const sceneVerdict = z.object({

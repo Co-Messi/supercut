@@ -116,7 +116,9 @@ async function preflight(url: string, allowPrivateNetwork: boolean): Promise<voi
       }
       break;
     }
-    if (status >= 500) throw new Error(`app at ${url} responded ${status}`);
+    // 4xx is as doomed as 5xx for filming: a 404/401 start page films as an
+    // error screen, and the failure used to surface only deep in the crawl
+    if (status >= 400) throw new Error(`app at ${url} responded ${status} — point --url at a page that loads`);
     if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
   } finally {
     clearTimeout(timer);

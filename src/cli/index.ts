@@ -11,7 +11,7 @@ import { doctor } from "./doctor.js";
  *   supercut doctor                                                    check deps
  */
 
-const HELP = `supercut — institutional-grade 60s launch videos from your real app
+const HELP = `supercut — an AI director that films your real app into a cinematic 60s launch video
 
 Usage:
   supercut generate --url <running app URL> [--repo <path>] [--music <track|file|off>]
@@ -20,6 +20,17 @@ Usage:
   supercut doctor
 
 Run any command with --help for details.`;
+
+/** parseArgs throws a raw Node error on a bare positional (`supercut generate
+ *  https://app`) unless allowPositionals is set — accept them in the parse,
+ *  then reject with the usage line and a hint instead of a stack trace. */
+function rejectPositionals(positionals: string[], usage: string): boolean {
+  if (positionals.length === 0) return false;
+  const p0 = positionals[0]!;
+  const hint = /^https?:\/\//.test(p0) ? ` (did you mean --url ${p0}?)` : "";
+  console.error(`unexpected argument "${p0}"${hint}\n${usage}`);
+  return true;
+}
 
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
@@ -36,8 +47,9 @@ async function main(): Promise<number> {
         "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]";
       // help is a real parsed boolean, not a substring scan — so a --help that
       // is actually the VALUE of another flag can't hijack the command.
-      const { values } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           recipe: { type: "string" },
           out: { type: "string" },
@@ -51,6 +63,7 @@ async function main(): Promise<number> {
         console.log(recordUsage);
         return 0;
       }
+      if (rejectPositionals(positionals, recordUsage)) return 1;
       if (!values.recipe) {
         console.error(recordUsage);
         return 1;
@@ -90,8 +103,9 @@ async function main(): Promise<number> {
         "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
         "[--music <bundled track|audio file|off>]";
       // help is a real parsed boolean (see record) — no substring scan
-      const { values } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           take: { type: "string" },
           out: { type: "string" },
@@ -104,6 +118,7 @@ async function main(): Promise<number> {
         console.log(renderUsage);
         return 0;
       }
+      if (rejectPositionals(positionals, renderUsage)) return 1;
       if (!values.take) {
         console.error(renderUsage);
         return 1;
@@ -132,8 +147,9 @@ async function main(): Promise<number> {
         "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] " +
         "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
       // help is a real parsed boolean (see record) — no substring scan
-      const { values } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           url: { type: "string" },
           repo: { type: "string" },
@@ -169,6 +185,7 @@ async function main(): Promise<number> {
         console.log(generateUsage);
         return 0;
       }
+      if (rejectPositionals(positionals, generateUsage)) return 1;
       if (!values.url) {
         console.error(generateUsage);
         return 1;
@@ -267,10 +284,15 @@ async function main(): Promise<number> {
   }
 }
 
+// process.exitCode, not process.exit(): an explicit exit() can truncate
+// buffered stdout when the CLI's output is piped — set the code and let the
+// process drain and exit on its own (all servers/browsers are closed by now)
 main().then(
-  (code) => process.exit(code),
+  (code) => {
+    process.exitCode = code;
+  },
   (err) => {
     console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

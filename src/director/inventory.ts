@@ -65,6 +65,26 @@ export interface PageDigest {
 
 const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
 
+/**
+ * Escape a raw id for the CSS IDENT position (`#id`). cssEscape above is
+ * enough inside quoted attribute selectors, but an id used as `#id` is an
+ * identifier: a dot, colon, comma, brackets, or a leading digit produce a
+ * wrong or invalid selector, and the `.catch(() => 0)` count probe then
+ * swallows the failure — the element vanishes from the inventory silently.
+ * Minimal CSS.escape: leading digit as a code-point escape, backslash-escape
+ * everything outside [-_a-zA-Z0-9\u00A0-\uFFFF].
+ */
+export const cssIdent = (s: string): string => {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (i === 0 && ch >= "0" && ch <= "9") out += `\\3${ch} `;
+    else if (/[-_a-zA-Z0-9\u00A0-\uFFFF]/.test(ch)) out += ch;
+    else out += `\\${ch}`;
+  }
+  return out;
+};
+
 /** ceiling on distinct :nth-match entries per duplicated base selector — six
  *  rows are plenty to tell a switch-between-items story */
 const MAX_SIBLINGS_PER_BASE = 6;
@@ -149,7 +169,7 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
     const id = await el.getAttribute("id").catch(() => null);
     const role = await el.getAttribute("role").catch(() => null);
     let selector: string;
-    if (id) selector = `#${id}`;
+    if (id) selector = `#${cssIdent(id)}`;
     else if (tag === "main") selector = "main";
     else if (role) selector = `[role="${cssEscape(role)}"]`;
     else continue; // no stable handle — skip
@@ -315,7 +335,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // verification) and gives same-testid siblings a shared base that the
     // :nth-match pass below splits into distinct per-row entries.
     let selector: string;
-    if (id) selector = `#${id}`;
+    if (id) selector = `#${cssIdent(id)}`;
     else if (testid) selector = `[data-testid="${cssEscape(testid)}"]`;
     else if (aria) selector = `[aria-label="${cssEscape(aria)}"]`;
     else if (placeholder) selector = `[placeholder="${cssEscape(placeholder)}"]`;

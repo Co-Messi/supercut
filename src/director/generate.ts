@@ -226,6 +226,15 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   // every LLM call in the run goes through the budget guard (analyze, script,
   // and vision QC all receive this wrapper) — no stage can spend past the cap
   const llm = new BudgetedLlmClient(opts.llm, budget);
+  // spend summary: provider-reported when available, the budget guard's local
+  // estimate otherwise — "unavailable" only when nothing was called at all
+  const usageLine = (): string => {
+    const reported = llm.tokensUsed;
+    if (reported !== undefined) return `~${reported} tokens (${llm.breakdown()})`;
+    return llm.meteredTokens > 0
+      ? `~${llm.meteredTokens} tokens (locally estimated — provider reported no usage; ${llm.breakdown()})`
+      : "unavailable";
+  };
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
@@ -310,8 +319,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
         2,
       ),
     );
-    const tokensDry = llm.tokensUsed;
-    log(`LLM usage: ${tokensDry !== undefined ? `~${tokensDry} tokens (${llm.breakdown()})` : "unavailable"}`);
+    log(`LLM usage: ${usageLine()}`);
     log(`dry run: recipe written to ${join(opts.outDir, "recipe.json")} — nothing was filmed`);
     return { outFile: "", recipe: firstRecipe, analysis, retakes: 0, verdictLog: [] };
   }
@@ -403,10 +411,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     join(opts.outDir, "director-report.json"),
     JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
   );
-  {
-    const tokens = llm.tokensUsed;
-    log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens (${llm.breakdown()})` : "unavailable"}`);
-  }
+  log(`LLM usage: ${usageLine()}`);
 
   log("⑤ render…");
   const outFile = join(opts.outDir, "final.mp4");

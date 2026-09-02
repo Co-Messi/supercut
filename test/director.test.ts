@@ -624,12 +624,36 @@ describe("LLM token budget guard", () => {
     await expect(ask(llm)).resolves.toBe("ok");
   });
 
-  it("never blocks a provider that reports no usage (nothing to meter)", async () => {
+  it("meters a usage-less provider by local estimate instead of leaving it unmeterable (M8)", async () => {
+    // the advertised --max-tokens default used to be inert for providers that
+    // omit usage — exactly the custom-endpoint case. Now the local estimate
+    // (~4 chars/token) accrues and eventually trips the budget.
     const noUsage: LlmClient = { label: "no-usage", chat: async () => "ok" };
-    const llm = new BudgetedLlmClient(noUsage, 100);
-    for (let i = 0; i < 5; i++) await expect(ask(llm)).resolves.toBe("ok");
-    expect(llm.tokensUsed).toBeUndefined();
-    expect(llm.breakdown()).toBe("no usage reported");
+    const llm = new BudgetedLlmClient(noUsage, 1000);
+    const bigText = "x".repeat(1600); // ≈400 prompt tokens per call
+    const bigAsk = () => llm.chat({ system: "s", user: [{ type: "text", text: bigText }] });
+    await expect(bigAsk()).resolves.toBe("ok"); // ~400 metered
+    await expect(bigAsk()).resolves.toBe("ok"); // ~800 metered
+    await expect(bigAsk()).rejects.toBeInstanceOf(TokenBudgetExceededError); // 800 + 400 > 1000
+    expect(llm.tokensUsed).toBeUndefined(); // provider-reported stays honest
+    expect(llm.meteredTokens).toBeGreaterThanOrEqual(800);
+    expect(llm.breakdown()).toMatch(/analyze \d+/);
+  });
+
+  it("refuses a single oversized call BEFORE sending it — image payloads count (M8)", async () => {
+    let sent = 0;
+    const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };
+    const llm = new BudgetedLlmClient(noUsage, 3000);
+    // 4 images ≈ 4×1100 estimated tokens > 3000 budget: the pre-call size
+    // check must refuse it — the old running-total-only check let one vision
+    // call overshoot an almost-spent budget arbitrarily
+    const images = Array.from({ length: 4 }, () => ({
+      type: "image" as const, dataUrl: "data:image/jpeg;base64,AAAA",
+    }));
+    await expect(
+      llm.chat({ system: "s", user: [{ type: "text", text: "judge these" }, ...images] }),
+    ).rejects.toThrow(/estimated at ~\d+ more prompt tokens/);
+    expect(sent).toBe(0); // never reached the provider
   });
 });
 

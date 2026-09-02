@@ -143,19 +143,44 @@ export type OpenRouterConfig = OpenAICompatibleConfig;
 /** Thrown when a run's cumulative token spend hits the hard budget. */
 export class TokenBudgetExceededError extends Error {}
 
+/** local estimation constants: ~4 chars/token for text, a flat per-image floor
+ *  (a 1024-wide jpeg bills on the order of a thousand tokens on vision APIs) */
+const CHARS_PER_TOKEN = 4;
+const IMAGE_TOKEN_ESTIMATE = 1_100;
+
+/** Rough local token estimate for a call's prompt side. Used to (a) meter
+ *  providers that never report usage, and (b) refuse a call whose own size
+ *  would blow past the remaining budget BEFORE it is sent — a pre-call check
+ *  of the running total alone lets one 12-image vision call overshoot an
+ *  almost-spent budget arbitrarily. */
+export function estimateTokens(opts: ChatOptions): number {
+  let chars = opts.system.length;
+  let images = 0;
+  for (const p of opts.user) {
+    if (p.type === "text") chars += p.text.length;
+    else images++;
+  }
+  return Math.ceil(chars / CHARS_PER_TOKEN) + images * IMAGE_TOKEN_ESTIMATE;
+}
+
 /**
- * Hard cost ceiling for a whole run. Wraps any LlmClient and refuses the NEXT
- * call once the inner client's provider-reported cumulative tokens reach the
- * budget — so a misbehaving model/retry loop is bounded instead of burning
- * unbounded spend. Enforcement relies on provider usage reporting: a provider
- * that never reports usage (tokensUsed stays undefined) can't be metered.
- * budget <= 0 disables the cap (accounting still runs).
+ * Hard cost ceiling for a whole run. Wraps any LlmClient and refuses a call
+ * when the metered total has reached the budget OR when the call's own
+ * estimated prompt size would carry the total past it — so a misbehaving
+ * model/retry loop is bounded instead of burning unbounded spend.
+ * Metering prefers provider-reported usage; a provider that reports none is
+ * metered by the local estimate instead of being unmeterable (the advertised
+ * --max-tokens default used to be inert exactly for custom endpoints, the
+ * case most likely to omit usage). budget <= 0 disables the cap
+ * (accounting still runs).
  */
 export class BudgetedLlmClient implements LlmClient {
   readonly label: string;
   /** current pipeline stage, set by the orchestrator — names spend in errors */
   stage = "analyze";
   private readonly spentByStage = new Map<string, number>();
+  /** provider-reported spend where available, local estimate where not */
+  private metered = 0;
 
   constructor(
     private readonly inner: LlmClient,
@@ -164,8 +189,15 @@ export class BudgetedLlmClient implements LlmClient {
     this.label = inner.label;
   }
 
+  /** provider-reported total only (undefined when the provider reports none) */
   get tokensUsed(): number | undefined {
     return this.inner.tokensUsed;
+  }
+
+  /** total the budget is enforced against: provider-reported spend where
+   *  available, local estimates where not */
+  get meteredTokens(): number {
+    return this.metered;
   }
 
   /** per-stage spend, e.g. "analyze 12000, script 8000" */
@@ -175,17 +207,23 @@ export class BudgetedLlmClient implements LlmClient {
   }
 
   async chat(opts: ChatOptions): Promise<string> {
-    const used = this.inner.tokensUsed ?? 0;
-    if (this.budget > 0 && used >= this.budget) {
+    const promptEstimate = estimateTokens(opts);
+    if (this.budget > 0 && (this.metered >= this.budget || this.metered + promptEstimate > this.budget)) {
+      const sizeNote =
+        this.metered < this.budget ? ` (next call estimated at ~${promptEstimate} more prompt tokens)` : "";
       throw new TokenBudgetExceededError(
-        `LLM token budget exhausted: ${used} of ${this.budget} tokens spent (${this.breakdown()}) — ` +
+        `LLM token budget exhausted: ${this.metered} of ${this.budget} tokens spent (${this.breakdown()})${sizeNote} — ` +
           `raise --max-tokens / SUPERCUT_MAX_TOKENS, or set it to 0/off to disable the cap`,
       );
     }
     const before = this.inner.tokensUsed ?? 0;
     const out = await this.inner.chat(opts);
-    const delta = (this.inner.tokensUsed ?? 0) - before;
-    if (delta > 0) this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + delta);
+    const providerDelta = (this.inner.tokensUsed ?? 0) - before;
+    // prefer the provider's number for this call; fall back to the local
+    // estimate (prompt + completion) so a usage-less provider is still metered
+    const delta = providerDelta > 0 ? providerDelta : promptEstimate + Math.ceil(out.length / CHARS_PER_TOKEN);
+    this.metered += delta;
+    this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + delta);
     return out;
   }
 }

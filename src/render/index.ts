@@ -15,7 +15,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
@@ -24,6 +24,15 @@ import { buildRenderPlan, type FrameIndexEntry } from "./plan.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 
 const exec = promisify(execFile);
+
+/** ffmpeg mux ceiling: video is stream-copied and audio is ≤60s + loudnorm, so
+ *  a healthy mux finishes in seconds — a pathological input (stalling demuxer,
+ *  zero-duration loop) must not hang the CLI at the last step of the pipeline */
+const MUX_TIMEOUT_MS = 120_000;
+/** headroom over the 1MB execFile default: unusually chatty ffmpeg stderr
+ *  (loop + loudnorm diagnostics) must not kill a successful encode with
+ *  ENOBUFS. Mirrors the buffer qc.ts already sets on its ffmpeg calls. */
+const MUX_MAX_BUFFER = 16 * 1024 * 1024;
 
 export interface RenderOptions {
   takeDir: string;
@@ -430,9 +439,11 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     if (musicPath) {
       muxArgs.push(
         // loop a short track under a long video; -t clamps the OUTPUT to the
-        // exact video length so audio can never extend the cut
+        // exact video length so audio can never extend the cut.
+        // resolve(): a relative path starting with "-" (a file literally named
+        // "-loglevel") would otherwise be parsed by ffmpeg as an option.
         "-stream_loop", "-1",
-        "-i", musicPath,
+        "-i", resolve(musicPath),
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-af", musicFilterChain(muxDurationS),
@@ -443,8 +454,8 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     } else {
       muxArgs.push("-c", "copy");
     }
-    muxArgs.push("-movflags", "+faststart", outFile);
-    await exec("ffmpeg", muxArgs);
+    muxArgs.push("-movflags", "+faststart", resolve(outFile));
+    await exec("ffmpeg", muxArgs, { timeout: MUX_TIMEOUT_MS, maxBuffer: MUX_MAX_BUFFER });
     if (musicPath) console.error(`[render] music: ${musicPath}`);
 
     // trust, then verify: the encoder is ASKED for CBR at ENCODER_BITRATE, but

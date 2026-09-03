@@ -237,6 +237,21 @@ export function formatRecipePreview(recipe: Recipe): string[] {
   return lines;
 }
 
+/**
+ * The follow-up command a --dry-run tells the user to copy. Flags that set
+ * record's SECURITY posture must survive the copy-paste: `record` allows
+ * private networks by default, so a recipe generated under
+ * --block-private-network must carry the flag into the suggested line — the
+ * user who asked for the guard and then runs exactly what the tool printed
+ * must not silently lose it.
+ */
+export function dryRunFollowUpCommand(outDir: string, opts: { blockPrivateNetwork?: boolean } = {}): string {
+  return (
+    `supercut record --recipe ${join(outDir, "recipe.json")}` +
+    (opts.blockPrivateNetwork ? " --block-private-network" : "")
+  );
+}
+
 function repoNotes(repoPath: string): string | undefined {
   for (const f of ["README.md", "readme.md", "package.json"]) {
     const p = join(repoPath, f);

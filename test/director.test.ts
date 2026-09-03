@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
 import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
-import { pickMusic } from "../src/director/generate.js";
+import { dryRunFollowUpCommand, pickMusic } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { AllScenesCutError, applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
 import { analyzeApp, type AppAnalysis } from "../src/director/analyze.js";
@@ -882,5 +882,22 @@ describe("low-tier audit fixes", () => {
     expect(extractJson(raw)).toEqual({ snippet: "use ```json fences``` here" });
     // fenced responses still parse (fence sits outside the balanced braces)
     expect(extractJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
+  });
+});
+
+describe("dry-run follow-up command", () => {
+  it("propagates --block-private-network into the suggested record line", () => {
+    // record allows private networks by default: a user who generated under
+    // the guard and copies the printed command must keep the protection
+    expect(dryRunFollowUpCommand("out/generate", { blockPrivateNetwork: true })).toBe(
+      "supercut record --recipe out/generate/recipe.json --block-private-network",
+    );
+  });
+
+  it("stays minimal when the guard was not requested", () => {
+    expect(dryRunFollowUpCommand("out/generate")).toBe("supercut record --recipe out/generate/recipe.json");
+    expect(dryRunFollowUpCommand("custom/dir", { blockPrivateNetwork: false })).toBe(
+      "supercut record --recipe custom/dir/recipe.json",
+    );
   });
 });

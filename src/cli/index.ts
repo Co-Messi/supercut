@@ -201,7 +201,7 @@ async function main(): Promise<number> {
         );
       }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
-      const { generate } = await import("../director/generate.js");
+      const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
       // L2: a missing .env is fine (reason "not found"), but a file that EXISTED
       // and failed to PARSE is a real error — surface it even without verbose so
@@ -271,7 +271,13 @@ async function main(): Promise<number> {
         ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
       });
       if (values["dry-run"]) {
-        console.log(`\nsupercut: dry run complete — review the recipe, then film it with:\n  supercut record --recipe ${(values.out ?? "out/generate")}/recipe.json`);
+        // the suggested command must preserve the security posture of THIS
+        // run: record defaults to allowing private networks, so a dry run
+        // made under --block-private-network has to say so in the follow-up
+        const followUp = dryRunFollowUpCommand(values.out ?? "out/generate", {
+          blockPrivateNetwork: !!values["block-private-network"],
+        });
+        console.log(`\nsupercut: dry run complete — review the recipe, then film it with:\n  ${followUp}`);
         return 0;
       }
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);

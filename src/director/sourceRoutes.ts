@@ -39,27 +39,67 @@ const SKIP_DIRS = new Set([
 const PAGE_FILE = /^(page|index)\.(tsx|jsx|ts|js)$/;
 const PAGES_FILE = /\.(tsx|jsx)$/;
 
-function walk(dir: string, out: string[] = [], depth = 0): string[] {
-  if (depth > 10) return out;
+/** file-count budget for the repo walk: --repo ./ on a large monorepo must not
+ *  become an unbounded directory enumeration on the hot path of a command the
+ *  user expects to start in seconds. 10k files is far beyond any app tree that
+ *  actually carries page components; past it we stop and say so. */
+const MAX_WALK_FILES = 10_000;
+/** absolute ceiling on directory entries VISITED. With --app, files outside
+ *  the selected app cost nothing against the file budget (see extractAppRoutes)
+ *  — this second bound keeps the traversal itself finite on a pathological
+ *  repo instead of re-opening the unbounded-enumeration hole the file budget
+ *  closed. */
+const MAX_WALK_VISITED = 200_000;
+
+interface WalkState {
+  files: string[];
+  visited: number;
+  truncated: boolean;
+}
+
+function walk(
+  dir: string,
+  state: WalkState,
+  depth: number,
+  maxFiles: number,
+  include: (file: string) => boolean,
+): void {
+  if (depth > 10) return;
   let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true }) as Dirent[];
   } catch {
-    return out;
+    return;
   }
+  // deterministic traversal: readdir order is filesystem-dependent (hashed on
+  // ext4, near-alphabetical on APFS), so WHICH routes survived the budgets
+  // used to vary by machine. Sorted entries make the walk reproducible.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of entries) {
+    if (state.files.length >= maxFiles || state.visited >= MAX_WALK_VISITED) {
+      state.truncated = true;
+      return;
+    }
+    state.visited++;
     // skip symlinks entirely (never recurse into or read them): a `--repo`
     // symlink to ~/.ssh, /etc, etc. would otherwise be walked and its file
     // contents shipped into the LLM prompt via extractSummary.
     if (e.isSymbolicLink()) continue;
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
-      walk(join(dir, e.name), out, depth + 1);
+      walk(join(dir, e.name), state, depth + 1, maxFiles, include);
+      if (state.truncated) return;
     } else {
-      out.push(join(dir, e.name));
+      const file = join(dir, e.name);
+      // (review) the include predicate (--app scoping) runs INSIDE the walk:
+      // a file outside the selected app is neither kept nor charged against
+      // the file budget. Filtering after the walk let a monorepo's OTHER apps
+      // exhaust the budget before the requested app was ever reached — so
+      // --app web returned no routes while the truncation warning recommended
+      // --app as the remedy.
+      if (include(file)) state.files.push(file);
     }
   }
-  return out;
 }
 
 /** app-router: path segments after `app/` → route. `(group)` stripped, route
@@ -124,6 +164,8 @@ export interface ExtractOptions {
   /** scope to one app in a monorepo: only files whose path includes this segment */
   appName?: string;
   maxRoutes?: number;
+  /** walk budget (files enumerated before filtering); default 10000 */
+  maxFiles?: number;
 }
 
 /**
@@ -132,8 +174,22 @@ export interface ExtractOptions {
  */
 export function extractAppRoutes(repoPath: string, opts: ExtractOptions = {}): SourceRoute[] {
   const maxRoutes = opts.maxRoutes ?? 30;
-  const files = walk(repoPath).filter((f) => {
-    if (opts.appName && !f.split(sep).includes(opts.appName)) return false;
+  const maxFiles = opts.maxFiles ?? MAX_WALK_FILES;
+  // --app scoping happens inside the walk (see walk) so files from other apps
+  // never spend the budget the requested app needs.
+  const appName = opts.appName;
+  const include = appName ? (f: string) => f.split(sep).includes(appName) : () => true;
+  const state: WalkState = { files: [], visited: 0, truncated: false };
+  walk(repoPath, state, 0, maxFiles, include);
+  if (state.truncated) {
+    console.error(
+      `[source] --repo walk stopped early (kept ${state.files.length} file(s)` +
+        (appName ? ` matching --app ${appName}` : "") +
+        `, visited ${state.visited} entries) — routes beyond that are not seen. ` +
+        `Point --repo at the app directory to scope the scan.`,
+    );
+  }
+  const files = state.files.filter((f) => {
     const base = f.split(sep).pop()!;
     const inPages = f.split(sep).includes("pages");
     return PAGE_FILE.test(base) || (inPages && PAGES_FILE.test(base));

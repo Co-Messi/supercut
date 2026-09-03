@@ -84,3 +84,37 @@ describe("extractAppRoutes", () => {
     rmSync(empty, { recursive: true, force: true });
   });
 });
+
+describe("walk budget (M11)", () => {
+  it("stops enumerating at maxFiles instead of walking a monorepo unbounded", () => {
+    // the fixture tree holds well over 3 files; a budget of 3 must bound the
+    // enumeration (and therefore the routes derived from it)
+    const routes = extractAppRoutes(root, { maxFiles: 3 });
+    expect(routes.length).toBeLessThanOrEqual(3);
+    // and the default budget still finds everything the other tests rely on
+    const full = extractAppRoutes(root);
+    expect(full.length).toBeGreaterThan(routes.length);
+  });
+
+  it("--app scoping is applied before the budget is spent, not after", () => {
+    // monorepo where a sibling app holds 3x the file budget and sorts BEFORE
+    // the requested app (traversal is sorted, so it is enumerated first).
+    // Budget spent repo-wide used to exhaust on the junk app and return no
+    // routes for --app web — while the truncation warning recommended --app
+    // as the remedy. Scoped-in-walk, junk files cost nothing.
+    const mono = mkdtempSync(join(tmpdir(), "supercut-mono-"));
+    const junk = join(mono, "apps", "aaa-junk");
+    mkdirSync(junk, { recursive: true });
+    for (let i = 0; i < 30; i++) writeFileSync(join(junk, `f${String(i).padStart(2, "0")}.ts`), "// junk");
+    const webApp = join(mono, "apps", "web", "app");
+    mkdirSync(webApp, { recursive: true });
+    writeFileSync(join(webApp, "page.tsx"), `export default () => <h1>Web home</h1>;`);
+    try {
+      const routes = extractAppRoutes(mono, { appName: "web", maxFiles: 10 });
+      expect(routes.map((r) => r.route)).toEqual(["/"]);
+      expect(routes[0]!.file).toContain(join("apps", "web"));
+    } finally {
+      rmSync(mono, { recursive: true, force: true });
+    }
+  });
+});

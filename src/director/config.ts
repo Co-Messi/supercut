@@ -31,6 +31,9 @@ export interface ResolvedProvider {
   model: string;
   baseUrl: string;
   vision: boolean;
+  /** which env var supplied the credential (e.g. "DEEPSEEK_API_KEY") —
+   *  surfaced in the summary so a user always sees which key is being sent */
+  keySource: string;
   summary: string;
 }
 
@@ -82,10 +85,29 @@ export function resolveProvider(
     );
   }
 
-  const apiKey =
-    provider === "deepseek" ? env.DEEPSEEK_API_KEY || env.SUPERCUT_API_KEY || "" :
-    provider === "openrouter" ? env.OPENROUTER_API_KEY || env.SUPERCUT_API_KEY || "" :
-    env.SUPERCUT_API_KEY || env.DEEPSEEK_API_KEY || env.OPENROUTER_API_KEY || "";
+  let apiKey: string;
+  let keySource: string;
+  if (provider === "deepseek") {
+    apiKey = env.DEEPSEEK_API_KEY || env.SUPERCUT_API_KEY || "";
+    keySource = env.DEEPSEEK_API_KEY ? "DEEPSEEK_API_KEY" : "SUPERCUT_API_KEY";
+  } else if (provider === "openrouter") {
+    apiKey = env.OPENROUTER_API_KEY || env.SUPERCUT_API_KEY || "";
+    keySource = env.OPENROUTER_API_KEY ? "OPENROUTER_API_KEY" : "SUPERCUT_API_KEY";
+  } else {
+    // custom endpoints take SUPERCUT_API_KEY ONLY. A provider-scoped key must
+    // never fall through here: SUPERCUT_LLM_BASE_URL is an arbitrary
+    // user-supplied host, and a leftover DEEPSEEK_API_KEY in a .env or shell
+    // profile would be sent to it as a bearer token the user never intended
+    // to share. Refuse loudly instead of silently borrowing a credential.
+    apiKey = env.SUPERCUT_API_KEY || "";
+    keySource = "SUPERCUT_API_KEY";
+    if (!apiKey && (env.DEEPSEEK_API_KEY || env.OPENROUTER_API_KEY)) {
+      throw new Error(
+        "SUPERCUT_API_KEY is required when SUPERCUT_PROVIDER=custom — provider-scoped keys " +
+          "(DEEPSEEK_API_KEY / OPENROUTER_API_KEY) are never sent to a custom endpoint",
+      );
+    }
+  }
   if (!apiKey) throw new Error(`no API key found for provider ${provider}`);
 
   const baseUrl = overrides.baseUrl ?? env.SUPERCUT_LLM_BASE_URL ?? (
@@ -119,7 +141,8 @@ export function resolveProvider(
     model,
     baseUrl,
     vision,
-    summary: `${client.label} @ ${baseUrl} · vision ${vision ? "on" : "off (DOM-only)"}`,
+    keySource,
+    summary: `${client.label} @ ${baseUrl} · key from ${keySource} · vision ${vision ? "on" : "off (DOM-only)"}`,
   };
 }
 

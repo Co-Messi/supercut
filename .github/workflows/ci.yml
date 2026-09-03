@@ -24,10 +24,22 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # the package's distribution shape is part of the contract: tsc must
+      # actually EMIT, the bin entry must exist and resolve, and the tarball
+      # must stay lean (assets are allowlisted in package.json "files")
+      - run: npm run build
+      - name: verify bin entry resolves
+        run: |
+          test -f dist/cli/index.js
+          node dist/cli/index.js --help > /dev/null
+      - run: npm pack --dry-run
       # whole unit suite (no explicit file list, so new test files aren't
       # silently skipped); the e2e files run in the browser-e2e job below,
       # which has chromium + ffmpeg installed.
       - run: npx vitest run --exclude '**/*.e2e.test.ts'
+      # deliberately STRICT (no --omit=dev): dev-tree advisories must stay
+      # visible. This is green because the lockfile is clean, not because the
+      # check was weakened — keep it that way.
       - run: npm audit --audit-level=moderate
 
   browser-e2e:
@@ -41,4 +53,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: npm test -- --run test/record.e2e.test.ts test/generate.e2e.test.ts
+      # filter by the *.e2e.test.ts naming convention (not an explicit file
+      # list) so a new e2e file cannot be silently skipped here — the same
+      # rule the unit job above already follows in the other direction
+      - run: npm test -- --run e2e.test

@@ -15,7 +15,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
@@ -25,6 +25,15 @@ import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 
 const exec = promisify(execFile);
 
+/** ffmpeg mux ceiling: video is stream-copied and audio is ≤60s + loudnorm, so
+ *  a healthy mux finishes in seconds — a pathological input (stalling demuxer,
+ *  zero-duration loop) must not hang the CLI at the last step of the pipeline */
+const MUX_TIMEOUT_MS = 120_000;
+/** headroom over the 1MB execFile default: unusually chatty ffmpeg stderr
+ *  (loop + loudnorm diagnostics) must not kill a successful encode with
+ *  ENOBUFS. Mirrors the buffer qc.ts already sets on its ffmpeg calls. */
+const MUX_MAX_BUFFER = 16 * 1024 * 1024;
+
 export interface RenderOptions {
   takeDir: string;
   outFile: string;
@@ -33,7 +42,8 @@ export interface RenderOptions {
   /** bundled track name (assets/music/), a path to an audio file, or
    *  "off"/absent for a silent video (the default) */
   music?: string;
-  /** ms; encoding 60s of footage is expected to finish well within 5 min */
+  /** ms; when unset, sized from the plan's frame count (≥5 min floor) so a
+   *  long take's legitimately slow encode isn't killed by a flat ceiling */
   timeoutMs?: number;
 }
 
@@ -135,26 +145,23 @@ const SKEW_FAIL_MS = 250;
 /** legacy skew tolerance: pre-unified-clock takes stamped events on a
  *  separate wall accumulator; anything past this was already warn-worthy */
 const SKEW_LEGACY_WARN_MS = 500;
-/** takes below this average source fps predate the repaint beacon (change-
- *  driven capture) — their event clock was never unified with t_source, so
- *  large skew is expected and must stay renderable (events.json back-compat) */
-const LEGACY_FPS_CEILING = 20;
 
 /**
- * Clock-vs-frame skew gate. Unified-clock takes stamp events on the same
- * timeline as frame `t_source` (anchored to the first screencast frame), so
- * the event timeline running well past the footage means the take is broken —
- * fail. Legacy sparse takes keep the old non-fatal warning.
+ * Clock-vs-frame skew gate. Unified-clock takes (the events.json carries
+ * `t_source_unified: true` — the built-in recorder always writes it) stamp
+ * events on the same timeline as frame `t_source`, so the event timeline
+ * running well past the footage means the take is broken — fail. Legacy takes
+ * (no marker) never unified their clocks, so skew is expected there and only
+ * warns. Legacy-ness comes from the schema declaration, NEVER from inferring
+ * it off the capture's frame rate: a starved capture must not be able to
+ * reclassify itself as "legacy" and dodge the gate.
  */
 export function assessSkew(log: EventLog, frameIndex: FrameIndexEntry[]): SkewVerdict {
   const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
-  const firstFrameT = frameIndex.length ? frameIndex[0]!.t_source : 0;
   let maxEventT = 0;
   for (const e of log.events) maxEventT = Math.max(maxEventT, e.t);
   const skewMs = maxEventT - lastFrameT;
-  const spanMs = lastFrameT - firstFrameT;
-  const avgFps = spanMs > 0 ? ((frameIndex.length - 1) / spanMs) * 1000 : 0;
-  const legacy = avgFps < LEGACY_FPS_CEILING;
+  const legacy = log.t_source_unified !== true;
   let action: SkewVerdict["action"] = "ok";
   if (legacy) {
     if (skewMs > SKEW_LEGACY_WARN_MS) action = "warn";
@@ -164,9 +171,73 @@ export function assessSkew(log: EventLog, frameIndex: FrameIndexEntry[]): SkewVe
   return { skewMs, maxEventT, lastFrameT, action };
 }
 
+export interface CaptureHealth {
+  frames: number;
+  /** take duration on the shared timeline: max(last frame t_source, last event t) */
+  durationMs: number;
+  /** duration × declared fps — what a healthy capture would have produced */
+  expectedFrames: number;
+  avgSourceFps: number;
+  action: "ok" | "fail";
+  reason?: string;
+}
+
+/** a take must carry at least this fraction of duration × fps in real frames.
+ *  Healthy beacon-era captures sit near 1.0; a slow CI disk may throttle the
+ *  ack-gated screencast well below 60fps, so the floor is deliberately
+ *  generous — a starved capture (beacon dead, page static) sits under 0.01. */
+const MIN_CAPTURE_RATIO = 0.2;
+/** short takes produce few frames legitimately (startup jitter dominates);
+ *  the ratio gate only engages once the take is long enough to judge */
+const MIN_JUDGEABLE_MS = 2_000;
+
+/**
+ * Deterministic capture-health gate: did the capture actually capture?
+ * Compares frames on disk against what the take's duration and declared fps
+ * demand. This is the check the skew gate can't do — a capture that starved
+ * (repaint beacon failed, page never committed frames) produces a "clean"
+ * event timeline over almost no footage, and rendering it yields a slideshow
+ * with a camera gliding over stills. That must be refused, not warned about.
+ */
+export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]): CaptureHealth {
+  const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
+  let maxEventT = 0;
+  for (const e of log.events) {
+    maxEventT = Math.max(maxEventT, e.t);
+    // (review) a cursor_path container is stamped t=0 while its POINTS carry
+    // the real timeline — and buildRenderPlan extends the output to the final
+    // point. Judging duration off container `t` alone let a take whose only
+    // late timestamps are cursor points read as "under two seconds", skip the
+    // ratio gate, and render exactly the held-stills slideshow this gate
+    // exists to refuse. Points are schema-validated monotonic, so the last
+    // one is the segment's max.
+    if (e.type === "cursor_path" && e.points.length > 0) {
+      maxEventT = Math.max(maxEventT, e.points[e.points.length - 1]![0]);
+    }
+  }
+  const durationMs = Math.max(lastFrameT, maxEventT);
+  const expectedFrames = Math.round((durationMs / 1000) * log.fps);
+  const avgSourceFps = durationMs > 0 ? (frameIndex.length / durationMs) * 1000 : 0;
+  const health: CaptureHealth = {
+    frames: frameIndex.length,
+    durationMs,
+    expectedFrames,
+    avgSourceFps,
+    action: "ok",
+  };
+  if (durationMs < MIN_JUDGEABLE_MS) return health;
+  if (frameIndex.length < expectedFrames * MIN_CAPTURE_RATIO) {
+    health.action = "fail";
+    health.reason =
+      `capture is sparse: ${frameIndex.length} frame(s) over ${(durationMs / 1000).toFixed(1)}s ` +
+      `(avg ${avgSourceFps.toFixed(1)} fps source; a healthy ${log.fps}fps capture would carry ` +
+      `~${expectedFrames}) — the video would be stills with a camera gliding over them`;
+  }
+  return health;
+}
+
 export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const { takeDir, outFile } = opts;
-  const timeoutMs = opts.timeoutMs ?? 300_000;
   const t0 = Date.now();
 
   // Fail before expensive work: output dir + take shape.
@@ -175,6 +246,27 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
   const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+
+  // Capture-health gate: refuse a take whose footage can't carry its own
+  // timeline. Printed regardless of outcome so the one diagnostic that reveals
+  // a starved capture — average source fps — is always on the record.
+  {
+    const health = assessCaptureHealth(log, frameIndex);
+    console.error(
+      `[render] capture health: ${health.frames} frames over ${(health.durationMs / 1000).toFixed(1)}s ` +
+        `(avg ${health.avgSourceFps.toFixed(1)} fps source)`,
+    );
+    if (health.action === "fail") {
+      if (process.env.SUPERCUT_ALLOW_SPARSE === "1") {
+        console.error(`[render] WARNING: ${health.reason} (continuing: SUPERCUT_ALLOW_SPARSE=1)`);
+      } else {
+        throw new Error(
+          `render: ${health.reason}. Re-record the take; for a genuinely sparse take ` +
+            `(e.g. a pre-beacon recorder) set SUPERCUT_ALLOW_SPARSE=1 to render it anyway.`,
+        );
+      }
+    }
+  }
 
   const { spec: bgSpec, isImage: bgIsImage } = resolveBackgroundSpec(opts.background);
   // --music: resolved + validated here, before the plan and the browser — a
@@ -187,6 +279,12 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   });
 
   const planJson = JSON.stringify(plan);
+
+  // timeout sized from the work: the adaptive blur loop can reach dozens of
+  // draw passes per frame, so a legitimately slow long render must not be
+  // killed by a flat ceiling after all the capture/LLM spend that fed it.
+  // 200ms/frame ≈ 12 min for a full 3600-frame take; 5 min stays the floor.
+  const timeoutMs = opts.timeoutMs ?? Math.max(300_000, plan.frames * 200);
 
   // Clock-vs-frame skew gate (assessed in assessSkew, below).
   {
@@ -309,6 +407,16 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
   // Full Chromium: the stripped headless shell has no WebCodecs.
   const browser = await chromium.launch({ headless: true, channel: "chromium" });
+  // (review) the watchdog timeout and the fatal-poll loop below are REFERENCED
+  // timers: left running after the encode settles, they keep the event loop
+  // alive. The CLI exits via process.exitCode (never process.exit(), which can
+  // truncate piped stdout), so a surviving multi-minute watchdog made a
+  // successful `supercut render` print its result and then appear to hang
+  // until the timer fired. Track both here and stop them in the finally that
+  // already owns teardown, so every exit path — success, timeout, in-page
+  // FATAL, result-stream failure — leaves no timer behind.
+  let watchdog: NodeJS.Timeout | undefined;
+  let raceSettled = false;
   // B2 (review): outer try wraps the encode + mux so the temp raw file is
   // unlinked on EVERY exit path — render timeout, in-page FATAL, "no encoded
   // output", or an ffmpeg mux failure all flow through the finally below.
@@ -323,23 +431,42 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
           else if (process.env.SUPERCUT_VERBOSE) console.log(text);
         }
       });
+      // a hard tab death (OOM, GPU process crash) emits no console line at
+      // all — without these hooks the orchestrator waited out the full render
+      // timeout for a page that could never answer
+      page.on("crash", () => {
+        fatal = "[render] FATAL: renderer tab crashed (out of memory or GPU process death)";
+      });
+      page.on("pageerror", (err) => {
+        if (!fatal) fatal = `[render] FATAL: uncaught in-page error: ${err.message}`;
+      });
       await page.goto(`http://127.0.0.1:${port}/?t=${token}`);
 
       await Promise.race([
         resultReceived,
-        new Promise<never>((_, rej) =>
-          setTimeout(() => rej(new Error(`render timed out after ${timeoutMs}ms${fatal ? ` (${fatal})` : ""}`)), timeoutMs),
-        ),
+        new Promise<never>((_, rej) => {
+          watchdog = setTimeout(() => rej(new Error(`render timed out after ${timeoutMs}ms${fatal ? ` (${fatal})` : ""}`)), timeoutMs);
+        }),
         (async () => {
-          // poll for an in-page fatal so we fail fast instead of waiting out the timeout
+          // poll for an in-page fatal so we fail fast instead of waiting out
+          // the timeout. The sleep timer is unref'd and the loop watches
+          // raceSettled: when the race settles some OTHER way (watchdog fired,
+          // result stream errored) the loop must stop too, or its 500ms ticks
+          // keep the drained process alive forever on the failure path.
           for (;;) {
-            await new Promise((r) => setTimeout(r, 500));
+            await new Promise((r) => setTimeout(r, 500).unref());
+            if (raceSettled) return;
             if (fatal) throw new Error(fatal);
             if (resultReady) return;
           }
         })(),
       ]);
     } finally {
+      // stop the watchdog + poll loop FIRST (see the declaration above): the
+      // race has settled, and any timer that survives this block outlives the
+      // render and blocks natural process exit.
+      raceSettled = true;
+      clearTimeout(watchdog);
       // guard close: if browser.close() throws, server.close() must still run,
       // else the loopback render server leaks the port until process exit.
       await browser.close().catch(() => {});
@@ -359,9 +486,11 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     if (musicPath) {
       muxArgs.push(
         // loop a short track under a long video; -t clamps the OUTPUT to the
-        // exact video length so audio can never extend the cut
+        // exact video length so audio can never extend the cut.
+        // resolve(): a relative path starting with "-" (a file literally named
+        // "-loglevel") would otherwise be parsed by ffmpeg as an option.
         "-stream_loop", "-1",
-        "-i", musicPath,
+        "-i", resolve(musicPath),
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-af", musicFilterChain(muxDurationS),
@@ -372,8 +501,8 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     } else {
       muxArgs.push("-c", "copy");
     }
-    muxArgs.push("-movflags", "+faststart", outFile);
-    await exec("ffmpeg", muxArgs);
+    muxArgs.push("-movflags", "+faststart", resolve(outFile));
+    await exec("ffmpeg", muxArgs, { timeout: MUX_TIMEOUT_MS, maxBuffer: MUX_MAX_BUFFER });
     if (musicPath) console.error(`[render] music: ${musicPath}`);
 
     // trust, then verify: the encoder is ASKED for CBR at ENCODER_BITRATE, but

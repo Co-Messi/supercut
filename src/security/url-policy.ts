@@ -33,10 +33,12 @@ function inCidr(ip: string, base: string, bits: number): boolean {
  * connect time — resolve-time TOCTOU): when the guard is ON, `resolveAndPinHost`
  * below resolves once, validates the addresses, and yields a Chromium
  * `--host-resolver-rules` mapping so the browser connects to the exact IP that
- * was vetted. The director's crawler applies it; the capture executor's
- * browser launch (src/capture/executor.ts) does not yet accept launch args, so
- * record-stage navigations are still validated as strings + post-redirect
- * final URLs only — rebinding remains possible there.
+ * was vetted. Both the director's crawler and the capture executor apply it
+ * to their browser launches (the executor pins every recipe host); both also
+ * install a `createRequestGate` route handler so in-flight requests to
+ * unpinned hosts are policy-checked before they leave the browser, and a
+ * `gateWebSockets` handler for the WebSocket upgrades that route interception
+ * cannot see.
  */
 function normalizeHostToIPv4(h: string): string {
   // whole-host bare decimal integer, e.g. "2130706433" → "127.0.0.1"
@@ -90,14 +92,29 @@ function isPrivateHostname(hostname: string): boolean {
   return false;
 }
 
+/** ADVISORY-path resolver: swallows lookup failures ("couldn't tell" reads as
+ *  "not private"). Fine for hints; never use it to enforce the policy. */
 async function resolvesPrivate(hostname: string): Promise<boolean> {
   if (isPrivateHostname(hostname)) return true;
   try {
-    const addrs = await lookup(hostname, { all: true, verbatim: true });
-    return addrs.some((a) => isPrivateHostname(a.address));
+    return await resolvesPrivateStrict(hostname);
   } catch {
     return false;
   }
+}
+
+/** ENFORCEMENT-path resolver: a failed or empty lookup PROPAGATES so the
+ *  caller fails closed. Swallowing it here was the rebinding window: an
+ *  NXDOMAIN at check time read as "not private", the gate allowed (and
+ *  cached) the host, and Chromium's own later resolution could then connect
+ *  to a private address the policy never saw. On machines where a proxy/TUN
+ *  does the real resolving, the request gate is the load-bearing SSRF
+ *  defense (the --host-resolver-rules pin is bypassed inside the tunnel), so
+ *  "can't verify" must mean "deny", not "shrug". */
+async function resolvesPrivateStrict(hostname: string): Promise<boolean> {
+  if (isPrivateHostname(hostname)) return true;
+  const addrs = await lookup(hostname, { all: true, verbatim: true });
+  return addrs.some((a) => isPrivateHostname(a.address));
 }
 
 async function checkOne(raw: string, opts: NavigationPolicyOptions, redirect: boolean): Promise<void> {
@@ -110,8 +127,22 @@ async function checkOne(raw: string, opts: NavigationPolicyOptions, redirect: bo
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`navigation URL must be http(s): ${raw}`);
   }
-  if (!opts.allowPrivateNetwork && await resolvesPrivate(url.hostname)) {
-    throw new Error(`${redirect ? "redirect target" : "navigation URL"} is on a private network: ${raw}`);
+  if (!opts.allowPrivateNetwork) {
+    let priv: boolean;
+    try {
+      priv = await resolvesPrivateStrict(url.hostname);
+    } catch (err) {
+      // fail CLOSED while the guard is engaged: an unresolvable host cannot be
+      // verified against the policy, and allowing it hands the decision to
+      // whatever the browser's resolver returns later.
+      throw new Error(
+        `cannot verify ${raw} against the private-network policy (DNS lookup failed: ` +
+          `${err instanceof Error ? err.message : err}) — refusing while the guard is engaged`,
+      );
+    }
+    if (priv) {
+      throw new Error(`${redirect ? "redirect target" : "navigation URL"} is on a private network: ${raw}`);
+    }
   }
 }
 
@@ -148,6 +179,115 @@ export async function urlResolvesPrivate(raw: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Per-run request gate for a Playwright route handler: decides whether ANY
+ * in-flight browser request — navigation, fetch/XHR, <img>, <script>, <link>,
+ * form POST — may leave the browser under the private-network policy. The
+ * navigation-only check this replaces left every subresource free to reach
+ * private hosts while the CLI reported the guard as engaged. (WebSocket
+ * upgrades never reach a route handler — gateWebSockets below covers those
+ * with the same gate.)
+ *
+ * DNS verdicts are cached per host for the lifetime of the gate, so enforcing
+ * on every subresource doesn't become a per-request DNS storm. Fail-closed:
+ * an unparseable URL, a throwing check, or a FAILED LOOKUP blocks the request
+ * while the guard is engaged — and a verdict born of a failed lookup is never
+ * cached (see below). With the guard off it allows everything and resolves
+ * nothing.
+ */
+export interface RequestGate {
+  allows(url: string): Promise<boolean>;
+}
+
+export function createRequestGate(opts: {
+  allowPrivateNetwork: boolean;
+  /** injectable for tests; defaults to the module's STRICT DNS-backed private
+   *  check (lookup failures propagate → the gate denies) */
+  isPrivateHost?: (hostname: string) => Promise<boolean>;
+}): RequestGate {
+  // (review) enforcement uses the STRICT resolver: the advisory one swallowed
+  // lookup errors into "not private", so a transient failure or NXDOMAIN
+  // during a rebinding attempt produced an ALLOW — which the cache then held
+  // for the rest of the run while Chromium re-resolved on its own.
+  const isPrivate = opts.isPrivateHost ?? resolvesPrivateStrict;
+  const verdicts = new Map<string, Promise<boolean>>();
+  return {
+    async allows(raw: string): Promise<boolean> {
+      if (opts.allowPrivateNetwork) return true;
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        return false;
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+      const host = url.hostname;
+      let verdict = verdicts.get(host);
+      if (!verdict) {
+        verdict = isPrivate(host).then(
+          (p) => !p,
+          () => {
+            // deny THIS request, but do not cache a verdict derived from a
+            // failed lookup: the host was never actually validated. A later
+            // request re-resolves — if the name then points somewhere private
+            // the fresh lookup catches it; caching the failure would instead
+            // freeze whatever the outage happened to look like.
+            verdicts.delete(host);
+            return false;
+          },
+        );
+        verdicts.set(host, verdict);
+      }
+      return verdict;
+    },
+  };
+}
+
+/** structural slice of Playwright's WebSocketRoute — keeps this module free
+ *  of a hard playwright type dependency */
+interface WebSocketRouteLike {
+  url(): string;
+  connectToServer(): unknown;
+  close(options?: { code?: number; reason?: string }): Promise<void>;
+}
+
+/**
+ * Gate WebSocket connections under the same policy as createRequestGate.
+ * `ctx.route("**\/*")` cannot intercept WebSocket upgrades — Playwright's
+ * routeWebSocket (shipped in 1.48) can, so without this a page could open a
+ * socket to a private host with the guard nominally engaged. Allowed sockets
+ * are connected straight through (`connectToServer()` with no message
+ * handlers installed = Playwright forwards frames both ways untouched);
+ * blocked sockets are never connected and close with 1008 (policy violation).
+ *
+ * Feature-detected rather than assumed: the declared peer floor is ^1.53.0
+ * so routeWebSocket is always there in practice, but a caller running an
+ * unexpected build must WARN that WebSockets are ungated, not crash. Returns
+ * true when the gate was installed.
+ */
+export async function gateWebSockets(
+  target: {
+    routeWebSocket?: (
+      url: RegExp,
+      handler: (ws: WebSocketRouteLike) => unknown,
+    ) => Promise<void>;
+  },
+  gate: RequestGate,
+): Promise<boolean> {
+  if (typeof target.routeWebSocket !== "function") return false;
+  await target.routeWebSocket(/.*/, async (ws) => {
+    // the gate speaks http(s): map the ws scheme before asking it, so the
+    // same host verdict (and per-host DNS cache) covers both request kinds
+    const httpUrl = ws.url().replace(/^ws(s?):/i, (_m, s) => (s ? "https:" : "http:"));
+    if (await gate.allows(httpUrl)) {
+      ws.connectToServer();
+    } else {
+      await ws.close({ code: 1008, reason: "blocked by private-network policy" });
+    }
+  });
+  return true;
 }
 
 export interface PinnedHost {

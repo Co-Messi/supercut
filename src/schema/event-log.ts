@@ -84,6 +84,13 @@ export const knownEvent = z.discriminatedUnion("type", [
 
 export const eventLog = z.object({
   version: z.literal(0),
+  /** Clock declaration: true when event `t` was stamped on the SAME timeline
+   *  as frame `t_source` (anchored to the first screencast frame). The built-in
+   *  recorder always writes true; logs without it are treated as legacy
+   *  (pre-unified-clock) takes, whose event-vs-frame skew is expected and
+   *  non-fatal. Declared here so the render stage identifies old takes by what
+   *  they ARE, never by inferring it from how the capture turned out. */
+  t_source_unified: z.boolean().optional(),
   viewport: z.object({
     width: z.number().int().positive(),
     height: z.number().int().positive(),

@@ -1,12 +1,11 @@
 {
   "name": "supercut",
-  "version": "0.0.1",
-  "description": "AI launch-video generator: films your real web app with a cinematic camera, motion blur, and music — a CLI alternative to Screen Studio for product demos",
+  "version": "0.1.0",
+  "description": "An AI director that films your real web app by itself: it decides the money moments, drives a browser to perform them, and renders a cinematic 60s launch video — camera, motion blur, music, done",
   "keywords": [
     "launch-video",
+    "ai-director",
     "product-demo",
-    "screen-recording",
-    "screen-studio-alternative",
     "demo-video",
     "marketing-video",
     "ai-video",
@@ -15,9 +14,20 @@
     "cinematic",
     "cli",
     "video-generator",
+    "screen-recording",
+    "screen-studio-alternative",
     "product-hunt"
   ],
   "license": "MIT",
+  "author": "Brayden Siew",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Co-Messi/supercut.git"
+  },
+  "homepage": "https://supercut-five.vercel.app",
+  "bugs": {
+    "url": "https://github.com/Co-Messi/supercut/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -27,7 +37,8 @@
   },
   "files": [
     "dist",
-    "assets",
+    "assets/backgrounds",
+    "assets/music",
     "examples/demo-app",
     "examples/demo.recipe.json"
   ],
@@ -39,7 +50,7 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/cli/index.ts",
     "test:fast": "vitest run test/cursor.test.ts test/director.test.ts test/director-validation.test.ts test/schema.test.ts test/config.test.ts test/url-policy.test.ts test/redaction.test.ts test/plan.test.ts",
-    "test:e2e": "vitest run test/record.e2e.test.ts test/generate.e2e.test.ts"
+    "test:e2e": "vitest run e2e.test"
   },
   "dependencies": {
     "playwright": "^1.53.0",

@@ -6,7 +6,7 @@
  * Invalid output bounces back with the validation error (max 3 attempts).
  */
 import { z } from "zod";
-import { extractJson, type ChatPart, type LlmClient } from "./llm.js";
+import { extractJson, UNTRUSTED_RULES, wrapUntrusted, type ChatPart, type LlmClient } from "./llm.js";
 import type { PageDigest } from "./inventory.js";
 import { redactForPrompt } from "../security/redaction.js";
 
@@ -156,6 +156,8 @@ Write the story as a problem → solution → payoff arc:
 
 Prefer beats with visible payoff (something appears, changes, completes). The "title" field stays a short internal label; the "caption" is the on-screen copy and must be benefit-framed.
 
+${UNTRUSTED_RULES}
+
 Each inventory line is: \`<selector>\` [tag] "text". In "elements", copy ONLY the exact text INSIDE the backticks — never the [tag] or the "text" that follows it. Respond ONLY with a JSON object matching:
 { "product_summary": string, "product_name": string, "headline": string, "tagline": string, "music_track": "pulse"|"daybreak"|"midnight"|"momentum", "money_moments": [{ "title": string, "caption": string, "why": string, "page_url": string (one crawled URL), "elements": [selectors copied from between the backticks] }] }`;
 
@@ -164,11 +166,15 @@ export async function analyzeApp(
   digests: PageDigest[],
   repoNotes?: string,
 ): Promise<AppAnalysis> {
+  // page-derived text (and repo notes: README/source strings are just as
+  // attacker-writable) travels inside the untrusted markers the system prompt
+  // declares — delimited data, never instruction
   const textPart: ChatPart = {
     type: "text",
-    text:
+    text: wrapUntrusted(
       (repoNotes ? `REPO NOTES:\n${repoNotes.slice(0, 4000)}\n\n` : "") +
-      digests.map(digestText).join("\n\n"),
+        digests.map(digestText).join("\n\n"),
+    ),
   };
   const imageParts: ChatPart[] = [];
   for (const d of digests) {

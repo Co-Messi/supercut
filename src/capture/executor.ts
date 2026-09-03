@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
-import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
 
 const VIEWPORT = { width: 1920, height: 1080 };
 const DPR = 2;
@@ -159,13 +159,23 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
-  /** allow localhost/RFC1918/cloud-metadata navigation; off by default for safety */
+  /** Allow localhost/RFC1918/link-local navigation. Defaults to FALSE: the
+   *  library fails closed and callers opt in. Every caller in this repo
+   *  (generate(), the CLI) passes the value explicitly — the CLI allows by
+   *  default and --block-private-network opts the guard in — so the default
+   *  exists only for external embedders, and for them the safe direction is
+   *  closed (matching crawlApp()'s default). With the guard on, the recipe's
+   *  URLs are policy-checked, the target hosts are DNS resolve-and-pinned,
+   *  and every in-flight request is gated. */
   allowPrivateNetwork?: boolean;
 }
 
 export interface RecordResult {
   eventLog: EventLog;
   frameCount: number;
+  /** frames captured per second of take time (frame + event span). ~60 on a
+   *  healthy beacon-era capture; near zero when the screencast starved. */
+  avgSourceFps: number;
   failedScenes: string[];
   aborted: boolean;
   outDir: string;
@@ -219,9 +229,38 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
+  // guard ON: resolve-and-pin every recipe host so the browser connects to the
+  // exact IPs the policy vetted — a DNS re-resolve mid-run can't swap in a
+  // private one (same defense the crawler applies).
+  // Note: this re-resolves hosts that assertRecipeNavigationPolicy above
+  // already resolved — a second lookup and a small TOCTOU window between the
+  // two. Deliberate: the assert is a pure yes/no policy check, the pin is the
+  // one whose answer the browser actually connects to, and collapsing them
+  // would couple the policy module to Chromium launch-arg formatting.
+  const launchArgs: string[] = [];
+  if (!allowPrivateNetwork) {
+    const rules: string[] = [];
+    const seenHosts = new Set<string>();
+    const recipeUrls: string[] = [];
+    for (const scene of recipe.scenes) {
+      recipeUrls.push(scene.entry.url);
+      for (const action of [...scene.entry.prelude, ...scene.actions]) {
+        if (action.kind === "goto" && action.url) recipeUrls.push(action.url);
+      }
+    }
+    for (const u of recipeUrls) {
+      const host = new URL(u).hostname;
+      if (seenHosts.has(host)) continue;
+      seenHosts.add(host);
+      const pinned = await resolveAndPinHost(u, { allowPrivateNetwork });
+      if (pinned) rules.push(pinned.hostResolverRule);
+    }
+    if (rules.length > 0) launchArgs.push(`--host-resolver-rules=${rules.join(",")}`);
+  }
+
   // launch is the only setup outside try/finally; everything else (newPage,
   // CDP session) lives inside so a setup failure can't leak the browser
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, args: launchArgs });
 
   const events: KnownEvent[] = [];
   const pathPoints: [number, number, number][] = []; // [t, x, y] global cursor track
@@ -487,6 +526,25 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   try {
     page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DPR });
+    // guard ON: gate EVERY in-flight request (clicked links, Enter submits,
+    // redirects, subresources) — assertSafeNavigationUrl only covers entry/goto
+    // URLs known from the recipe, but a click on an a[href] or a submit
+    // navigates with no pre-check. Installed ONLY when the guard is engaged:
+    // route interception funnels every request through Node, and the default
+    // local-app path must not pay that tax during a 60fps capture.
+    if (!allowPrivateNetwork) {
+      const gate = createRequestGate({ allowPrivateNetwork });
+      await page.context().route("**/*", async (route) => {
+        if (!(await gate.allows(route.request().url()))) return route.abort();
+        return route.continue();
+      });
+      // WebSocket upgrades bypass ctx.route — gate them separately
+      if (!(await gateWebSockets(page.context(), gate))) {
+        console.error(
+          "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+        );
+      }
+    }
     if (captureFrames) await page.addInitScript(REPAINT_BEACON_SCRIPT);
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);
@@ -653,6 +711,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   const eventLog: EventLog = {
     version: 0,
+    // clock declaration (schema): event `t` shares the frame t_source timeline.
+    // The render stage keys its skew/health gates off this marker — never off
+    // the capture's frame rate — so a starved take can't pass as "legacy".
+    t_source_unified: true,
     viewport: { width: VIEWPORT.width, height: VIEWPORT.height, dpr: DPR },
     fps: FPS,
     events,
@@ -665,5 +727,15 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   frameIndex.sort((a, b) => a.t_source - b.t_source);
   writeFileSync(join(outDir, "frames-index.json"), JSON.stringify(frameIndex));
 
-  return { eventLog, frameCount: frameIndex.length, failedScenes, aborted, outDir };
+  // capture-health telemetry: frames per second of take time. The span uses
+  // BOTH clocks (last frame t_source and last event t) so a capture that
+  // stalled early — few frames, but a long event timeline — reads as sparse
+  // instead of hiding behind its own short frame span.
+  let maxEventT = 0;
+  for (const e of events) maxEventT = Math.max(maxEventT, e.t);
+  const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
+  const spanMs = Math.max(lastFrameT, maxEventT);
+  const avgSourceFps = spanMs > 0 ? (frameIndex.length / spanMs) * 1000 : 0;
+
+  return { eventLog, frameCount: frameIndex.length, avgSourceFps, failedScenes, aborted, outDir };
 }

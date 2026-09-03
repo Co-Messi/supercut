@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -257,6 +257,105 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(await probeStreams(res.outFile)).toEqual(["video:h264"]);
   }, 300_000);
 
+  it("preserves the recorded take + artifacts when QC cuts every scene (M4)", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-allcut-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        product_name: "Lumon",
+        headline: "Your team's numbers, live in seconds",
+        tagline: "Metrics without the setup",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", caption: "Start in one click", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0,
+        app_url: app.url,
+        music_track: "daybreak",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 0 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
+        ],
+      }),
+      // ④ vision QC condemns everything
+      JSON.stringify({
+        verdicts: [
+          { scene: "signup", verdict: "cut", reason: "blank frame" },
+          { scene: "dashboard", verdict: "cut", reason: "error page" },
+        ],
+      }),
+    ]);
+
+    await expect(
+      generate({ llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: () => {} }),
+    ).rejects.toThrow(/QC cut every scene.*preserved at/s);
+
+    // the take survived, and the run left enough on disk to debug + render it
+    expect(existsSync(join(outDir, "take-0", "events.json"))).toBe(true);
+    expect(existsSync(join(outDir, "take-0", "frames-index.json"))).toBe(true);
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.verdictLog.flat().filter((v: { verdict: string }) => v.verdict === "cut")).toHaveLength(2);
+    expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
+  }, 300_000);
+
+  it("--dry-run writes the recipe + preview and never films (H6)", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-dry-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        product_name: "Lumon",
+        headline: "Your team's numbers, live in seconds",
+        tagline: "Metrics without the setup",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", caption: "Start in one click", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta", "#email"] },
+          { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0,
+        app_url: app.url,
+        music_track: "daybreak",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [
+              { kind: "click", selector: "#cta", duration_ms: 1500 },
+              { kind: "type", selector: "#email", text: "ada@lumon.dev", submit: true, duration_ms: 1800 },
+            ], hold_ms: 400 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1400 }], hold_ms: 400 },
+        ],
+      }),
+    ]);
+
+    const logs: string[] = [];
+    const res = await generate({
+      llm, url: app.url, outDir, seed: 7, dryRun: true,
+      allowPrivateNetwork: true, log: (m) => logs.push(m),
+    });
+
+    // nothing filmed, nothing rendered — but the recipe artifact exists
+    expect(res.outFile).toBe("");
+    expect(llm.calls).toBe(2); // analyze + script only, no QC
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
+    expect(existsSync(join(outDir, "take-0"))).toBe(false);
+    expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.dryRun).toBe(true);
+    // the preview surfaces every action, including the full typed text + Enter
+    const preview = logs.join("\n");
+    expect(preview).toContain('type #email "ada@lumon.dev" then press Enter');
+    expect(preview).toContain("click #cta");
+  }, 120_000);
+
   it("fails fast on an unreachable app URL (before any LLM call)", async () => {
     const llm = new ScriptedLlm(() => []);
     await expect(
@@ -264,4 +363,67 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     ).rejects.toThrow(/cannot reach/);
     expect(llm.calls).toBe(0);
   }, 30_000);
+});
+
+describe("preflight status handling", () => {
+  /** serves /s/<code> with that status (and a tiny html body) */
+  let statusServer: { url: string; close: () => Promise<void> };
+
+  beforeAll(async () => {
+    const { createServer } = await import("node:http");
+    const srv = createServer((req, res) => {
+      const code = Number(/^\/s\/(\d{3})/.exec(req.url ?? "")?.[1] ?? 200);
+      res.writeHead(code, { "content-type": "text/html; charset=utf-8" });
+      res.end("<!doctype html><html><body><h1>status page</h1></body></html>");
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const { port } = srv.address() as { port: number };
+    statusServer = {
+      url: `http://127.0.0.1:${port}`,
+      close: () => new Promise((r) => srv.close(() => r())),
+    };
+  });
+
+  afterAll(async () => {
+    await statusServer.close();
+  });
+
+  function tryGenerate(url: string, extra: { skipPreflight?: boolean } = {}) {
+    const logs: string[] = [];
+    const llm = new ScriptedLlm(() => []);
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-preflight-"));
+    dirs.push(outDir);
+    const run = generate({
+      llm, url, outDir, allowPrivateNetwork: true, vision: false,
+      log: (m) => logs.push(m), ...extra,
+    });
+    return { run, logs, llm };
+  }
+
+  it("404, 410, and 5xx roots are fatal before any LLM call", async () => {
+    for (const code of [404, 410, 500, 503]) {
+      const { run, llm } = tryGenerate(`${statusServer.url}/s/${code}`);
+      await expect(run).rejects.toThrow(new RegExp(`responded ${code}`));
+      expect(llm.calls).toBe(0);
+    }
+  }, 60_000);
+
+  it("401/403 warn and CONTINUE — an auth wall at the root must not block filming your own app", async () => {
+    for (const code of [401, 403]) {
+      const { run, logs } = tryGenerate(`${statusServer.url}/s/${code}`);
+      // getting PAST preflight means the run dies later, in analyze, when the
+      // deliberately-empty scripted LLM runs out — not on a preflight error
+      await expect(run).rejects.toThrow(/scripted LLM exhausted/);
+      const all = logs.join("\n");
+      expect(all).toMatch(new RegExp(`preflight warning: .*responded ${code}`));
+    }
+  }, 120_000);
+
+  it("--skip-preflight bypasses the reachability probe entirely (escape hatch)", async () => {
+    // a 500 root would be fatal — with the override the run proceeds to the
+    // crawl and dies in analyze instead, proving the probe never gated it
+    const { run, logs } = tryGenerate(`${statusServer.url}/s/500`, { skipPreflight: true });
+    await expect(run).rejects.toThrow(/scripted LLM exhausted/);
+    expect(logs.join("\n")).toContain("--skip-preflight");
+  }, 120_000);
 });

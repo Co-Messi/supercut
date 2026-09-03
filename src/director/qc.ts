@@ -19,9 +19,11 @@ import type { RecordResult } from "../capture/executor.js";
 
 const exec = promisify(execFile);
 
-// a zoom patch flows into the event log's focus_bbox, whose schema demands
-// nonneg x/y and positive w/h (mirrors recipe.ts) — a hallucinated degenerate
-// bbox must die HERE, not at render time after all the capture spend
+// a zoom patch flows into the event log's focus_bbox. The event-log schema
+// itself only demands positive w/h (x/y may be negative there; plan.ts clamps
+// the focus point to the viewport) — but the QC patch surface is stricter and
+// mirrors the recipe's zoom rule (nonneg x/y too), so a hallucinated
+// degenerate bbox dies HERE, not at render time after all the capture spend
 const finiteNum = z.number().finite();
 
 export const sceneVerdict = z.object({
@@ -198,7 +200,26 @@ export interface AppliedVerdicts {
   cut: string[];
 }
 
-/** Apply verdicts within the frozen patch surface. Cutting cascades to dependents. */
+/**
+ * Thrown when the verdicts cut every scene (directly or via cascade). A typed
+ * throw instead of a flag on the return value: an earlier draft returned the
+ * ORIGINAL recipe with `changed: false` plus an `allCut` marker, which fails
+ * open for any caller that predates the marker — `if (!applied.changed)
+ * proceed to render` turns "cut everything" into "cut nothing" and renders
+ * the full uncut recipe. applyVerdicts is public API; its contract stays
+ * "a non-empty recipe or an exception". The caller that holds a recorded
+ * take catches THIS error specifically and preserves the artifacts (the take
+ * is renderable — refusing an empty video must not discard it).
+ */
+export class AllScenesCutError extends Error {
+  constructor(readonly cut: string[]) {
+    super(`QC cut every scene (${cut.join(", ")}) — refusing to produce an empty recipe`);
+    this.name = "AllScenesCutError";
+  }
+}
+
+/** Apply verdicts within the frozen patch surface. Cutting cascades to
+ *  dependents. Throws AllScenesCutError when nothing survives. */
 export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): AppliedVerdicts {
   const cutSet = new Set(verdicts.filter((v) => v.verdict === "cut").map((v) => v.scene));
   // dependency cascade
@@ -241,6 +262,6 @@ export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): Applied
       return out;
     });
 
-  if (scenes.length === 0) throw new Error("QC cut every scene — refusing to render an empty video");
+  if (scenes.length === 0) throw new AllScenesCutError([...cutSet]);
   return { recipe: { ...recipe, scenes }, changed, cut: [...cutSet] };
 }

@@ -5,8 +5,8 @@ import type { EventLog } from "../src/schema/index.js";
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
 
-function makeLog(events: EventLog["events"]): EventLog {
-  return { version: 0, viewport, fps: 60, events };
+function makeLog(events: EventLog["events"], extra: Partial<EventLog> = {}): EventLog {
+  return { version: 0, viewport, fps: 60, events, ...extra };
 }
 
 const frameIndex = Array.from({ length: 100 }, (_, i) => ({
@@ -34,7 +34,7 @@ describe("buildRenderPlan", () => {
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
 
-  it("maps output frames to source frames by nearest-hold", () => {
+  it("maps output frames to source frames by floor-hold (previous frame held)", () => {
     const plan = buildRenderPlan(clickLog, frameIndex);
     // output frame at t=0 → source 0; t=100ms (frame 6) → source with t_source ≤ 100 → idx 3 (99ms)
     expect(plan.sourceByFrame[0]).toBe(0);
@@ -360,6 +360,15 @@ describe("plan input bounds (PR #1 review)", () => {
     expect(() => buildRenderPlan(clickLog, bad)).toThrow(/malformed/);
   });
 
+  it("constrains frame files to the frames/ namespace", () => {
+    // the host page fetches /take/<file> — a hand-edited index must not be
+    // able to point the fetch at other take artifacts
+    for (const file of ["render-plan.json", "../events.json", "frames/../events.json", "frames/a/b.png"]) {
+      expect(() => buildRenderPlan(clickLog, [{ file, t_source: 0 }])).toThrow(/frames\//);
+    }
+    expect(() => buildRenderPlan(clickLog, [{ file: "frames/000000.png", t_source: 0 }])).not.toThrow();
+  });
+
   it("accepts a clamped index (capture clamps jittered stamps to t_source 0)", () => {
     // CDP delivery jitter can stamp a frame before the first-processed one;
     // the executor clamps those to 0, so duplicates at 0 are a legal index
@@ -371,21 +380,34 @@ describe("plan input bounds (PR #1 review)", () => {
     expect(() => buildRenderPlan(clickLog, clamped)).not.toThrow();
   });
 
-  it("skew gate: dense (beacon-era) takes fail hard past 250ms", () => {
-    // 60fps source — clearly a unified-clock take
+  it("skew gate: unified-clock takes (declared in the log) fail hard past 250ms", () => {
     const dense = Array.from({ length: 300 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
       t_source: Math.round(i * 16.7),
     }));
     const lastFrameT = dense[dense.length - 1]!.t_source;
-    const ok = makeLog([{ t: lastFrameT + 200, type: "scene", name: "s", priority: 1 }]);
+    const ok = makeLog([{ t: lastFrameT + 200, type: "scene", name: "s", priority: 1 }], { t_source_unified: true });
     expect(assessSkew(ok, dense).action).toBe("ok");
-    const broken = makeLog([{ t: lastFrameT + 400, type: "scene", name: "s", priority: 1 }]);
+    const broken = makeLog([{ t: lastFrameT + 400, type: "scene", name: "s", priority: 1 }], { t_source_unified: true });
     expect(assessSkew(broken, dense).action).toBe("fail");
   });
 
-  it("skew gate: legacy sparse takes (pre-unified clock) only warn — back-compat", () => {
-    // ~5fps change-driven capture: events routinely outrun the footage
+  it("skew gate: a sparse take that DECLARES the unified clock still fails — a starved capture can't reclassify itself as legacy", () => {
+    // this was the H1 hole: fps was inferred, so 12 frames over 40s read as
+    // "legacy" and the fail downgraded to a warning. Legacy now comes from the
+    // schema declaration only.
+    const starved = Array.from({ length: 12 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: i * 100,
+    }));
+    const lastFrameT = starved[starved.length - 1]!.t_source;
+    const skewed = makeLog([{ t: lastFrameT + 3000, type: "scene", name: "s", priority: 1 }], { t_source_unified: true });
+    expect(assessSkew(skewed, starved).action).toBe("fail");
+  });
+
+  it("skew gate: legacy takes (no clock declaration) only warn — back-compat", () => {
+    // pre-unified-clock recorders stamped events on a separate wall
+    // accumulator: events routinely outrun the footage, warn is correct
     const sparse = Array.from({ length: 25 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
       t_source: i * 200,

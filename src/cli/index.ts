@@ -11,7 +11,7 @@ import { doctor } from "./doctor.js";
  *   supercut doctor                                                    check deps
  */
 
-const HELP = `supercut — institutional-grade 60s launch videos from your real app
+const HELP = `supercut — an AI director that films your real app into a cinematic 60s launch video
 
 Usage:
   supercut generate --url <running app URL> [--repo <path>] [--music <track|file|off>]
@@ -20,6 +20,17 @@ Usage:
   supercut doctor
 
 Run any command with --help for details.`;
+
+/** parseArgs throws a raw Node error on a bare positional (`supercut generate
+ *  https://app`) unless allowPositionals is set — accept them in the parse,
+ *  then reject with the usage line and a hint instead of a stack trace. */
+function rejectPositionals(positionals: string[], usage: string): boolean {
+  if (positionals.length === 0) return false;
+  const p0 = positionals[0]!;
+  const hint = /^https?:\/\//.test(p0) ? ` (did you mean --url ${p0}?)` : "";
+  console.error(`unexpected argument "${p0}"${hint}\n${usage}`);
+  return true;
+}
 
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
@@ -36,8 +47,9 @@ async function main(): Promise<number> {
         "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]";
       // help is a real parsed boolean, not a substring scan — so a --help that
       // is actually the VALUE of another flag can't hijack the command.
-      const { values } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           recipe: { type: "string" },
           out: { type: "string" },
@@ -51,6 +63,7 @@ async function main(): Promise<number> {
         console.log(recordUsage);
         return 0;
       }
+      if (rejectPositionals(positionals, recordUsage)) return 1;
       if (!values.recipe) {
         console.error(recordUsage);
         return 1;
@@ -77,7 +90,8 @@ async function main(): Promise<number> {
       }
       const res = await record({ recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"] });
       console.log(
-        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames, ` +
+        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames ` +
+          `(avg ${res.avgSourceFps.toFixed(1)} fps source), ` +
           `${res.eventLog.events.length} events` +
           (res.failedScenes.length ? `, FAILED scenes: ${res.failedScenes.join(", ")}` : ""),
       );
@@ -89,8 +103,9 @@ async function main(): Promise<number> {
         "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
         "[--music <bundled track|audio file|off>]";
       // help is a real parsed boolean (see record) — no substring scan
-      const { values } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           take: { type: "string" },
           out: { type: "string" },
@@ -103,6 +118,7 @@ async function main(): Promise<number> {
         console.log(renderUsage);
         return 0;
       }
+      if (rejectPositionals(positionals, renderUsage)) return 1;
       if (!values.take) {
         console.error(renderUsage);
         return 1;
@@ -128,11 +144,12 @@ async function main(): Promise<number> {
       const generateUsage =
         "usage: supercut generate --url <running app URL> [--repo <path>] [--app <name>] [--out <dir>] " +
         "[--bg <stage>] [--music <bundled track|audio file|off>] [--seed <n>] [--model <id>] " +
-        "[--env-file <file>] [--max-tokens <n|off>] " +
+        "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] [--skip-preflight] " +
         "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
       // help is a real parsed boolean (see record) — no substring scan
-      const { values } = parseArgs({
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           url: { type: "string" },
           repo: { type: "string" },
@@ -147,6 +164,12 @@ async function main(): Promise<number> {
           // hard LLM spend ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
           // 0 or "off" disables, default 300000
           "max-tokens": { type: "string" },
+          // preview: analyze + script only; print every action (incl. typed
+          // text), write recipe.json, and stop before capture touches the app
+          "dry-run": { type: "boolean" },
+          // skip the HTTP reachability probe (bare fetch, no browser UA) —
+          // for apps it misjudges; the ffmpeg + URL policy checks still run
+          "skip-preflight": { type: "boolean" },
           help: { type: "boolean", short: "h" },
           // private/localhost is ALLOWED BY DEFAULT — filming your own local
           // dev app is the #1 use case. --block-private-network opts into the
@@ -165,6 +188,7 @@ async function main(): Promise<number> {
         console.log(generateUsage);
         return 0;
       }
+      if (rejectPositionals(positionals, generateUsage)) return 1;
       if (!values.url) {
         console.error(generateUsage);
         return 1;
@@ -177,7 +201,7 @@ async function main(): Promise<number> {
         );
       }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
-      const { generate } = await import("../director/generate.js");
+      const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
       // L2: a missing .env is fine (reason "not found"), but a file that EXISTED
       // and failed to PARSE is a real error — surface it even without verbose so
@@ -243,7 +267,19 @@ async function main(): Promise<number> {
         // default OFF; --allow-destructive opts into filming destructive controls
         allowDestructive: !!values["allow-destructive"],
         ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(values["dry-run"] ? { dryRun: true } : {}),
+        ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
       });
+      if (values["dry-run"]) {
+        // the suggested command must preserve the security posture of THIS
+        // run: record defaults to allowing private networks, so a dry run
+        // made under --block-private-network has to say so in the follow-up
+        const followUp = dryRunFollowUpCommand(values.out ?? "out/generate", {
+          blockPrivateNetwork: !!values["block-private-network"],
+        });
+        console.log(`\nsupercut: dry run complete — review the recipe, then film it with:\n  ${followUp}`);
+        return 0;
+      }
       console.log(`\nsupercut: ${res.outFile} (${res.recipe.scenes.length} scenes, ${res.retakes} re-take(s))`);
       return 0;
     }
@@ -258,10 +294,15 @@ async function main(): Promise<number> {
   }
 }
 
+// process.exitCode, not process.exit(): an explicit exit() can truncate
+// buffered stdout when the CLI's output is piped — set the code and let the
+// process drain and exit on its own (all servers/browsers are closed by now)
 main().then(
-  (code) => process.exit(code),
+  (code) => {
+    process.exitCode = code;
+  },
   (err) => {
     console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

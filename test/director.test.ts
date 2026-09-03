@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
 import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
-import { dryRunFollowUpCommand, pickMusic } from "../src/director/generate.js";
+import { dryRunFollowUpCommand, pickMusic, preflight } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { AllScenesCutError, applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
 import { analyzeApp, type AppAnalysis } from "../src/director/analyze.js";
@@ -899,5 +899,26 @@ describe("dry-run follow-up command", () => {
     expect(dryRunFollowUpCommand("custom/dir", { blockPrivateNetwork: false })).toBe(
       "supercut record --recipe custom/dir/recipe.json",
     );
+  });
+});
+
+describe("preflight render deps", () => {
+  it("dry runs skip the ffmpeg check — a recipe preview must not need the render toolchain", async () => {
+    // empty PATH: ffmpeg unreachable. skipReachability keeps the probe off
+    // the network so only the dependency check is under test.
+    const oldPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      // dry-run posture: no render ahead, missing ffmpeg must not fail preview
+      await expect(
+        preflight("http://127.0.0.1:1/", true, { skipReachability: true, skipRenderDeps: true }),
+      ).resolves.toBeUndefined();
+      // full-run posture: the check still guards the pipeline that WILL render
+      await expect(
+        preflight("http://127.0.0.1:1/", true, { skipReachability: true }),
+      ).rejects.toThrow(/ffmpeg/);
+    } finally {
+      process.env.PATH = oldPath;
+    }
   });
 });

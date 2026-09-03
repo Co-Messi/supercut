@@ -89,10 +89,10 @@ export interface GenerateResult {
   verdictLog: SceneVerdict[][];
 }
 
-async function preflight(
+export async function preflight(
   url: string,
   allowPrivateNetwork: boolean,
-  opts: { skipReachability?: boolean; log?: (msg: string) => void } = {},
+  opts: { skipReachability?: boolean; skipRenderDeps?: boolean; log?: (msg: string) => void } = {},
 ): Promise<void> {
   const log = opts.log ?? ((m: string) => console.error(`[generate] ${m}`));
   // app reachable — error in seconds, never after 10 minutes of work.
@@ -153,6 +153,11 @@ async function preflight(
       clearTimeout(timer);
     }
   }
+  // (review) recipe preview must not need the render toolchain: --dry-run
+  // stops after analyze + script, so nothing is filmed or rendered and a
+  // machine without ffmpeg can still produce and review a recipe. The URL
+  // policy and reachability checks above still ran.
+  if (opts.skipRenderDeps) return;
   try {
     await exec("ffmpeg", ["-version"]);
   } catch {
@@ -296,6 +301,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   if (opts.skipPreflight) log("   note: --skip-preflight — not probing the app URL before the crawl");
   await preflight(opts.url, opts.allowPrivateNetwork ?? true, {
     ...(opts.skipPreflight ? { skipReachability: true } : {}),
+    // dry runs never render — don't fail the preview on a missing ffmpeg
+    ...(opts.dryRun ? { skipRenderDeps: true } : {}),
     log: (m) => log(`   ${m}`),
   });
   if ((opts.allowPrivateNetwork ?? true) && !(await urlResolvesPrivate(opts.url))) {

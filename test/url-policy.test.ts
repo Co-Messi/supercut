@@ -153,6 +153,39 @@ describe("request gate — every request type, not just navigations (H4)", () =>
     });
     expect(await gate.allows("http://flaky.example/x.js")).toBe(false);
   });
+
+  it("never caches a verdict derived from a failed lookup — the next request re-resolves", async () => {
+    // rebinding shape: NXDOMAIN at first check, then the name starts resolving
+    // to a private address. The failure must deny AND be forgotten, so the
+    // fresh lookup sees the private address instead of a frozen verdict.
+    let calls = 0;
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async () => {
+        calls++;
+        if (calls === 1) throw new Error("getaddrinfo ENOTFOUND rebinder.example");
+        return true; // now resolves — and it is private
+      },
+    });
+    expect(await gate.allows("http://rebinder.example/steal")).toBe(false); // unverifiable → deny
+    expect(await gate.allows("http://rebinder.example/steal")).toBe(false); // re-resolved → private → deny
+    expect(calls).toBe(2); // the failed lookup was not cached
+  });
+
+  it("a re-resolve after a transient failure can still allow a genuinely public host", async () => {
+    let calls = 0;
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async () => {
+        calls++;
+        if (calls === 1) throw new Error("resolver down");
+        return false;
+      },
+    });
+    expect(await gate.allows("http://cdn.example/a.js")).toBe(false); // outage → deny this one
+    expect(await gate.allows("http://cdn.example/b.js")).toBe(true); // recovered → verified public
+    expect(calls).toBe(2);
+  });
 });
 
 describe("WebSocket gate — upgrades bypass route interception", () => {

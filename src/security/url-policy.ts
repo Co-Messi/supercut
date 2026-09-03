@@ -92,14 +92,29 @@ function isPrivateHostname(hostname: string): boolean {
   return false;
 }
 
+/** ADVISORY-path resolver: swallows lookup failures ("couldn't tell" reads as
+ *  "not private"). Fine for hints; never use it to enforce the policy. */
 async function resolvesPrivate(hostname: string): Promise<boolean> {
   if (isPrivateHostname(hostname)) return true;
   try {
-    const addrs = await lookup(hostname, { all: true, verbatim: true });
-    return addrs.some((a) => isPrivateHostname(a.address));
+    return await resolvesPrivateStrict(hostname);
   } catch {
     return false;
   }
+}
+
+/** ENFORCEMENT-path resolver: a failed or empty lookup PROPAGATES so the
+ *  caller fails closed. Swallowing it here was the rebinding window: an
+ *  NXDOMAIN at check time read as "not private", the gate allowed (and
+ *  cached) the host, and Chromium's own later resolution could then connect
+ *  to a private address the policy never saw. On machines where a proxy/TUN
+ *  does the real resolving, the request gate is the load-bearing SSRF
+ *  defense (the --host-resolver-rules pin is bypassed inside the tunnel), so
+ *  "can't verify" must mean "deny", not "shrug". */
+async function resolvesPrivateStrict(hostname: string): Promise<boolean> {
+  if (isPrivateHostname(hostname)) return true;
+  const addrs = await lookup(hostname, { all: true, verbatim: true });
+  return addrs.some((a) => isPrivateHostname(a.address));
 }
 
 async function checkOne(raw: string, opts: NavigationPolicyOptions, redirect: boolean): Promise<void> {
@@ -112,8 +127,22 @@ async function checkOne(raw: string, opts: NavigationPolicyOptions, redirect: bo
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`navigation URL must be http(s): ${raw}`);
   }
-  if (!opts.allowPrivateNetwork && await resolvesPrivate(url.hostname)) {
-    throw new Error(`${redirect ? "redirect target" : "navigation URL"} is on a private network: ${raw}`);
+  if (!opts.allowPrivateNetwork) {
+    let priv: boolean;
+    try {
+      priv = await resolvesPrivateStrict(url.hostname);
+    } catch (err) {
+      // fail CLOSED while the guard is engaged: an unresolvable host cannot be
+      // verified against the policy, and allowing it hands the decision to
+      // whatever the browser's resolver returns later.
+      throw new Error(
+        `cannot verify ${raw} against the private-network policy (DNS lookup failed: ` +
+          `${err instanceof Error ? err.message : err}) — refusing while the guard is engaged`,
+      );
+    }
+    if (priv) {
+      throw new Error(`${redirect ? "redirect target" : "navigation URL"} is on a private network: ${raw}`);
+    }
   }
 }
 
@@ -163,8 +192,10 @@ export async function urlResolvesPrivate(raw: string): Promise<boolean> {
  *
  * DNS verdicts are cached per host for the lifetime of the gate, so enforcing
  * on every subresource doesn't become a per-request DNS storm. Fail-closed:
- * an unparseable URL or a throwing check blocks the request while the guard
- * is engaged. With the guard off it allows everything and resolves nothing.
+ * an unparseable URL, a throwing check, or a FAILED LOOKUP blocks the request
+ * while the guard is engaged — and a verdict born of a failed lookup is never
+ * cached (see below). With the guard off it allows everything and resolves
+ * nothing.
  */
 export interface RequestGate {
   allows(url: string): Promise<boolean>;
@@ -172,10 +203,15 @@ export interface RequestGate {
 
 export function createRequestGate(opts: {
   allowPrivateNetwork: boolean;
-  /** injectable for tests; defaults to the module's DNS-backed private check */
+  /** injectable for tests; defaults to the module's STRICT DNS-backed private
+   *  check (lookup failures propagate → the gate denies) */
   isPrivateHost?: (hostname: string) => Promise<boolean>;
 }): RequestGate {
-  const isPrivate = opts.isPrivateHost ?? resolvesPrivate;
+  // (review) enforcement uses the STRICT resolver: the advisory one swallowed
+  // lookup errors into "not private", so a transient failure or NXDOMAIN
+  // during a rebinding attempt produced an ALLOW — which the cache then held
+  // for the rest of the run while Chromium re-resolved on its own.
+  const isPrivate = opts.isPrivateHost ?? resolvesPrivateStrict;
   const verdicts = new Map<string, Promise<boolean>>();
   return {
     async allows(raw: string): Promise<boolean> {
@@ -190,7 +226,18 @@ export function createRequestGate(opts: {
       const host = url.hostname;
       let verdict = verdicts.get(host);
       if (!verdict) {
-        verdict = isPrivate(host).then((p) => !p, () => false);
+        verdict = isPrivate(host).then(
+          (p) => !p,
+          () => {
+            // deny THIS request, but do not cache a verdict derived from a
+            // failed lookup: the host was never actually validated. A later
+            // request re-resolves — if the name then points somewhere private
+            // the fresh lookup catches it; caching the failure would instead
+            // freeze whatever the outage happened to look like.
+            verdicts.delete(host);
+            return false;
+          },
+        );
         verdicts.set(host, verdict);
       }
       return verdict;

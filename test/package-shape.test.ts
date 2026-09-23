@@ -9,6 +9,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
   main?: string;
   types?: string;
   exports?: Record<string, unknown>;
+  scripts?: Record<string, string>;
 };
 
 describe("library entry point", () => {
@@ -25,5 +26,18 @@ describe("library entry point", () => {
     for (const name of ["generate", "record", "renderTake", "parseRecipe", "parseEventLog", "resolveProvider"]) {
       expect(typeof (lib as Record<string, unknown>)[name], name).toBe("function");
     }
+  });
+});
+
+describe("publish guard", () => {
+  // npm always packs README* whatever `files` says, so a stray README.md.bak
+  // (or any other backup/secret swept into dist/) ships unless the pack is
+  // checked at publish time — CI's check runs on a clean checkout, not on the
+  // laptop that actually runs `npm publish`
+  it("prepublishOnly builds, then asserts the tarball's contents", () => {
+    const pre = pkg.scripts?.prepublishOnly ?? "";
+    expect(pre).toMatch(/npm run build/);
+    expect(pre).toMatch(/check:pack/);
+    expect(pre.indexOf("check:pack")).toBeGreaterThan(pre.indexOf("npm run build"));
   });
 });

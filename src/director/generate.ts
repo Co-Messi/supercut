@@ -399,6 +399,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     const written = await writeRecipe(llm, analysis, digests, opts.url);
     recipe = written.recipe;
     log(`   recipe valid after ${written.attempts} attempt(s): ${recipe.scenes.length} scenes`);
+    if (written.warning) log(`   warning: ${written.warning}`);
     // full action preview BEFORE the capture browser touches the app — every
     // selector and every typed string is on the record for the operator
     for (const line of formatRecipePreview(recipe)) log(`   ${line}`);

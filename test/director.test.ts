@@ -1033,3 +1033,87 @@ describe("untrusted rules cover screenshots (M-new-2)", () => {
     expect(UNTRUSTED_RULES).toMatch(/screenshot[^.]*untrusted|untrusted[^.]*screenshot/i);
   });
 });
+
+describe("storyboard mismatch degrades instead of killing the run (M10)", () => {
+  /** validRecipeJson plus a third, valid-but-off-storyboard scene */
+  function threeScenes(): string {
+    const r = JSON.parse(validRecipeJson("#cta")) as { scenes: Record<string, unknown>[] };
+    r.scenes.push({
+      name: "extra-tour",
+      priority: 3,
+      entry: { url: "http://127.0.0.1:9999/dash", prelude: [] },
+      depends_on: [],
+      actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1200 }],
+      hold_ms: 400,
+    });
+    return JSON.stringify(r);
+  }
+  function oneScene(): string {
+    const r = JSON.parse(validRecipeJson("#cta")) as { scenes: unknown[] };
+    r.scenes = r.scenes.slice(0, 1);
+    return JSON.stringify(r);
+  }
+
+  it("still asks for the exact storyboard first (the mismatch is fed back)", async () => {
+    const llm = new StubLlm([threeScenes(), validRecipeJson("#cta")]);
+    const res = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(res.attempts).toBe(2);
+    expect(res.recipe.scenes).toHaveLength(2);
+    expect(res.warning).toBeUndefined();
+  });
+
+  it("extra off-storyboard scenes on every attempt: drops them and films the storyboard", async () => {
+    const llm = new StubLlm([threeScenes(), threeScenes(), threeScenes(), threeScenes()]);
+    const res = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(res.recipe.scenes.map((s) => s.name)).toEqual(["signup", "email-payoff"]);
+    expect(res.warning).toMatch(/extra-tour/);
+  });
+
+  it("too few scenes on every attempt: films the beats it did cover, in order", async () => {
+    const llm = new StubLlm([oneScene(), oneScene(), oneScene(), oneScene()]);
+    const res = await writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999");
+    expect(res.recipe.scenes.map((s) => s.name)).toEqual(["signup"]);
+    expect(res.warning).toMatch(/1 of 2/);
+  });
+
+  it("never degrades past a per-scene violation (hallucinated selector still fails the run)", async () => {
+    const bad = validRecipeJson("#nope");
+    const llm = new StubLlm([bad, bad, bad, bad]);
+    await expect(writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999")).rejects.toThrow(
+      /failed recipe validation 4 times/,
+    );
+  });
+
+  it("does not keep a scene whose depends_on points at a dropped scene", async () => {
+    // "tour" films no beat (no beat lives on /dash) and would be dropped, but
+    // "signup" depends on it: recording signup without the state tour set up
+    // would film it out of context, so no degraded recipe exists
+    const r = JSON.parse(validRecipeJson("#cta")) as { scenes: Record<string, unknown>[] };
+    r.scenes = [
+      {
+        name: "tour", priority: 2, entry: { url: "http://127.0.0.1:9999/dash", prelude: [] }, depends_on: [],
+        actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1200 }], hold_ms: 400,
+      },
+      { ...r.scenes[0]!, depends_on: ["tour"] },
+    ];
+    const text = JSON.stringify(r);
+    const llm = new StubLlm([text, text, text, text]);
+    await expect(writeRecipe(llm, analysis, digests, "http://127.0.0.1:9999")).rejects.toThrow(
+      /failed recipe validation 4 times/,
+    );
+  });
+});
+
+describe("unused analysis copy never fails a paid run (M10)", () => {
+  it("headline, tagline, product_name and caption may be short or missing", async () => {
+    const { validateAnalysis } = await import("../src/director/analyze.js");
+    const raw = {
+      product_summary: analysis.product_summary,
+      music_track: "daybreak",
+      headline: "",
+      money_moments: analysis.money_moments.map(({ caption: _c, ...m }) => m),
+    };
+    const parsed = validateAnalysis(raw, digests);
+    expect(parsed.money_moments).toHaveLength(2);
+  });
+});

@@ -115,10 +115,12 @@ export async function installRequestGate(
   const state: GatedContext = { blockedNavigations: [] };
   /** redirect targets already fetched for a stub, keyed by fragmentless URL */
   const pending = new Map<string, { res: APIResponse; expires: number }>();
+  const dispose = (r: APIResponse): void => void r.dispose().catch(() => {});
   const prune = (now: number): void => {
     for (const [k, v] of pending) {
       if (v.expires <= now) {
         pending.delete(k);
+        dispose(v.res);
       }
     }
   };
@@ -142,6 +144,7 @@ export async function installRequestGate(
         if (hit) {
           pending.delete(key);
           await route.fulfill({ response: hit.res });
+          dispose(hit.res);
           return;
         }
       }
@@ -163,12 +166,14 @@ export async function installRequestGate(
           method = "GET";
           body = null;
         }
+        const hopRes = res;
         res = await ctx.request.fetch(next, {
           method,
           headers: hopHeaders(request.headers(), url, next, body !== null),
           ...(body !== null ? { data: body } : {}),
           maxRedirects: 0,
         });
+        dispose(hopRes);
         url = next;
         redirected = true;
       }
@@ -191,7 +196,10 @@ export async function installRequestGate(
         });
         return;
       }
+      // each fetched body is held by Playwright until disposed; a guarded
+      // run makes every request this way, so release it once delivered
       await route.fulfill({ response: res });
+      dispose(res);
     } catch {
       await route.abort("failed").catch(() => {});
     }

@@ -326,3 +326,88 @@ describe("guard ON: the crawler waits out a gated redirect", () => {
     }
   }, 60_000);
 });
+
+/**
+ * Service workers (H-new-2): a registered worker's own fetches are not routed
+ * through the context, so they would be an ungated channel. The guard blocks
+ * registration outright; the guard-off control proves the same page's worker
+ * really does reach the private host when nothing stops it.
+ */
+describe("service workers under the guard", () => {
+  let swApp: { origin: (host: string) => string; close: () => Promise<void> };
+
+  beforeAll(async () => {
+    const srv = createServer((req, res) => {
+      if (req.url?.startsWith("/sw.js")) {
+        res.writeHead(200, { "content-type": "text/javascript" });
+        return res.end(
+          `self.addEventListener("install", (e) => e.waitUntil(` +
+            `fetch("http://127.0.0.1:${probe.port}/sw-" + new URL(location).searchParams.get("tag"), { mode: "no-cors" }).catch(() => {})));`,
+        );
+      }
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(
+        `<!doctype html><title>sw</title><h1>sw page</h1><script>` +
+          `const tag = new URLSearchParams(location.search).get("tag");` +
+          `navigator.serviceWorker?.register("/sw.js?tag=" + tag).catch(() => {});` +
+          `</script>`,
+      );
+    });
+    await new Promise<void>((r) => srv.listen(0, "localhost", r));
+    const port = (srv.address() as { port: number }).port;
+    swApp = {
+      origin: (host) => `http://${host}:${port}`,
+      close: () => new Promise((r) => srv.close(() => r())),
+    };
+  });
+
+  afterAll(async () => {
+    await swApp.close();
+  });
+
+  function swRecipe(origin: string, tag: string): Recipe {
+    return parseRecipe({
+      version: 0,
+      app_url: origin,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "sw",
+          priority: 1,
+          entry: { url: `${origin}/page?tag=${tag}`, prelude: [] },
+          depends_on: [],
+          actions: [{ kind: "wait", duration_ms: 2500 }],
+          hold_ms: 0,
+        },
+      ],
+    });
+  }
+
+  it("guard ON: a service worker never registers, so its fetch never reaches the private host", async () => {
+    vi.clearAllMocks();
+    const out = mkdtempSync(join(tmpdir(), "supercut-gate-sw-on-"));
+    dirs.push(out);
+    await record({
+      recipe: swRecipe(swApp.origin("localhost"), "on"),
+      outDir: out,
+      seed: 1,
+      captureFrames: false,
+      allowPrivateNetwork: false,
+    });
+    expect(probe.requests.filter((u) => u.startsWith("/sw-on"))).toEqual([]);
+  }, 60_000);
+
+  it("guard OFF (control): the same worker does reach the private host", async () => {
+    vi.clearAllMocks();
+    const out = mkdtempSync(join(tmpdir(), "supercut-gate-sw-off-"));
+    dirs.push(out);
+    await record({
+      recipe: swRecipe(swApp.origin("localhost"), "off"),
+      outDir: out,
+      seed: 1,
+      captureFrames: false,
+      allowPrivateNetwork: true,
+    });
+    expect(probe.requests.filter((u) => u.startsWith("/sw-off")).length).toBeGreaterThan(0);
+  }, 60_000);
+});

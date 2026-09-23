@@ -63,6 +63,7 @@ describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
     "http://224.0.0.1/", // IPv4 multicast
     "http://239.255.255.250/",
     "http://[ff02::1]/", // IPv6 multicast
+    "http://[fec0::1]/", // deprecated site-local fec0::/10
     "http://[64:ff9b::a9fe:a9fe]/", // NAT64 of 169.254.169.254
     "http://[64:ff9b::10.0.0.1]/", // NAT64 of 10.0.0.1, dotted tail
     "http://[2002:a9fe:a9fe::1]/", // 6to4 of 169.254.169.254

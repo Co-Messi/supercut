@@ -247,6 +247,14 @@ export function formatRecipePreview(recipe: Recipe): string[] {
   return lines;
 }
 
+/** POSIX-shell quote one argument for a command we print for the user to
+ *  paste: safe words pass through untouched, anything else is single-quoted
+ *  (an embedded ' becomes '\''). */
+export function shellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_\/.:=@%+,-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * The follow-up command a --dry-run tells the user to copy. Flags that set
  * record's SECURITY posture must survive the copy-paste: `record` allows
@@ -257,7 +265,7 @@ export function formatRecipePreview(recipe: Recipe): string[] {
  */
 export function dryRunFollowUpCommand(outDir: string, opts: { blockPrivateNetwork?: boolean } = {}): string {
   return (
-    `supercut record --recipe ${join(outDir, "recipe.json")}` +
+    `supercut record --recipe ${shellQuote(join(outDir, "recipe.json"))}` +
     (opts.blockPrivateNetwork ? " --block-private-network" : "")
   );
 }
@@ -488,7 +496,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
           `QC cut every scene (${err.cut.join(", ")}) — refusing to render an empty video. ` +
             `The recorded take is preserved at ${takeDir} (recipe.json and director-report.json ` +
             `sit beside it); inspect the verdicts, and render it anyway with: ` +
-            `supercut render --take ${takeDir}`,
+            `supercut render --take ${shellQuote(takeDir)}`,
         );
       }
       if (!applied.changed || retakes >= MAX_RETAKES) {

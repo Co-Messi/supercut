@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
 import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
-import { dryRunFollowUpCommand, pickMusic, preflight } from "../src/director/generate.js";
+import { dryRunFollowUpCommand, pickMusic, preflight, shellQuote } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
 import { AllScenesCutError, applyVerdicts, deterministicChecks, qcReport } from "../src/director/qc.js";
 import { analyzeApp, type AppAnalysis } from "../src/director/analyze.js";
@@ -895,6 +895,23 @@ describe("dry-run follow-up command", () => {
     expect(dryRunFollowUpCommand("out/generate", { blockPrivateNetwork: true })).toBe(
       "supercut record --recipe out/generate/recipe.json --block-private-network",
     );
+  });
+
+  it("quotes a path with spaces or quotes so the printed line is paste-safe", () => {
+    expect(dryRunFollowUpCommand("/Users/me/Brayden's Projects/out")).toBe(
+      "supercut record --recipe '/Users/me/Brayden'\\''s Projects/out/recipe.json'",
+    );
+    expect(dryRunFollowUpCommand("my out", { blockPrivateNetwork: true })).toBe(
+      "supercut record --recipe 'my out/recipe.json' --block-private-network",
+    );
+  });
+
+  it("shellQuote leaves safe words alone and single-quotes everything else", () => {
+    expect(shellQuote("out/take-0")).toBe("out/take-0");
+    expect(shellQuote("a b")).toBe("'a b'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    expect(shellQuote("$(rm -rf ~)")).toBe("'$(rm -rf ~)'");
+    expect(shellQuote("")).toBe("''");
   });
 
   it("stays minimal when the guard was not requested", () => {

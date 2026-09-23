@@ -42,6 +42,50 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
 
+/** the only host a provider-scoped credential may ever be sent to */
+const PROVIDER_HOSTS: Record<Exclude<ProviderName, "custom">, string> = {
+  deepseek: new URL(DEEPSEEK_BASE).hostname,
+  openrouter: new URL(OPENROUTER_BASE).hostname,
+};
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
+
+/**
+ * The base URL decides where the bearer key goes. Invariants:
+ *  - deepseek/openrouter keys only ever reach that provider's own host, so a
+ *    stray SUPERCUT_LLM_BASE_URL (in a .env, a shell profile, a CI secret)
+ *    can never redirect them to a third party — refused, not ignored, so the
+ *    user learns their config is not what they think it is;
+ *  - every key travels over https, except to a loopback host (a local model
+ *    server, where there is no network path to sniff).
+ */
+function assertSafeBaseUrl(raw: string, provider: ProviderName): void {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`SUPERCUT_LLM_BASE_URL is not a valid URL: ${raw}`);
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+    throw new Error(
+      `SUPERCUT_LLM_BASE_URL must use https (plain http is allowed only for a loopback host): ${raw}`,
+    );
+  }
+  if (provider !== "custom") {
+    const expected = PROVIDER_HOSTS[provider];
+    if (url.hostname.toLowerCase() !== expected) {
+      throw new Error(
+        `SUPERCUT_LLM_BASE_URL points at ${url.hostname}, but provider ${provider} only sends its key ` +
+          `to ${expected}. To use another endpoint, set SUPERCUT_PROVIDER=custom with its own ` +
+          `SUPERCUT_API_KEY, or unset SUPERCUT_LLM_BASE_URL.`,
+      );
+    }
+  }
+}
+
 function parseProvider(value: string | undefined): ProviderName | undefined {
   if (!value) return undefined;
   const v = value.toLowerCase();
@@ -114,6 +158,7 @@ export function resolveProvider(
     provider === "deepseek" ? DEEPSEEK_BASE : provider === "openrouter" ? OPENROUTER_BASE : ""
   );
   if (!baseUrl) throw new Error("SUPERCUT_LLM_BASE_URL is required when SUPERCUT_PROVIDER=custom");
+  assertSafeBaseUrl(baseUrl, provider);
 
   const model = overrides.model ?? env.SUPERCUT_MODEL ?? (
     provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL :

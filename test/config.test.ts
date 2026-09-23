@@ -87,6 +87,85 @@ describe("provider resolution", () => {
     ).toThrow(/SUPERCUT_API_KEY is required/);
   });
 
+  describe("base-URL override never redirects a provider-scoped key (H-new-3)", () => {
+    const foreign = "https://gateway.example/v1";
+
+    it("auto-detected deepseek refuses a foreign SUPERCUT_LLM_BASE_URL", () => {
+      expect(() => resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: foreign })).toThrow(
+        /SUPERCUT_LLM_BASE_URL.*gateway\.example.*api\.deepseek\.com/s,
+      );
+    });
+
+    it("explicit deepseek refuses a foreign SUPERCUT_LLM_BASE_URL", () => {
+      expect(() =>
+        resolved({ SUPERCUT_PROVIDER: "deepseek", DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: foreign }),
+      ).toThrow(/api\.deepseek\.com/);
+    });
+
+    it("explicit deepseek with SUPERCUT_API_KEY still refuses a foreign base URL", () => {
+      expect(() =>
+        resolved({ SUPERCUT_PROVIDER: "deepseek", SUPERCUT_API_KEY: "k", SUPERCUT_LLM_BASE_URL: foreign }),
+      ).toThrow(/api\.deepseek\.com/);
+    });
+
+    it("auto-detected openrouter refuses a foreign SUPERCUT_LLM_BASE_URL", () => {
+      expect(() => resolved({ OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: foreign })).toThrow(
+        /openrouter\.ai/,
+      );
+    });
+
+    it("explicit openrouter refuses a foreign base URL", () => {
+      expect(() =>
+        resolved({ SUPERCUT_PROVIDER: "openrouter", OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: foreign }),
+      ).toThrow(/openrouter\.ai/);
+    });
+
+    it("the programmatic baseUrl override is held to the same rule", () => {
+      expect(() => resolveProvider({ DEEPSEEK_API_KEY: "ds-key" }, { baseUrl: foreign })).toThrow(
+        /api\.deepseek\.com/,
+      );
+    });
+
+    it("a lookalike host that merely contains the provider host is refused", () => {
+      expect(() =>
+        resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: "https://api.deepseek.com.evil.example/v1" }),
+      ).toThrow(/api\.deepseek\.com/);
+      expect(() =>
+        resolved({ OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: "https://evil-openrouter.ai/api/v1" }),
+      ).toThrow(/openrouter\.ai/);
+    });
+
+    it("the provider's own host (any path) is accepted", () => {
+      expect(
+        resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: "https://api.deepseek.com/v1" }).baseUrl,
+      ).toBe("https://api.deepseek.com/v1");
+      expect(
+        resolved({ OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: "https://openrouter.ai/api/v1" }).baseUrl,
+      ).toBe("https://openrouter.ai/api/v1");
+    });
+
+    it("the provider's own host over plain http is refused (key would travel in cleartext)", () => {
+      expect(() =>
+        resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: "http://api.deepseek.com" }),
+      ).toThrow(/https/);
+    });
+
+    it("custom endpoints require https unless the host is loopback", () => {
+      const custom = { SUPERCUT_PROVIDER: "custom", SUPERCUT_API_KEY: "k", SUPERCUT_MODEL: "m" };
+      expect(() => resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "http://llm.example.com/v1" })).toThrow(/https/);
+      for (const loop of ["http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"]) {
+        expect(resolved({ ...custom, SUPERCUT_LLM_BASE_URL: loop }).baseUrl).toBe(loop);
+      }
+      expect(resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "https://llm.example.com/v1" }).provider).toBe("custom");
+    });
+
+    it("an unparseable or non-http(s) base URL is refused", () => {
+      const custom = { SUPERCUT_PROVIDER: "custom", SUPERCUT_API_KEY: "k", SUPERCUT_MODEL: "m" };
+      expect(() => resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "not a url" })).toThrow(/SUPERCUT_LLM_BASE_URL/);
+      expect(() => resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "ftp://llm.example.com" })).toThrow(/https/);
+    });
+  });
+
   it("summary names the env var that supplied the credential", () => {
     const ds = resolved({ DEEPSEEK_API_KEY: "deepseek-key" });
     expect(ds.keySource).toBe("DEEPSEEK_API_KEY");

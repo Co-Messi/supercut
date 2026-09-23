@@ -182,10 +182,7 @@ SUPERCUT_MODEL=anthropic/claude-sonnet-4.6
 SUPERCUT_VISION=true
 ```
 
-For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`.
-A provider-scoped key never leaves its provider: with `deepseek` or `openrouter` (set or
-auto-detected), a `SUPERCUT_LLM_BASE_URL` on any other host is refused, and every base URL
-must be `https:` (plain `http:` only for a loopback model server).
+For `SUPERCUT_PROVIDER=custom`, set both `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`.
 If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly — ambiguous
 config fails loudly rather than guessing.
 

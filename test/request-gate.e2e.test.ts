@@ -275,3 +275,54 @@ describe("request gate vs redirect hops (H-new-1)", () => {
     expect(hit("/nav-crawl-off").length).toBeGreaterThan(0);
   }, 60_000);
 });
+
+/**
+ * A redirected navigation under the guard is first answered with a stub that
+ * replaces itself with the redirect target (see browser-gate.ts). The crawler
+ * must digest the TARGET once it has loaded, not the stub or a half-loaded
+ * target: its page.goto resolves on the stub, so it has to wait for the real
+ * document.
+ */
+describe("guard ON: the crawler waits out a gated redirect", () => {
+  it("digests the redirect target after its load event, at the target's URL", async () => {
+    vi.clearAllMocks();
+    const srv = createServer((req, res) => {
+      if (req.url === "/start") {
+        res.writeHead(302, { location: "/landing" });
+        return res.end();
+      }
+      if (req.url === "/landing") {
+        res.writeHead(200, { "content-type": "text/html" });
+        return res.end(
+          `<!doctype html><html><head><title>Landing</title></head><body><h1 id="h">loading</h1>` +
+            `<img src="/slow.png">` +
+            `<script>addEventListener("load", () => { document.getElementById("h").textContent = "Landing ready" })</script>` +
+            `</body></html>`,
+        );
+      }
+      if (req.url === "/slow.png") {
+        // holds the target's load event well past the crawler's settle pause
+        setTimeout(() => {
+          res.writeHead(404);
+          res.end();
+        }, 1_500);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((r) => srv.listen(0, "localhost", r));
+    const port = (srv.address() as { port: number }).port;
+    try {
+      const digests = await crawlApp(`http://localhost:${port}/start`, {
+        maxPages: 1,
+        screenshots: false,
+        allowPrivateNetwork: false,
+      });
+      expect(digests[0]!.url).toBe(`http://localhost:${port}/landing`);
+      expect(digests[0]!.headings).toContain("Landing ready");
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  }, 60_000);
+});

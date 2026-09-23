@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
-import { installRequestGate, type GatedContext } from "../security/browser-gate.js";
+import { installRequestGate, settleGatedRedirect, type GatedContext } from "../security/browser-gate.js";
 import {
   assertSafeNavigationUrl,
   createRequestGate,
@@ -210,7 +210,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // never fail on it. SETTLE_MS after this lets first paints land. Returns the nav
 // response so callers can re-check the final URL against the SSRF policy.
 async function gotoReady(page: Page, url: string) {
-  const response = await page.goto(url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" });
+  // guard ON: a redirected navigation first lands on the gate's stub, which
+  // replaces itself with the target — wait for the real document
+  const response = await settleGatedRedirect(
+    page,
+    await page.goto(url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" }),
+    { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" },
+  );
   await page.waitForLoadState("load", { timeout: 2_000 }).catch(() => {});
   return response;
 }

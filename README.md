@@ -147,8 +147,12 @@ A click that ends on a blocked or private page fails the scene instead of filmin
 error page. Service workers are blocked while the guard is on.
 
 The guard has costs and limits:
-- A redirected page renders at the URL that was requested, not the one it redirected
-  to. Responses are buffered, not streamed.
+- A redirected page is reached through a one-line stub page that replaces itself with
+  the redirect target, so the page ends up at the right URL and the target is still
+  fetched only once. A `307`/`308` chain that ends in a `POST` cannot be replayed that
+  way and renders at the URL that was requested.
+- Responses are buffered, not streamed. A response that never completes (a
+  long-poll or server-sent-events endpoint) fails after 30 seconds.
 - WebSocket gating relies on Playwright's `routeWebSocket`. On a Playwright older than
   1.48, supercut prints a warning and WebSocket connections are **not** policy-checked.
 - Blocked ranges include CGNAT (`100.64.0.0/10`), `198.18.0.0/15`, multicast, and IPv6

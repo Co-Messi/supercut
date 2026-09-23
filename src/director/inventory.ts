@@ -6,7 +6,7 @@
  */
 import { chromium, type Browser, type Page } from "playwright";
 import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
-import { installRequestGate } from "../security/browser-gate.js";
+import { installRequestGate, settleGatedRedirect } from "../security/browser-gate.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 /**
@@ -498,7 +498,13 @@ export async function crawlApp(
       // kill the whole crawl — skip it and keep going
       try {
         await assertSafeNavigationUrl(target, { allowPrivateNetwork });
-        const response = await page.goto(target, { timeout: 15_000, waitUntil: "load" });
+        // guard ON: a redirected navigation first lands on the gate's stub,
+        // which replaces itself with the target — wait for the real document
+        const response = await settleGatedRedirect(
+          page,
+          await page.goto(target, { timeout: 15_000, waitUntil: "load" }),
+          { timeout: 15_000, waitUntil: "load" },
+        );
         await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         await page.waitForTimeout(400); // settle: load ≠ ready
         // re-validate where the page SETTLED: a client-side redirect (JS,

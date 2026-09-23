@@ -9,22 +9,56 @@
  * handler performs the request itself with `maxRedirects: 0`, checks every
  * `Location` against the gate BEFORE requesting it, follows the chain
  * manually (bounded), and fulfils the browser with the final response.
- * Chromium therefore never sees a 3xx and never makes a request of its own
- * that the gate did not approve.
+ * Chromium therefore never sees a 3xx, so it never follows a hop on its own.
+ *
+ * Redirected navigations: fulfilling the final body under the URL the browser
+ * asked for would leave the document at the pre-redirect URL, so relative
+ * assets, `location` and client-side routers would all resolve against the
+ * wrong path (`/login` → 302 `/app/` then loads `/main.js`, not
+ * `/app/main.js`). Handing Chromium the validated 3xx is not safe either: it
+ * follows that hop natively, without calling route(), and the target can
+ * answer the second request with a 302 to a private host. Instead, a
+ * redirected GET navigation is fulfilled with a tiny stub that
+ * `location.replace()`s to the final URL. That is a fresh navigation, which
+ * does reach this handler, and it is served from the response the gate
+ * already fetched (one-shot, short-lived), so the target is requested once
+ * and never re-asked. The stub carries GATED_REDIRECT_HEADER so callers that
+ * awaited the navigation can wait for the real document (settleGatedRedirect).
  *
  * Costs, all confined to --block-private-network runs:
- *  - a redirected DOCUMENT renders at its pre-redirect URL (the browser was
- *    handed the final body for the URL it asked for);
+ *  - a 307/308 chain that ends in a POST still renders at the pre-redirect
+ *    URL (a client-side hop cannot replay a POST);
  *  - HTTP traffic is made by Playwright's Node client, so Chromium's
  *    `--host-resolver-rules` pin does not apply to it, and responses are
- *    buffered in memory rather than streamed.
+ *    buffered in memory rather than streamed (a response that never
+ *    completes fails when Playwright's fetch timeout, 30s, runs out).
  */
-import type { APIResponse, BrowserContext, Request, Route } from "playwright";
+import type { APIResponse, BrowserContext, Page, Request, Response, Route } from "playwright";
 import type { RequestGate } from "./url-policy.js";
 
 /** longer chains than this are treated as a loop and fail the request */
 export const MAX_REDIRECT_HOPS = 10;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** set on the stub a redirected navigation is first fulfilled with; its
+ *  value is the URL the stub replaces itself with */
+export const GATED_REDIRECT_HEADER = "x-supercut-gated-redirect";
+/** how long a redirect target's already-fetched response waits for the
+ *  stub's follow-up navigation before it is dropped (a later request for the
+ *  same URL is then simply fetched again, through the gate) */
+const PENDING_TTL_MS = 10_000;
+
+function withoutFragment(u: string): string {
+  const url = new URL(u);
+  url.hash = "";
+  return url.href;
+}
+
+/** the stub document: replace this entry with the final URL, nothing else.
+ *  `<` is escaped so the URL can never close the script element. */
+function redirectStub(target: string): string {
+  const literal = JSON.stringify(target).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return `<!doctype html><meta charset="utf-8"><script>location.replace(${literal})</script>`;
+}
 
 export interface GatedContext {
   /** main-frame navigations the policy refused (the first hop or any
@@ -79,6 +113,15 @@ export async function installRequestGate(
   opts: InstallGateOptions = {},
 ): Promise<GatedContext> {
   const state: GatedContext = { blockedNavigations: [] };
+  /** redirect targets already fetched for a stub, keyed by fragmentless URL */
+  const pending = new Map<string, { res: APIResponse; expires: number }>();
+  const prune = (now: number): void => {
+    for (const [k, v] of pending) {
+      if (v.expires <= now) {
+        pending.delete(k);
+      }
+    }
+  };
 
   await ctx.route("**/*", async (route: Route) => {
     const request = route.request();
@@ -91,7 +134,20 @@ export async function installRequestGate(
       if (!(await gate.allows(url))) return await block(url);
       if (opts.veto?.(request)) return await route.abort().catch(() => {});
 
+      // a stub's follow-up: serve what the gate already fetched for it
+      prune(Date.now());
+      if (request.isNavigationRequest() && request.method() === "GET") {
+        const key = withoutFragment(url);
+        const hit = pending.get(key);
+        if (hit) {
+          pending.delete(key);
+          await route.fulfill({ response: hit.res });
+          return;
+        }
+      }
+
       let res: APIResponse = await route.fetch({ maxRedirects: 0 });
+      let redirected = false;
       let method = request.method();
       let body = request.postDataBuffer();
       for (let hop = 0; REDIRECT_STATUSES.has(res.status()); hop++) {
@@ -114,6 +170,26 @@ export async function installRequestGate(
           maxRedirects: 0,
         });
         url = next;
+        redirected = true;
+      }
+      if (
+        redirected &&
+        request.isNavigationRequest() &&
+        method === "GET" &&
+        !REDIRECT_STATUSES.has(res.status()) &&
+        withoutFragment(url) !== withoutFragment(request.url())
+      ) {
+        pending.set(withoutFragment(url), { res, expires: Date.now() + PENDING_TTL_MS });
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            [GATED_REDIRECT_HEADER]: url,
+          },
+          body: redirectStub(url),
+        });
+        return;
       }
       await route.fulfill({ response: res });
     } catch {
@@ -122,4 +198,22 @@ export async function installRequestGate(
   });
 
   return state;
+}
+
+
+/**
+ * After awaiting a navigation made under the gate: if the response is the
+ * stub of a gated redirect, wait until the frame has replaced it with the
+ * real document. Returns null in that case (the stub is not the document —
+ * callers fall back to page.url()); otherwise returns the response unchanged.
+ */
+export async function settleGatedRedirect(
+  page: Page,
+  response: Response | null,
+  opts: { timeout: number; waitUntil: "load" | "domcontentloaded" },
+): Promise<Response | null> {
+  if (!response?.headers()[GATED_REDIRECT_HEADER]) return response;
+  const stub = response.url();
+  await page.waitForURL((u) => withoutFragment(u.href) !== withoutFragment(stub), opts);
+  return null;
 }

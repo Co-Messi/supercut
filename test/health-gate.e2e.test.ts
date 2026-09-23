@@ -217,3 +217,33 @@ describe("generate failure paths keep the report and the spend line (M-new-5)", 
     expect(lines.some((l) => l.startsWith("LLM usage:"))).toBe(true);
   }, 120_000);
 });
+
+/**
+ * M-new-2: the action preview is only a control if a human can act on it
+ * before the browser does. When the CLI can ask (a TTY, no --yes) it passes a
+ * confirm callback; declining must stop the run before capture.
+ */
+describe("confirm before the first capture (M-new-2)", () => {
+  it("asks AFTER the preview is printed, and a 'no' films nothing but keeps the recipe", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-confirm-no-"));
+    dirs.push(outDir);
+    vi.mocked(record).mockClear();
+    const lines: string[] = [];
+    let previewSeenAtConfirm = false;
+
+    await expect(
+      generate({
+        llm: scriptedBrain(), url: app.url, outDir, vision: false, allowPrivateNetwork: true,
+        log: (m) => lines.push(m),
+        confirmCapture: async () => {
+          previewSeenAtConfirm = lines.some((l) => l.includes("click #cta"));
+          return false;
+        },
+      }),
+    ).rejects.toThrow(/cancelled.*nothing was filmed/s);
+
+    expect(previewSeenAtConfirm).toBe(true);
+    expect(vi.mocked(record)).not.toHaveBeenCalled();
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
+  }, 120_000);
+});

@@ -229,8 +229,8 @@ async function main(): Promise<number> {
           return 1;
         }
       }
-      // privacy notice (informational, NOT a gate — blocking the primary
-      // command on --yes was a usability regression). --yes silences it.
+      // privacy notice (informational, NOT a gate). --yes silences it, and
+      // also skips the pre-capture confirmation below.
       if (!values.yes) {
         console.error(
           "privacy: generate sends crawled page text" +
@@ -269,6 +269,10 @@ async function main(): Promise<number> {
         ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(values["dry-run"] ? { dryRun: true } : {}),
         ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
+        // a human at a terminal gets the last word between the printed action
+        // preview and the first real click; --yes (or a non-TTY stdin, e.g.
+        // CI) proceeds without asking
+        ...(process.stdin.isTTY && !values.yes ? { confirmCapture: confirmOnTty } : {}),
       });
       if (values["dry-run"]) {
         // the suggested command must preserve the security posture of THIS
@@ -291,6 +295,18 @@ async function main(): Promise<number> {
     default:
       console.error(`unknown command "${command}"\n\n${HELP}`);
       return 1;
+  }
+}
+
+/** y/N prompt on stderr (stdout stays clean for piping) */
+async function confirmOnTty(): Promise<boolean> {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question("Film this recipe against the live app now? [y/N] ");
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
   }
 }
 

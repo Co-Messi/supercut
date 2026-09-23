@@ -1025,3 +1025,11 @@ describe("retry feedback trust boundary (M-new-1)", () => {
     expect(await outsideMarkers(retry)).toContain("invalid");
   });
 });
+
+describe("untrusted rules cover screenshots (M-new-2)", () => {
+  it("the shared rules text says text inside screenshots is untrusted too", async () => {
+    const { UNTRUSTED_RULES } = await import("../src/director/llm.js");
+    expect(UNTRUSTED_RULES).toMatch(/screenshot/i);
+    expect(UNTRUSTED_RULES).toMatch(/screenshot[^.]*untrusted|untrusted[^.]*screenshot/i);
+  });
+});

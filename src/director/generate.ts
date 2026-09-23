@@ -77,6 +77,11 @@ export interface GenerateOptions {
    *  bare-fetch probe misjudges (aggressive UA gating, unusual status codes at
    *  `/`); the ffmpeg check and all URL policy checks still run. */
   skipPreflight?: boolean;
+  /** asked once, after the action preview is printed and before the capture
+   *  browser first touches the app; resolving false cancels the run (the
+   *  recipe is still written). The CLI supplies it when a human can answer
+   *  (stdin is a TTY and --yes is absent). */
+  confirmCapture?: () => Promise<boolean>;
   log?: (msg: string) => void;
 }
 
@@ -403,6 +408,15 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       logUsage();
       log(`dry run: recipe written to ${join(opts.outDir, "recipe.json")} — nothing was filmed`);
       return { outFile: "", recipe, analysis, retakes: 0, verdictLog: [] };
+    }
+
+    if (opts.confirmCapture && !(await opts.confirmCapture())) {
+      throw new Error(
+        `capture cancelled — nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
+          `review or edit it, then film it with: ${dryRunFollowUpCommand(opts.outDir, {
+            blockPrivateNetwork: !(opts.allowPrivateNetwork ?? true),
+          })}`,
+      );
     }
 
     let result: RecordResult;

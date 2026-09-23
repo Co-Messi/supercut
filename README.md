@@ -55,7 +55,7 @@ Each stage hands off a plain-JSON artifact, so you can stop at any point, hand-e
 
 ```bash
 # your app running locally? one command:
-npx @co-messi/supercut generate --url http://localhost:3000 --yes
+npx @co-messi/supercut generate --url http://localhost:3000
 ```
 
 `generate` needs an LLM key in a `.env` (see [provider setup](#-llm-provider-setup)),
@@ -72,7 +72,7 @@ cd supercut
 npm install
 npm run build
 
-node dist/cli/index.js generate --url http://127.0.0.1:3000 --yes
+node dist/cli/index.js generate --url http://127.0.0.1:3000
 ```
 
 No key? The non-AI path works standalone against the bundled demo app:
@@ -122,7 +122,7 @@ makes the director read your routes so it films real panels, not just the landin
 Help the director understand a deeper, multi-page app by pointing it at the source:
 
 ```bash
-node dist/cli/index.js generate --url http://127.0.0.1:3000 --repo ./ --yes
+node dist/cli/index.js generate --url http://127.0.0.1:3000 --repo ./
 ```
 
 ### Private/local apps & untrusted targets
@@ -134,7 +134,7 @@ localhost / RFC1918 / link-local by default — no flag needed. If you point it 
 each redirect hop):
 
 ```bash
-node dist/cli/index.js generate --url https://untrusted.example --block-private-network --yes
+node dist/cli/index.js generate --url https://untrusted.example --block-private-network
 ```
 
 (`--allow-private-network` is a deprecated no-op kept for back-compat.) With the guard on,
@@ -166,8 +166,10 @@ The guard has costs and limits:
 > data or URLs/recipes you do not trust. Pass `--allow-destructive` to opt back in.
 >
 > `generate` prints the recipe's full action list — every selector and every typed
-> string — before filming starts, and `--dry-run` stops right there: review
-> `recipe.json`, then film it with `supercut record`.
+> string — before filming starts. At a terminal it then asks before the first click;
+> `--yes` (or a non-interactive stdin, as in CI or a coding agent) skips the question.
+> `--dry-run` stops right there instead: review `recipe.json`, then film it with
+> `supercut record`.
 
 ## 🔌 LLM provider setup
 

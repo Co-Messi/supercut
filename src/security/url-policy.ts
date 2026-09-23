@@ -29,16 +29,18 @@ function inCidr(ip: string, base: string, bits: number): boolean {
  * here makes the guard self-contained and covers the mapped-IPv6 case the URL
  * parser leaves intact. Returns the original host when it isn't an alt-encoding.
  *
- * DNS-rebinding (a hostname that resolves public at check time and private at
- * connect time — resolve-time TOCTOU): when the guard is ON, `resolveAndPinHost`
- * below resolves once, validates the addresses, and yields a Chromium
- * `--host-resolver-rules` mapping so the browser connects to the exact IP that
- * was vetted. Both the director's crawler and the capture executor apply it
- * to their browser launches (the executor pins every recipe host); both also
- * install a `createRequestGate` route handler so in-flight requests to
- * unpinned hosts are policy-checked before they leave the browser, and a
- * `gateWebSockets` handler for the WebSocket upgrades that route interception
- * cannot see.
+ * DNS rebinding (a hostname that resolves public at check time and private at
+ * connect time) is defended only BEST-EFFORT, in layers:
+ *  - with the guard on, `resolveAndPinHost` pins each TARGET host to its
+ *    vetted IP via Chromium's `--host-resolver-rules`. The pin only governs
+ *    connections Chromium makes itself (WebSockets); guarded HTTP requests are
+ *    made from Node by the request gate (see browser-gate.ts) and resolve on
+ *    their own.
+ *  - `createRequestGate` re-resolves allowed hosts after a short TTL, so a
+ *    name that turns private mid-run is caught at the next check.
+ * Neither closes the window between the policy lookup and the connection's
+ * own lookup, for any host. That needs enforcement at the connection (a
+ * filtering proxy), which supercut does not ship.
  */
 function normalizeHostToIPv4(h: string): string {
   // whole-host bare decimal integer, e.g. "2130706433" → "127.0.0.1"
@@ -181,6 +183,10 @@ export async function urlResolvesPrivate(raw: string): Promise<boolean> {
   }
 }
 
+/** a few seconds: long enough that a page's burst of subresources shares one
+ *  lookup, short enough that "allowed once" never means "allowed all run" */
+const DEFAULT_ALLOW_TTL_MS = 5_000;
+
 /**
  * Per-run request gate for a Playwright route handler: decides whether ANY
  * in-flight browser request — navigation, fetch/XHR, <img>, <script>, <link>,
@@ -190,12 +196,21 @@ export async function urlResolvesPrivate(raw: string): Promise<boolean> {
  * upgrades never reach a route handler — gateWebSockets below covers those
  * with the same gate.)
  *
- * DNS verdicts are cached per host for the lifetime of the gate, so enforcing
- * on every subresource doesn't become a per-request DNS storm. Fail-closed:
- * an unparseable URL, a throwing check, or a FAILED LOOKUP blocks the request
+ * DNS verdicts are cached per host so enforcing on every subresource doesn't
+ * become a per-request DNS storm. A DENY is kept for the run (re-denying can
+ * never widen access); an ALLOW expires after `allowTtlMs`, so a name that
+ * rebinds to a private address mid-run is re-resolved and caught at the next
+ * request after expiry instead of being trusted forever. Fail-closed: an
+ * unparseable URL, a throwing check, or a FAILED LOOKUP blocks the request
  * while the guard is engaged — and a verdict born of a failed lookup is never
  * cached (see below). With the guard off it allows everything and resolves
  * nothing.
+ *
+ * Best-effort, not a rebinding proof: the verdict comes from one lookup and
+ * the connection makes its own. A name that answers "public" to the check
+ * and "private" to the connect, inside the TTL or between the two lookups,
+ * is not caught — that needs enforcement at the connection (a filtering
+ * proxy), which this module does not provide.
  */
 export interface RequestGate {
   allows(url: string): Promise<boolean>;
@@ -206,13 +221,18 @@ export function createRequestGate(opts: {
   /** injectable for tests; defaults to the module's STRICT DNS-backed private
    *  check (lookup failures propagate → the gate denies) */
   isPrivateHost?: (hostname: string) => Promise<boolean>;
+  /** how long an ALLOW verdict is trusted before the host is re-resolved */
+  allowTtlMs?: number;
+  /** injectable clock for tests */
+  now?: () => number;
 }): RequestGate {
-  // (review) enforcement uses the STRICT resolver: the advisory one swallowed
-  // lookup errors into "not private", so a transient failure or NXDOMAIN
-  // during a rebinding attempt produced an ALLOW — which the cache then held
-  // for the rest of the run while Chromium re-resolved on its own.
+  // enforcement uses the STRICT resolver: a lookup error must deny, never
+  // read as "not private"
   const isPrivate = opts.isPrivateHost ?? resolvesPrivateStrict;
-  const verdicts = new Map<string, Promise<boolean>>();
+  const allowTtlMs = opts.allowTtlMs ?? DEFAULT_ALLOW_TTL_MS;
+  const now = opts.now ?? Date.now;
+  /** expiresAt is Infinity while the lookup is pending and for a deny */
+  const verdicts = new Map<string, { verdict: Promise<boolean>; expiresAt: number }>();
   return {
     async allows(raw: string): Promise<boolean> {
       if (opts.allowPrivateNetwork) return true;
@@ -224,23 +244,26 @@ export function createRequestGate(opts: {
       }
       if (url.protocol !== "http:" && url.protocol !== "https:") return false;
       const host = url.hostname;
-      let verdict = verdicts.get(host);
-      if (!verdict) {
-        verdict = isPrivate(host).then(
-          (p) => !p,
-          () => {
-            // deny THIS request, but do not cache a verdict derived from a
-            // failed lookup: the host was never actually validated. A later
-            // request re-resolves — if the name then points somewhere private
-            // the fresh lookup catches it; caching the failure would instead
-            // freeze whatever the outage happened to look like.
-            verdicts.delete(host);
-            return false;
-          },
-        );
-        verdicts.set(host, verdict);
-      }
-      return verdict;
+      const cached = verdicts.get(host);
+      if (cached && now() < cached.expiresAt) return cached.verdict;
+      const entry = { verdict: Promise.resolve(false), expiresAt: Infinity };
+      entry.verdict = isPrivate(host).then(
+        (p) => {
+          if (!p) entry.expiresAt = now() + allowTtlMs;
+          return !p;
+        },
+        () => {
+          // deny THIS request, but do not cache a verdict derived from a
+          // failed lookup: the host was never actually validated. A later
+          // request re-resolves — if the name then points somewhere private
+          // the fresh lookup catches it; caching the failure would instead
+          // freeze whatever the outage happened to look like.
+          if (verdicts.get(host) === entry) verdicts.delete(host);
+          return false;
+        },
+      );
+      verdicts.set(host, entry);
+      return entry.verdict;
     },
   };
 }
@@ -299,12 +322,13 @@ export interface PinnedHost {
 }
 
 /**
- * Resolve-and-pin (DNS-rebinding defense): resolve the target hostname ONCE,
- * validate every returned address against the private-network policy, and
- * return a Chromium host-resolver rule that pins the hostname to the first
- * vetted IP — so the browser connects to the address we checked, not whatever
- * a second resolve returns. Returns undefined for IP-literal hosts (nothing
- * to rebind).
+ * Resolve-and-pin (partial DNS-rebinding defense): resolve the target
+ * hostname ONCE, validate every returned address against the
+ * private-network policy, and return a Chromium host-resolver rule that pins
+ * the hostname to the first vetted IP, so connections Chromium itself makes
+ * go to the address we checked. Requests the guard makes from Node are not
+ * covered (see the module note above). Returns undefined for IP-literal hosts
+ * (nothing to rebind).
  */
 export async function resolveAndPinHost(
   raw: string,

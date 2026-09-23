@@ -146,6 +146,40 @@ describe("request gate — every request type, not just navigations (H4)", () =>
     expect(lookups).toEqual(["internal.corp", "cdn.example"]);
   });
 
+  it("an ALLOW verdict expires: a host that later resolves private is re-checked, not trusted for the run (H-new-2)", async () => {
+    let t = 0;
+    let privateNow = false;
+    const lookups: string[] = [];
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async (h) => { lookups.push(h); return privateNow; },
+      allowTtlMs: 1000,
+      now: () => t,
+    });
+    expect(await gate.allows("http://rebind.example/a")).toBe(true);
+    privateNow = true; // the name rebinds to an internal address
+    t = 999;
+    expect(await gate.allows("http://rebind.example/b")).toBe(true); // still inside the TTL
+    t = 1001;
+    expect(await gate.allows("http://rebind.example/c")).toBe(false); // expired → re-resolved → private
+    expect(lookups).toEqual(["rebind.example", "rebind.example"]);
+  });
+
+  it("a DENY verdict is kept for the run (denying again can never widen access)", async () => {
+    let t = 0;
+    let calls = 0;
+    const gate = createRequestGate({
+      allowPrivateNetwork: false,
+      isPrivateHost: async () => { calls++; return true; },
+      allowTtlMs: 1000,
+      now: () => t,
+    });
+    expect(await gate.allows("http://internal.corp/a")).toBe(false);
+    t = 60_000;
+    expect(await gate.allows("http://internal.corp/b")).toBe(false);
+    expect(calls).toBe(1);
+  });
+
   it("fails closed when the resolver itself throws", async () => {
     const gate = createRequestGate({
       allowPrivateNetwork: false,

@@ -183,7 +183,9 @@ export async function analyzeApp(
   const imageParts: ChatPart[] = [];
   for (const d of digests) {
     if (d.screenshotB64) {
-      imageParts.push({ type: "text", text: `screenshot of ${d.url}:` });
+      // the page URL is page-derived (any crawled link's path/query), so the
+      // caption naming the screenshot travels inside the markers too
+      imageParts.push({ type: "text", text: `${wrapUntrusted(`screenshot of ${d.url}`)}\n(the image below):` });
       imageParts.push({ type: "image", dataUrl: `data:image/jpeg;base64,${d.screenshotB64}` });
     }
   }

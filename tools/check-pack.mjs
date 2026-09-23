@@ -21,7 +21,7 @@ const FORBIDDEN = [
   [/\.bak$/, "an editor backup"],
   [/(^|\/)node_modules\//, "node_modules"],
 ];
-const REQUIRED = ["package.json", "dist/cli/index.js"];
+const REQUIRED = ["package.json", "dist/cli/index.js", "dist/index.js", "dist/index.d.ts"];
 
 const out = execFileSync("npm", ["pack", "--dry-run", "--json"], { encoding: "utf8" });
 const [pack] = JSON.parse(out);

@@ -32,6 +32,15 @@
   "engines": {
     "node": ">=20"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "supercut": "./dist/cli/index.js"
   },
@@ -46,7 +55,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

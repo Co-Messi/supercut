@@ -91,7 +91,9 @@ describe("inventory crawler on the fixture app", () => {
 
     // every genuine destructive control stays out, loudly — including a clickable
     // div[onclick] (not scoped to <button>) and a hyphen-joined action label
-    for (const label of ["Delete service", "Delete account", "Delete-all"]) {
+    // (an <input type=button> labels itself only through `value` — it must
+    // be counted in the exclusion notice too, not silently dropped)
+    for (const label of ["Delete service", "Delete account", "Delete-all", "Remove member"]) {
       expect(fleet.inventory.some((i) => i.text.includes(label)), `${label} must be excluded`).toBe(false);
       expect(fleet.excludedDestructive).toContain(label);
     }

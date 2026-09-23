@@ -200,6 +200,17 @@ async function main(): Promise<number> {
           "--allow-private-network is deprecated and ignored; private/localhost is allowed by default — use --block-private-network to restrict",
         );
       }
+      // M-new-2: the action preview only protects anyone if a human can stop
+      // it. With no terminal to ask on (CI, a coding agent, piped stdin) do
+      // not quietly film a model-written recipe: refuse before any crawl or
+      // LLM spend unless the caller opted in with --yes (--dry-run never films)
+      if (!process.stdin.isTTY && !values.yes && !values["dry-run"]) {
+        console.error(
+          "generate: stdin is not a terminal, so supercut cannot ask before it clicks and types in your app.\n" +
+            "Pass --yes to film without confirmation, or --dry-run to preview the recipe first.",
+        );
+        return 1;
+      }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
@@ -229,8 +240,8 @@ async function main(): Promise<number> {
           return 1;
         }
       }
-      // privacy notice (informational, NOT a gate — blocking the primary
-      // command on --yes was a usability regression). --yes silences it.
+      // privacy notice (informational, NOT a gate). --yes silences it, and
+      // also skips the pre-capture confirmation below.
       if (!values.yes) {
         console.error(
           "privacy: generate sends crawled page text" +
@@ -269,6 +280,10 @@ async function main(): Promise<number> {
         ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(values["dry-run"] ? { dryRun: true } : {}),
         ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
+        // a human at a terminal gets the last word between the printed action
+        // preview and the first real click; --yes proceeds without asking (a
+        // non-TTY stdin without --yes was refused above)
+        ...(process.stdin.isTTY && !values.yes ? { confirmCapture: confirmOnTty } : {}),
       });
       if (values["dry-run"]) {
         // the suggested command must preserve the security posture of THIS
@@ -291,6 +306,18 @@ async function main(): Promise<number> {
     default:
       console.error(`unknown command "${command}"\n\n${HELP}`);
       return 1;
+  }
+}
+
+/** y/N prompt on stderr (stdout stays clean for piping) */
+async function confirmOnTty(): Promise<boolean> {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question("Film this recipe against the live app now? [y/N] ");
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
   }
 }
 

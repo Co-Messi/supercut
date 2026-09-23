@@ -181,7 +181,7 @@ export async function visionQc(
     const user: ChatPart[] = feedback
       ? [...parts, { type: "text", text: `Invalid response: ${feedback}. JSON only.` }]
       : parts;
-    const raw = await llm.chat({ system: SYSTEM, user, json: true });
+    const raw = await llm.chat({ system: SYSTEM, user, json: true, maxTokens: 4096 });
     try {
       const report = qcReport.parse(extractJson(raw));
       // unknown scene names are dropped, not trusted

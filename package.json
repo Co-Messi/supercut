@@ -1,5 +1,5 @@
 {
-  "name": "supercut",
+  "name": "@co-messi/supercut",
   "version": "0.1.0",
   "description": "An AI director that films your real web app by itself: it decides the money moments, drives a browser to perform them, and renders a cinematic 60s launch video — camera, motion blur, music, done",
   "keywords": [
@@ -32,6 +32,15 @@
   "engines": {
     "node": ">=20"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "supercut": "./dist/cli/index.js"
   },
@@ -42,15 +51,19 @@
     "examples/demo-app",
     "examples/demo.recipe.json"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc",
-    "prepublishOnly": "npm run build",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "prepublishOnly": "npm run build && npm run check:pack",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/cli/index.ts",
     "test:fast": "vitest run test/cursor.test.ts test/director.test.ts test/director-validation.test.ts test/schema.test.ts test/config.test.ts test/url-policy.test.ts test/redaction.test.ts test/plan.test.ts",
-    "test:e2e": "vitest run e2e.test"
+    "test:e2e": "vitest run e2e.test",
+    "check:pack": "node tools/check-pack.mjs"
   },
   "dependencies": {
     "playwright": "^1.53.0",

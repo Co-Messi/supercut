@@ -55,14 +55,16 @@ Each stage hands off a plain-JSON artifact, so you can stop at any point, hand-e
 
 ```bash
 # your app running locally? one command:
-npx supercut generate --url http://localhost:3000 --yes
+npx @co-messi/supercut generate --url http://localhost:3000
 ```
 
 `generate` needs an LLM key in a `.env` (see [provider setup](#-llm-provider-setup)),
 plus Chromium and ffmpeg: `npx playwright install chromium`, an `ffmpeg` on your PATH,
-and `npx supercut doctor` checks both.
+and `npx @co-messi/supercut doctor` checks both.
 
-> Any command accepts `--help` to print its own usage (e.g. `npx supercut generate --help`).
+> Any command accepts `--help` to print its own usage (e.g. `npx @co-messi/supercut generate --help`).
+> Examples further down write the command as plain `supercut …`: run it as
+> `npx @co-messi/supercut …`, or `node dist/cli/index.js …` from a source checkout.
 
 ### From source (contributors — and the no-API-key demo)
 
@@ -72,7 +74,7 @@ cd supercut
 npm install
 npm run build
 
-node dist/cli/index.js generate --url http://127.0.0.1:3000 --yes
+node dist/cli/index.js generate --url http://127.0.0.1:3000
 ```
 
 No key? The non-AI path works standalone against the bundled demo app:
@@ -122,7 +124,7 @@ makes the director read your routes so it films real panels, not just the landin
 Help the director understand a deeper, multi-page app by pointing it at the source:
 
 ```bash
-node dist/cli/index.js generate --url http://127.0.0.1:3000 --repo ./ --yes
+node dist/cli/index.js generate --url http://127.0.0.1:3000 --repo ./
 ```
 
 ### Private/local apps & untrusted targets
@@ -134,17 +136,38 @@ localhost / RFC1918 / link-local by default — no flag needed. If you point it 
 each redirect hop):
 
 ```bash
-node dist/cli/index.js generate --url https://untrusted.example --block-private-network --yes
+node dist/cli/index.js generate --url https://untrusted.example --block-private-network
 ```
 
-(`--allow-private-network` is a deprecated no-op kept for back-compat. With the guard on,
-both the crawler and the `record` stage resolve-and-pin their target hosts' DNS so a
-rebinding hostname can't swap in a private IP mid-run, and every in-flight browser
-request — navigations from clicked links and submits, `fetch`/XHR, images, scripts,
-and WebSocket connections — is checked against the policy before it leaves the
-browser. WebSocket gating relies on Playwright's `routeWebSocket`; if you run supercut
-against a Playwright older than 1.48 it prints a warning and WebSocket connections are
-**not** policy-checked.)
+(`--allow-private-network` is a deprecated no-op kept for back-compat.) With the guard on,
+every in-flight browser request is checked against the policy before it leaves the
+browser. That covers navigations from clicked links and submits, `fetch`/XHR, images,
+scripts, and WebSocket connections, and it covers **every redirect hop** of each request.
+To see redirect hops at all, supercut makes the guarded requests itself (from Node),
+checks each `Location` before following it, and hands the browser the final response.
+A click that ends on a blocked or private page fails the scene instead of filming an
+error page. Service workers are blocked while the guard is on.
+
+The guard has costs and limits:
+- A redirected page is reached through a one-line stub page that replaces itself with
+  the redirect target, so the page ends up at the right URL and the target is still
+  fetched only once. A `307`/`308` chain that ends in a `POST` cannot be replayed that
+  way and renders at the URL that was requested.
+- Responses are buffered, not streamed. A response that never completes (a
+  long-poll or server-sent-events endpoint) fails after 30 seconds.
+- WebSocket gating relies on Playwright's `routeWebSocket`. On a Playwright older than
+  1.48, supercut prints a warning and WebSocket connections are **not** policy-checked.
+- Blocked ranges include CGNAT (`100.64.0.0/10`), `198.18.0.0/15`, multicast, and IPv6
+  link-local, unique-local, NAT64 and 6to4 forms of private addresses. A proxy or VPN in
+  "fake-IP" DNS mode (e.g. Clash) answers every lookup from `198.18.0.0/15`, so the guard
+  blocks every hostname there. The real destination is hidden inside the tunnel. Turn
+  fake-IP off, or film from a machine without it.
+- The guard is **best-effort against active DNS rebinding.** It checks each hostname
+  with a DNS lookup, and the connection makes its own lookup a moment later. A hostname
+  built to answer "public" to the first and "private" to the second can slip between
+  them. Enforcing at the connection would need a filtering proxy, which supercut does
+  not ship. For a genuinely hostile target, run supercut on a machine or network
+  namespace that cannot reach anything private.
 
 > ⚠️ **supercut drives and may MUTATE the target app** — it performs real clicks and
 > typing on whatever you point it at. Destructive controls (Delete, Remove, Pay, …)
@@ -154,8 +177,11 @@ against a Playwright older than 1.48 it prints a warning and WebSocket connectio
 > data or URLs/recipes you do not trust. Pass `--allow-destructive` to opt back in.
 >
 > `generate` prints the recipe's full action list — every selector and every typed
-> string — before filming starts, and `--dry-run` stops right there: review
-> `recipe.json`, then film it with `supercut record`.
+> string — before filming starts. At a terminal it then asks before the first click;
+> `--yes` skips the question. With no terminal to ask on (CI, a coding agent, piped
+> stdin), `generate` refuses to start unless you pass `--yes` (or `--dry-run`).
+> `--dry-run` stops right there instead: review `recipe.json`, then film it with
+> `supercut record`.
 
 ## 🔌 LLM provider setup
 
@@ -182,7 +208,10 @@ SUPERCUT_MODEL=anthropic/claude-sonnet-4.6
 SUPERCUT_VISION=true
 ```
 
-For `SUPERCUT_PROVIDER=custom`, set both `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`.
+For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`.
+A provider-scoped key never leaves its provider: with `deepseek` or `openrouter` (set or
+auto-detected), a `SUPERCUT_LLM_BASE_URL` on any other host is refused, and every base URL
+must be `https:` (plain `http:` only for a loopback model server).
 If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly — ambiguous
 config fails loudly rather than guessing.
 

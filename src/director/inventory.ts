@@ -6,6 +6,7 @@
  */
 import { chromium, type Browser, type Page } from "playwright";
 import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
+import { installRequestGate, settleGatedRedirect } from "../security/browser-gate.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 /**
@@ -326,7 +327,9 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // real Delete/Pay; --allow-destructive re-includes them.
     const labels = [text, aria, value].filter((s): s is string => Boolean(s));
     if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
-      if (text) excludedDestructive.push(text);
+      // name it by whichever label tripped the filter: an <input type=button>
+      // has no text, only a value, and must still be counted in the notice
+      excludedDestructive.push(labels[0]!);
       continue;
     }
 
@@ -435,37 +438,44 @@ export async function crawlApp(
 
   const browser: Browser = await chromium.launch({ headless: true, args: launchArgs });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    // guard ON: service workers are blocked — a registered worker's fetches
+    // are not routed through the context, which would hand the page an
+    // ungated network channel
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+      ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
+    });
     const digests: PageDigest[] = [];
     const visited = new Set<string>();
 
-    // guard ON: EVERY request type — navigation, fetch/XHR, <img>, <script>,
-    // <link>, form POST — is policy-checked BEFORE it leaves the browser, with
-    // per-host DNS verdicts cached for the run. The old handler checked
-    // navigations only, so a crawled page could fetch() cloud metadata or probe
-    // RFC1918 hosts via subresources while the CLI reported the guard engaged.
-    // The post-settle URL checks below only run AFTER Chromium has fetched a
-    // 302/meta/JS redirect target — this gate is what stops the request itself.
-    // Also blocks download navigations so a stray file link can't crash the crawl.
-    const gate = createRequestGate({ allowPrivateNetwork });
-    const ctx = page.context();
-    await ctx.route("**/*", async (route) => {
-      const u = route.request().url();
-      if (!(await gate.allows(u))) return route.abort();
+    // download navigations are aborted so a stray file link can't crash the
+    // crawl
+    const isDownloadNavigation = (request: { url(): string; isNavigationRequest(): boolean }): boolean => {
       try {
-        if (route.request().isNavigationRequest() && NON_HTML_EXT.test(new URL(u).pathname)) {
-          return route.abort();
-        }
-      } catch { /* unparseable URL: the gate already vetted it when engaged */ }
-      return route.continue();
-    });
-    // WebSocket upgrades bypass ctx.route — gate them separately (guard ON
-    // only: with the guard off the gate allows everything anyway, so don't
-    // proxy sockets for nothing)
-    if (!allowPrivateNetwork && !(await gateWebSockets(ctx, gate))) {
-      console.error(
-        "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+        return request.isNavigationRequest() && NON_HTML_EXT.test(new URL(request.url()).pathname);
+      } catch {
+        return false;
+      }
+    };
+    const ctx = page.context();
+    if (allowPrivateNetwork) {
+      await ctx.route("**/*", (route) =>
+        isDownloadNavigation(route.request()) ? route.abort() : route.continue(),
       );
+    } else {
+      // guard ON: EVERY request type — navigation, fetch/XHR, <img>,
+      // <script>, <link>, form POST — AND every redirect hop of each is
+      // policy-checked before it leaves the browser (see browser-gate.ts for
+      // why redirects need the request to be made from Node). A navigation
+      // the gate refuses fails page.goto, so the page is skipped below.
+      const gate = createRequestGate({ allowPrivateNetwork });
+      await installRequestGate(ctx, gate, { veto: isDownloadNavigation });
+      // WebSocket upgrades bypass ctx.route — gate them separately
+      if (!(await gateWebSockets(ctx, gate))) {
+        console.error(
+          "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+        );
+      }
     }
 
     // start page first, then source-derived routes (same-origin only), then
@@ -488,7 +498,13 @@ export async function crawlApp(
       // kill the whole crawl — skip it and keep going
       try {
         await assertSafeNavigationUrl(target, { allowPrivateNetwork });
-        const response = await page.goto(target, { timeout: 15_000, waitUntil: "load" });
+        // guard ON: a redirected navigation first lands on the gate's stub,
+        // which replaces itself with the target — wait for the real document
+        const response = await settleGatedRedirect(
+          page,
+          await page.goto(target, { timeout: 15_000, waitUntil: "load" }),
+          { timeout: 15_000, waitUntil: "load" },
+        );
         await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         await page.waitForTimeout(400); // settle: load ≠ ready
         // re-validate where the page SETTLED: a client-side redirect (JS,

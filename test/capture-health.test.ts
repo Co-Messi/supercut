@@ -101,6 +101,48 @@ describe("assessCaptureHealth", () => {
     ]);
     expect(assessCaptureHealth(log, idx).action).toBe("ok");
   });
+
+  it("refuses a front-loaded take: 8s of healthy frames, then 32s of nothing (M-new-3)", () => {
+    // 480 frames = exactly 0.2 × 2400, so the ratio gate alone passes it;
+    // the video would be 32 seconds of a still with a gliding camera
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 40_000, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },
+    ]);
+    const health = assessCaptureHealth(log, frames(480, 1000 / 60));
+    expect(health.action).toBe("fail");
+    expect(health.reason).toMatch(/no frames for \d+(\.\d)?s/);
+  });
+
+  it("tolerates a slow navigation gap a healthy recorder can produce (~10s)", () => {
+    const before = frames(600, 1000 / 60); // 0–10s
+    const after = frames(600, 1000 / 60).map((f, i) => ({
+      file: `frames/${String(600 + i).padStart(6, "0")}.png`,
+      t_source: f.t_source + 20_000, // 20–30s, after a 10s navigation
+    }));
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 10_000, type: "scene", name: "s2", priority: 2 },
+      { t: 29_900, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },
+    ]);
+    expect(assessCaptureHealth(log, [...before, ...after]).action).toBe("ok");
+  });
+
+  it("refuses a frames index with a NaN or missing t_source instead of reading it as healthy (M-new-3)", () => {
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 9_000, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },
+    ]);
+    const nan = frames(600, 1000 / 60);
+    nan[nan.length - 1] = { file: "frames/000599.png", t_source: Number.NaN };
+    expect(assessCaptureHealth(log, nan).action).toBe("fail");
+
+    const missing = frames(600, 1000 / 60) as { file: string; t_source?: number }[];
+    delete missing[10]!.t_source;
+    const h = assessCaptureHealth(log, missing as { file: string; t_source: number }[]);
+    expect(h.action).toBe("fail");
+    expect(h.reason).toMatch(/t_source/);
+  });
 });
 
 describe("renderTake capture-health gate", () => {

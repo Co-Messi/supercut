@@ -32,7 +32,9 @@ jobs:
         run: |
           test -f dist/cli/index.js
           node dist/cli/index.js --help > /dev/null
-      - run: npm pack --dry-run
+      # asserts the tarball contents (entry present; no src/, test/,
+      # spikes/, env files or backups) and a size ceiling
+      - run: npm run check:pack
       # whole unit suite (no explicit file list, so new test files aren't
       # silently skipped); the e2e files run in the browser-e2e job below,
       # which has chromium + ffmpeg installed.

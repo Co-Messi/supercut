@@ -87,6 +87,85 @@ describe("provider resolution", () => {
     ).toThrow(/SUPERCUT_API_KEY is required/);
   });
 
+  describe("base-URL override never redirects a provider-scoped key (H-new-3)", () => {
+    const foreign = "https://gateway.example/v1";
+
+    it("auto-detected deepseek refuses a foreign SUPERCUT_LLM_BASE_URL", () => {
+      expect(() => resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: foreign })).toThrow(
+        /SUPERCUT_LLM_BASE_URL.*gateway\.example.*api\.deepseek\.com/s,
+      );
+    });
+
+    it("explicit deepseek refuses a foreign SUPERCUT_LLM_BASE_URL", () => {
+      expect(() =>
+        resolved({ SUPERCUT_PROVIDER: "deepseek", DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: foreign }),
+      ).toThrow(/api\.deepseek\.com/);
+    });
+
+    it("explicit deepseek with SUPERCUT_API_KEY still refuses a foreign base URL", () => {
+      expect(() =>
+        resolved({ SUPERCUT_PROVIDER: "deepseek", SUPERCUT_API_KEY: "k", SUPERCUT_LLM_BASE_URL: foreign }),
+      ).toThrow(/api\.deepseek\.com/);
+    });
+
+    it("auto-detected openrouter refuses a foreign SUPERCUT_LLM_BASE_URL", () => {
+      expect(() => resolved({ OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: foreign })).toThrow(
+        /openrouter\.ai/,
+      );
+    });
+
+    it("explicit openrouter refuses a foreign base URL", () => {
+      expect(() =>
+        resolved({ SUPERCUT_PROVIDER: "openrouter", OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: foreign }),
+      ).toThrow(/openrouter\.ai/);
+    });
+
+    it("the programmatic baseUrl override is held to the same rule", () => {
+      expect(() => resolveProvider({ DEEPSEEK_API_KEY: "ds-key" }, { baseUrl: foreign })).toThrow(
+        /api\.deepseek\.com/,
+      );
+    });
+
+    it("a lookalike host that merely contains the provider host is refused", () => {
+      expect(() =>
+        resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: "https://api.deepseek.com.evil.example/v1" }),
+      ).toThrow(/api\.deepseek\.com/);
+      expect(() =>
+        resolved({ OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: "https://evil-openrouter.ai/api/v1" }),
+      ).toThrow(/openrouter\.ai/);
+    });
+
+    it("the provider's own host (any path) is accepted", () => {
+      expect(
+        resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: "https://api.deepseek.com/v1" }).baseUrl,
+      ).toBe("https://api.deepseek.com/v1");
+      expect(
+        resolved({ OPENROUTER_API_KEY: "or-key", SUPERCUT_LLM_BASE_URL: "https://openrouter.ai/api/v1" }).baseUrl,
+      ).toBe("https://openrouter.ai/api/v1");
+    });
+
+    it("the provider's own host over plain http is refused (key would travel in cleartext)", () => {
+      expect(() =>
+        resolved({ DEEPSEEK_API_KEY: "ds-key", SUPERCUT_LLM_BASE_URL: "http://api.deepseek.com" }),
+      ).toThrow(/https/);
+    });
+
+    it("custom endpoints require https unless the host is loopback", () => {
+      const custom = { SUPERCUT_PROVIDER: "custom", SUPERCUT_API_KEY: "k", SUPERCUT_MODEL: "m" };
+      expect(() => resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "http://llm.example.com/v1" })).toThrow(/https/);
+      for (const loop of ["http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"]) {
+        expect(resolved({ ...custom, SUPERCUT_LLM_BASE_URL: loop }).baseUrl).toBe(loop);
+      }
+      expect(resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "https://llm.example.com/v1" }).provider).toBe("custom");
+    });
+
+    it("an unparseable or non-http(s) base URL is refused", () => {
+      const custom = { SUPERCUT_PROVIDER: "custom", SUPERCUT_API_KEY: "k", SUPERCUT_MODEL: "m" };
+      expect(() => resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "not a url" })).toThrow(/SUPERCUT_LLM_BASE_URL/);
+      expect(() => resolved({ ...custom, SUPERCUT_LLM_BASE_URL: "ftp://llm.example.com" })).toThrow(/https/);
+    });
+  });
+
   it("summary names the env var that supplied the credential", () => {
     const ds = resolved({ DEEPSEEK_API_KEY: "deepseek-key" });
     expect(ds.keySource).toBe("DEEPSEEK_API_KEY");
@@ -150,6 +229,81 @@ describe(".env loading", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe("parser edge cases (M-new-4)", () => {
+    const ENV_KEYS = [
+      "SUPERCUT_TEST_EMPTY", "SUPERCUT_TEST_COMMENT", "SUPERCUT_TEST_HASH_QUOTED", "SUPERCUT_TEST_HASH_GLUED",
+      "SUPERCUT_TEST_EXPORTED", "SUPERCUT_TEST_CRLF", "SUPERCUT_TEST_SQ", "DATABASE_URL_SUPERCUT_TEST",
+      "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "SUPERCUT_MODEL",
+    ];
+    const before = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
+    afterEach(() => {
+      for (const [k, v] of before) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
+
+    function load(text: string) {
+      for (const k of ENV_KEYS) delete process.env[k];
+      const dir = mkdtempSync(join(tmpdir(), "supercut-env-edge-"));
+      try {
+        const path = join(dir, ".env");
+        writeFileSync(path, text);
+        return loadDotEnv(path);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("an empty value is unset, not an empty string", () => {
+      load("SUPERCUT_TEST_EMPTY=\nSUPERCUT_MODEL=\n");
+      expect("SUPERCUT_TEST_EMPTY" in process.env).toBe(false);
+      expect("SUPERCUT_MODEL" in process.env).toBe(false);
+    });
+
+    it("strips an unquoted inline comment but keeps # inside quotes or glued to the value", () => {
+      load(
+        [
+          "SUPERCUT_TEST_COMMENT=sk-abc123   # my deepseek key",
+          'SUPERCUT_TEST_HASH_QUOTED="a # b"   # trailing note',
+          "SUPERCUT_TEST_HASH_GLUED=abc#def",
+          "SUPERCUT_TEST_SQ='single # quoted'",
+        ].join("\n"),
+      );
+      expect(process.env.SUPERCUT_TEST_COMMENT).toBe("sk-abc123");
+      expect(process.env.SUPERCUT_TEST_HASH_QUOTED).toBe("a # b");
+      expect(process.env.SUPERCUT_TEST_HASH_GLUED).toBe("abc#def");
+      expect(process.env.SUPERCUT_TEST_SQ).toBe("single # quoted");
+    });
+
+    it("accepts `export KEY=val` and CRLF line endings", () => {
+      load("export SUPERCUT_TEST_EXPORTED=yes\r\nSUPERCUT_TEST_CRLF=crlf\r\n");
+      expect(process.env.SUPERCUT_TEST_EXPORTED).toBe("yes");
+      expect(process.env.SUPERCUT_TEST_CRLF).toBe("crlf");
+    });
+
+    it("imports only supercut's own variables, never the app's", () => {
+      load("DATABASE_URL_SUPERCUT_TEST=postgres://secret\nDEEPSEEK_API_KEY=ds\nOPENROUTER_API_KEY=or\n");
+      expect("DATABASE_URL_SUPERCUT_TEST" in process.env).toBe(false);
+      expect(process.env.DEEPSEEK_API_KEY).toBe("ds");
+      expect(process.env.OPENROUTER_API_KEY).toBe("or");
+    });
+  });
+
+  it("empty provider variables fall through to the defaults instead of failing", () => {
+    const p = resolved({
+      DEEPSEEK_API_KEY: "ds-key",
+      SUPERCUT_PROVIDER: "",
+      SUPERCUT_MODEL: "",
+      SUPERCUT_LLM_BASE_URL: "",
+      SUPERCUT_VISION: "",
+    });
+    expect(p.provider).toBe("deepseek");
+    expect(p.model).toBe("deepseek-v4-pro");
+    expect(p.baseUrl).toBe("https://api.deepseek.com");
+    expect(p.vision).toBe(false);
   });
 
   it("reports a missing file without pretending success", () => {

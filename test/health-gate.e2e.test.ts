@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -54,7 +54,11 @@ afterEach(() => {
 
 /** analyze + script responses against the real crawled fixture inventory */
 function scriptedBrain(): ScriptedLlm {
-  return new ScriptedLlm(() => [
+  return new ScriptedLlm(brainResponses);
+}
+
+function brainResponses(): string[] {
+  return [
     JSON.stringify({
       product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
       product_name: "Lumon",
@@ -77,7 +81,7 @@ function scriptedBrain(): ScriptedLlm {
           actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
       ],
     }),
-  ]);
+  ];
 }
 
 /** swap record() for a stub that writes a STARVED take: 3 frames across a
@@ -150,5 +154,96 @@ describe("generate-path capture-health gate wiring (H1)", () => {
     // a silently disabled gate is H1's failure mode back through the opt-out
     const errOutput = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(errOutput).toMatch(/\[generate\] WARNING: capture is sparse.*\(continuing: SUPERCUT_ALLOW_SPARSE=1\)/s);
+  }, 120_000);
+});
+
+/**
+ * M-new-5: the runs that fail are the runs whose spend and model output the
+ * user most needs to see. Every failure after preflight must still leave a
+ * (partial) director-report.json carrying the error, and print the LLM usage
+ * line.
+ */
+describe("generate failure paths keep the report and the spend line (M-new-5)", () => {
+  function readReport(outDir: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8")) as Record<string, unknown>;
+  }
+
+  it("sparse capture: report (analysis + filmed recipe + error), recipe.json and usage line are written", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-fail-sparse-"));
+    dirs.push(outDir);
+    stubSparseRecord([]);
+    const lines: string[] = [];
+
+    await expect(
+      generate({ llm: scriptedBrain(), url: app.url, outDir, vision: false, allowPrivateNetwork: true, log: (m) => lines.push(m) }),
+    ).rejects.toThrow(/capture is sparse/);
+
+    const report = readReport(outDir);
+    expect(report.analysis).toBeTruthy();
+    expect((report.recipe as { scenes: unknown[] }).scenes).toHaveLength(2);
+    expect(String(report.error)).toMatch(/capture is sparse/);
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
+    expect(lines.filter((l) => l.startsWith("LLM usage:"))).toHaveLength(1);
+  }, 120_000);
+
+  it("script-stage exhaustion: the report keeps the paid-for analysis and the error", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-fail-script-"));
+    dirs.push(outDir);
+    // a valid analysis, then four recipes that all fail validation
+    const llm = new ScriptedLlm(() => [brainResponses()[0]!, "{}", "{}", "{}", "{}"]);
+    const lines: string[] = [];
+
+    await expect(
+      generate({ llm, url: app.url, outDir, vision: false, allowPrivateNetwork: true, log: (m) => lines.push(m) }),
+    ).rejects.toThrow(/script stage/);
+
+    const report = readReport(outDir);
+    expect(report.analysis).toBeTruthy();
+    expect(report.recipe).toBeUndefined();
+    expect(String(report.error)).toMatch(/script stage/);
+    expect(lines.some((l) => l.startsWith("LLM usage:"))).toBe(true);
+  }, 120_000);
+
+  it("budget exceeded before the first call: the report and usage line still appear", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-fail-budget-"));
+    dirs.push(outDir);
+    const lines: string[] = [];
+
+    await expect(
+      generate({ llm: scriptedBrain(), url: app.url, outDir, vision: false, allowPrivateNetwork: true, maxTokens: 1, log: (m) => lines.push(m) }),
+    ).rejects.toThrow(/token budget/);
+
+    expect(String(readReport(outDir).error)).toMatch(/token budget/);
+    expect(lines.some((l) => l.startsWith("LLM usage:"))).toBe(true);
+  }, 120_000);
+});
+
+/**
+ * M-new-2: the action preview is only a control if a human can act on it
+ * before the browser does. When the CLI can ask (a TTY, no --yes) it passes a
+ * confirm callback; declining must stop the run before capture.
+ */
+describe("confirm before the first capture (M-new-2)", () => {
+  it("asks AFTER the preview is printed, and a 'no' films nothing but keeps the recipe", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-confirm-no-"));
+    dirs.push(outDir);
+    vi.mocked(record).mockClear();
+    const lines: string[] = [];
+    let previewSeenAtConfirm = false;
+
+    await expect(
+      generate({
+        llm: scriptedBrain(), url: app.url, outDir, vision: false, allowPrivateNetwork: true,
+        log: (m) => lines.push(m),
+        confirmCapture: async () => {
+          previewSeenAtConfirm = lines.some((l) => l.includes("click #cta"));
+          return false;
+        },
+      }),
+    ).rejects.toThrow(/cancelled.*nothing was filmed/s);
+
+    expect(previewSeenAtConfirm).toBe(true);
+    expect(vi.mocked(record)).not.toHaveBeenCalled();
+    expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
   }, 120_000);
 });

@@ -190,6 +190,12 @@ const MIN_CAPTURE_RATIO = 0.2;
 /** short takes produce few frames legitimately (startup jitter dominates);
  *  the ratio gate only engages once the take is long enough to judge */
 const MIN_JUDGEABLE_MS = 2_000;
+/** the longest stretch of take time with no frame at all. The built-in
+ *  recorder's largest legitimate gap is a scene-entry navigation, bounded by
+ *  its 10s action timeout plus a 2s load grace; anything longer is a capture
+ *  that died partway (beacon lost after a navigation, rAF suspended) and would
+ *  film as a long still, however healthy the frame count looks overall. */
+const MAX_FRAME_GAP_MS = 15_000;
 
 /**
  * Deterministic capture-health gate: did the capture actually capture?
@@ -200,6 +206,22 @@ const MIN_JUDGEABLE_MS = 2_000;
  * with a camera gliding over stills. That must be refused, not warned about.
  */
 export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]): CaptureHealth {
+  // the index is only schema-validated later (buildRenderPlan); a NaN or
+  // missing t_source here would make every duration NaN and every comparison
+  // false — i.e. "ok". Refuse it outright.
+  const badEntry = frameIndex.findIndex(
+    (f) => typeof f?.t_source !== "number" || !Number.isFinite(f.t_source) || f.t_source < 0,
+  );
+  if (badEntry >= 0) {
+    return {
+      frames: frameIndex.length,
+      durationMs: 0,
+      expectedFrames: 0,
+      avgSourceFps: 0,
+      action: "fail",
+      reason: `frames-index entry ${badEntry} has no valid t_source — the capture index is corrupt`,
+    };
+  }
   const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
   let maxEventT = 0;
   for (const e of log.events) {
@@ -232,6 +254,25 @@ export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]
       `capture is sparse: ${frameIndex.length} frame(s) over ${(durationMs / 1000).toFixed(1)}s ` +
       `(avg ${avgSourceFps.toFixed(1)} fps source; a healthy ${log.fps}fps capture would carry ` +
       `~${expectedFrames}) — the video would be stills with a camera gliding over them`;
+    return health;
+  }
+  // coverage, not just count: the widest frameless stretch, including the
+  // tail after the last frame (the index is sorted by t_source)
+  let widestGap = 0;
+  let gapAt = 0;
+  let prev = 0;
+  for (const f of [...frameIndex.map((e) => e.t_source), durationMs]) {
+    if (f - prev > widestGap) {
+      widestGap = f - prev;
+      gapAt = prev;
+    }
+    prev = Math.max(prev, f);
+  }
+  if (widestGap > MAX_FRAME_GAP_MS) {
+    health.action = "fail";
+    health.reason =
+      `capture has no frames for ${(widestGap / 1000).toFixed(1)}s (from ${(gapAt / 1000).toFixed(1)}s) — ` +
+      `the video would hold one still across that stretch`;
   }
   return health;
 }

@@ -176,7 +176,8 @@ The guard has costs and limits:
 >
 > `generate` prints the recipe's full action list — every selector and every typed
 > string — before filming starts. At a terminal it then asks before the first click;
-> `--yes` (or a non-interactive stdin, as in CI or a coding agent) skips the question.
+> `--yes` skips the question. With no terminal to ask on (CI, a coding agent, piped
+> stdin), `generate` refuses to start unless you pass `--yes` (or `--dry-run`).
 > `--dry-run` stops right there instead: review `recipe.json`, then film it with
 > `supercut record`.
 

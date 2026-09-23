@@ -200,6 +200,17 @@ async function main(): Promise<number> {
           "--allow-private-network is deprecated and ignored; private/localhost is allowed by default — use --block-private-network to restrict",
         );
       }
+      // M-new-2: the action preview only protects anyone if a human can stop
+      // it. With no terminal to ask on (CI, a coding agent, piped stdin) do
+      // not quietly film a model-written recipe: refuse before any crawl or
+      // LLM spend unless the caller opted in with --yes (--dry-run never films)
+      if (!process.stdin.isTTY && !values.yes && !values["dry-run"]) {
+        console.error(
+          "generate: stdin is not a terminal, so supercut cannot ask before it clicks and types in your app.\n" +
+            "Pass --yes to film without confirmation, or --dry-run to preview the recipe first.",
+        );
+        return 1;
+      }
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
@@ -270,8 +281,8 @@ async function main(): Promise<number> {
         ...(values["dry-run"] ? { dryRun: true } : {}),
         ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
         // a human at a terminal gets the last word between the printed action
-        // preview and the first real click; --yes (or a non-TTY stdin, e.g.
-        // CI) proceeds without asking
+        // preview and the first real click; --yes proceeds without asking (a
+        // non-TTY stdin without --yes was refused above)
         ...(process.stdin.isTTY && !values.yes ? { confirmCapture: confirmOnTty } : {}),
       });
       if (values["dry-run"]) {

@@ -1,6 +1,7 @@
-node_modules/
+node_modules
 dist/
 *.log
+*.bak
 .DS_Store
 out/
 *.mp4
@@ -20,4 +21,3 @@ examples/demo-app/.next/
 # launch working dir + scratch demo app (not part of the package)
 demos/
 examples/pulse-app/
-node_modules

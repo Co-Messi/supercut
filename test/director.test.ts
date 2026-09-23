@@ -1134,3 +1134,39 @@ describe("unused analysis copy never fails a paid run (M10)", () => {
     expect(parsed.money_moments).toHaveLength(2);
   });
 });
+
+describe("LLM completion accounting (M-new-6)", () => {
+  it("the pre-send check reserves the call's maxTokens completion, not just the prompt", async () => {
+    let sent = 0;
+    const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };
+    const llm = new BudgetedLlmClient(noUsage, 10_000);
+    const call = (maxTokens: number) =>
+      llm.chat({ system: "s", user: [{ type: "text", text: "small prompt" }], maxTokens });
+    // a tiny prompt whose allowed completion alone could blow the budget
+    await expect(call(12_000)).rejects.toThrow(/completion/);
+    expect(sent).toBe(0);
+    await expect(call(500)).resolves.toBe("ok");
+    expect(sent).toBe(1);
+  });
+
+  it("never parses reasoning_content as the answer when content is empty", async () => {
+    const { OpenAICompatibleClient } = await import("../src/director/llm.js");
+    const draft = JSON.stringify({ version: 0, draft: "half-finished chain-of-thought recipe" });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: "", reasoning_content: draft } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const client = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      await expect(client.chat({ system: "s", user: [{ type: "text", text: "t" }] })).rejects.toThrow(
+        /empty response.*reasoning/s,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

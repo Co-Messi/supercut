@@ -115,8 +115,16 @@ export class OpenAICompatibleClient implements LlmClient {
             : undefined);
         if (billed !== undefined) this._tokensUsed = (this._tokensUsed ?? 0) + billed;
         const msg = data.choices?.[0]?.message;
-        const text = msg?.content || msg?.reasoning_content;
-        if (!text) throw new Error(`LLM returned an empty response (${this.label})`);
+        // the answer is `content` only. A reasoning model that ran out of
+        // tokens mid-thought returns empty content plus its chain of thought;
+        // a draft JSON inside that reasoning must never be accepted as output.
+        const text = msg?.content;
+        if (!text) {
+          throw new Error(
+            `LLM returned an empty response (${this.label})` +
+              (msg?.reasoning_content ? " — only reasoning, no answer (likely hit max_tokens mid-reasoning)" : ""),
+          );
+        }
         return text;
       }
       // A2: drain the body, but the raw provider response can echo prompt text
@@ -216,9 +224,16 @@ export class BudgetedLlmClient implements LlmClient {
 
   async chat(opts: ChatOptions): Promise<string> {
     const promptEstimate = estimateTokens(opts);
-    if (this.budget > 0 && (this.metered >= this.budget || this.metered + promptEstimate > this.budget)) {
+    // reserve the call's worst-case completion too: on reasoning models the
+    // completion, not the prompt, dominates the bill
+    const completionReserve = opts.maxTokens ?? 0;
+    const worstCase = promptEstimate + completionReserve;
+    if (this.budget > 0 && (this.metered >= this.budget || this.metered + worstCase > this.budget)) {
       const sizeNote =
-        this.metered < this.budget ? ` (next call estimated at ~${promptEstimate} more prompt tokens)` : "";
+        this.metered < this.budget
+          ? ` (next call estimated at ~${promptEstimate} more prompt tokens` +
+            (completionReserve ? ` plus up to ${completionReserve} completion tokens)` : ")")
+          : "";
       throw new TokenBudgetExceededError(
         `LLM token budget exhausted: ${this.metered} of ${this.budget} tokens spent (${this.breakdown()})${sizeNote} — ` +
           `raise --max-tokens / SUPERCUT_MAX_TOKENS, or set it to 0/off to disable the cap`,

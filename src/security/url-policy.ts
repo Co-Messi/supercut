@@ -72,25 +72,72 @@ function normalizeHostToIPv4(h: string): string {
   return h;
 }
 
+/** Parse an IPv6 literal (no brackets) into its 8 hextets, including a
+ *  dotted IPv4 tail; null when it is not IPv6. */
+function ipv6Hextets(h: string): number[] | null {
+  if (isIP(h) !== 6) return null;
+  let text = h.split("%")[0]!; // drop a zone id
+  const dotted = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(text);
+  if (dotted) {
+    const n = ipToLong(dotted[1]!);
+    if (n === null) return null;
+    text = text.slice(0, -dotted[1]!.length) + `${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+  const [head, tail] = text.includes("::") ? text.split("::") : [text, undefined];
+  const parse = (part: string | undefined) => (part ? part.split(":").map((x) => parseInt(x, 16)) : []);
+  const left = parse(head);
+  const right = parse(tail);
+  const fill = tail === undefined ? [] : new Array(8 - left.length - right.length).fill(0);
+  const out = [...left, ...fill, ...right];
+  return out.length === 8 && out.every((x) => Number.isInteger(x) && x >= 0 && x <= 0xffff) ? out : null;
+}
+
+function hextetsToIPv4(hi: number, lo: number): string {
+  return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join(".");
+}
+
+function isPrivateIPv4(h: string): boolean {
+  return (
+    inCidr(h, "0.0.0.0", 8) || // "this network"; 0.0.0.0 reaches loopback listeners
+    inCidr(h, "10.0.0.0", 8) ||
+    inCidr(h, "100.64.0.0", 10) || // CGNAT / shared address space
+    inCidr(h, "127.0.0.0", 8) ||
+    inCidr(h, "169.254.0.0", 16) || // link-local, incl. cloud metadata
+    inCidr(h, "172.16.0.0", 12) ||
+    inCidr(h, "192.168.0.0", 16) ||
+    inCidr(h, "198.18.0.0", 15) || // benchmarking; also fake-IP DNS in proxy/TUN setups
+    inCidr(h, "224.0.0.0", 4) || // multicast
+    inCidr(h, "240.0.0.0", 4) // reserved + limited broadcast
+  );
+}
+
+function isPrivateIPv6(x: number[]): boolean {
+  const [a, b, c, d, e, f, g, hh] = x as [number, number, number, number, number, number, number, number];
+  const zeroPrefix = a === 0 && b === 0 && c === 0 && d === 0 && e === 0;
+  if (zeroPrefix && f === 0 && g === 0 && (hh === 0 || hh === 1)) return true; // :: and ::1
+  if (zeroPrefix && f === 0xffff) return isPrivateIPv4(hextetsToIPv4(g, hh)); // ::ffff:a.b.c.d
+  if (zeroPrefix && f === 0) return isPrivateIPv4(hextetsToIPv4(g, hh)); // ::a.b.c.d (compat)
+  if ((a & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((a & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((a & 0xffc0) === 0xfec0) return true; // fec0::/10 deprecated site-local
+  if ((a & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  // NAT64 (64:ff9b::/96): judge the IPv4 it translates to
+  if (a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0) {
+    return isPrivateIPv4(hextetsToIPv4(g, hh));
+  }
+  if (a === 0x2002) return isPrivateIPv4(hextetsToIPv4(b, c)); // 6to4 (2002::/16)
+  return false;
+}
+
 function isPrivateHostname(hostname: string): boolean {
   let h = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "");
   // normalize numeric/hex/mapped-IPv6 encodings to canonical IPv4 BEFORE the
   // private check, so alt-encodings of loopback/metadata can't slip through.
   h = normalizeHostToIPv4(h);
   if (h === "localhost" || h.endsWith(".localhost")) return true;
-  if (h === "0.0.0.0") return true;
-  // "::" is the unspecified address (equivalent to 0.0.0.0) — routers/servers
-  // bound to it accept loopback traffic, so treat it as private too.
-  if (isIP(h) === 6) return h === "::1" || h === "::" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:");
-  if (isIP(h) === 4) {
-    return (
-      inCidr(h, "10.0.0.0", 8) ||
-      inCidr(h, "127.0.0.0", 8) ||
-      inCidr(h, "169.254.0.0", 16) ||
-      inCidr(h, "172.16.0.0", 12) ||
-      inCidr(h, "192.168.0.0", 16)
-    );
-  }
+  const v6 = ipv6Hextets(h);
+  if (v6) return isPrivateIPv6(v6);
+  if (isIP(h) === 4) return isPrivateIPv4(h);
   return false;
 }
 
@@ -115,7 +162,11 @@ async function resolvesPrivate(hostname: string): Promise<boolean> {
  *  "can't verify" must mean "deny", not "shrug". */
 async function resolvesPrivateStrict(hostname: string): Promise<boolean> {
   if (isPrivateHostname(hostname)) return true;
-  const addrs = await lookup(hostname, { all: true, verbatim: true });
+  // an IP literal is its own answer (and a bracketed IPv6 literal is not a
+  // name the resolver accepts)
+  const bare = hostname.replace(/^\[(.*)\]$/, "$1");
+  if (isIP(bare) !== 0) return false;
+  const addrs = await lookup(bare, { all: true, verbatim: true });
   return addrs.some((a) => isPrivateHostname(a.address));
 }
 

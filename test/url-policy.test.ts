@@ -32,8 +32,11 @@ describe("navigation URL policy", () => {
   });
 
   it("rejects redirects to private networks", async () => {
+    // a public IP-literal start URL keeps this hermetic: a resolver in
+    // fake-IP mode (198.18/15, now private) would otherwise fail the START
+    // url and never exercise the redirect check
     await expect(
-      assertSafeNavigationUrl("https://example.com/start", {
+      assertSafeNavigationUrl("https://93.184.215.14/start", {
         finalUrl: "http://10.0.0.2/admin",
       }),
     ).rejects.toThrow(/redirect/i);
@@ -46,6 +49,46 @@ describe("navigation URL policy", () => {
     await expect(assertSafeNavigationUrl("http://[::ffff:169.254.169.254]/")).rejects.toThrow(/private network/i);
     await expect(assertSafeNavigationUrl("http://169.254.169.254/latest/meta-data/")).rejects.toThrow(/private network/i);
   });
+});
+
+describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
+  const blocked = [
+    "http://[fe90::1]/", // fe80::/10 beyond the literal fe80: prefix
+    "http://[febf:ffff::1]/",
+    "http://100.64.0.1/", // CGNAT 100.64/10
+    "http://100.127.255.254/",
+    "http://0.1.2.3/", // 0.0.0.0/8
+    "http://198.18.0.1/", // benchmarking 198.18/15 (also fake-IP DNS)
+    "http://198.19.255.254/",
+    "http://224.0.0.1/", // IPv4 multicast
+    "http://239.255.255.250/",
+    "http://[ff02::1]/", // IPv6 multicast
+    "http://[64:ff9b::a9fe:a9fe]/", // NAT64 of 169.254.169.254
+    "http://[64:ff9b::10.0.0.1]/", // NAT64 of 10.0.0.1, dotted tail
+    "http://[2002:a9fe:a9fe::1]/", // 6to4 of 169.254.169.254
+    "http://[2002:c0a8:0101::]/", // 6to4 of 192.168.1.1
+    "http://[::127.0.0.1]/", // IPv4-compatible loopback
+    "http://[0:0:0:0:0:ffff:7f00:1]/", // fully expanded mapped loopback
+  ];
+  for (const url of blocked) {
+    it(`blocks ${url}`, async () => {
+      await expect(assertSafeNavigationUrl(url)).rejects.toThrow(/private network/i);
+    });
+  }
+
+  const allowed = [
+    "http://100.63.255.255/", // just below CGNAT
+    "http://100.128.0.1/", // just above CGNAT
+    "http://198.20.0.1/", // just above 198.18/15
+    "http://[64:ff9b::808:808]/", // NAT64 of public 8.8.8.8
+    "http://[2002:808:808::1]/", // 6to4 of public 8.8.8.8
+    "http://[2606:4700::1111]/", // ordinary global unicast
+  ];
+  for (const url of allowed) {
+    it(`allows ${url}`, async () => {
+      await expect(assertSafeNavigationUrl(url)).resolves.toBeUndefined();
+    });
+  }
 });
 
 describe("resolve-and-pin (DNS-rebinding defense)", () => {

@@ -151,6 +151,11 @@ The guard has costs and limits:
   to. Responses are buffered, not streamed.
 - WebSocket gating relies on Playwright's `routeWebSocket`. On a Playwright older than
   1.48, supercut prints a warning and WebSocket connections are **not** policy-checked.
+- Blocked ranges include CGNAT (`100.64.0.0/10`), `198.18.0.0/15`, multicast, and IPv6
+  link-local, unique-local, NAT64 and 6to4 forms of private addresses. A proxy or VPN in
+  "fake-IP" DNS mode (e.g. Clash) answers every lookup from `198.18.0.0/15`, so the guard
+  blocks every hostname there. The real destination is hidden inside the tunnel. Turn
+  fake-IP off, or film from a machine without it.
 - The guard is **best-effort against active DNS rebinding.** It checks each hostname
   with a DNS lookup, and the connection makes its own lookup a moment later. A hostname
   built to answer "public" to the first and "private" to the second can slip between

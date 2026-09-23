@@ -200,11 +200,20 @@ const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon �
 
 /** SSRF-probe page for the request-gate wiring tests: fires a fetch() and a
  *  WebSocket at attacker-chosen targets from the query string — exactly the
- *  in-flight requests the guard must stop that no recipe URL check can see. */
+ *  in-flight requests the guard must stop that no recipe URL check can see.
+ *  `link` renders a clickable/crawlable <a id="hop"> to an attacker-chosen
+ *  href (e.g. a same-origin /redirect that 302s somewhere private). */
 const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Probe</title></head><body>
   <h1 id="t">probe page</h1><div id="status">pending</div>
   <script>
     const qs = new URLSearchParams(location.search);
+    const l = qs.get("link");
+    if (l) {
+      const a = document.createElement("a");
+      a.id = "hop"; a.href = l; a.textContent = "Open the report";
+      a.style.cssText = "display:inline-block;padding:16px 32px;font-size:20px";
+      document.body.appendChild(a);
+    }
     const out = { fetch: "skipped", ws: "skipped" };
     const tasks = [];
     const f = qs.get("fetch");
@@ -227,6 +236,14 @@ export interface DemoApp {
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
   const server: Server = createServer((req, res) => {
+    // open redirect: /redirect?to=<url> answers 302 → <url>. The gate tests
+    // use it as the "public" first hop of a chain that ends on a private host.
+    if (req.url?.startsWith("/redirect")) {
+      const to = new URL(req.url, "http://fixture.invalid").searchParams.get("to") ?? "/";
+      res.writeHead(302, { location: to });
+      res.end();
+      return;
+    }
     const body = req.url?.startsWith("/dash") ? DASH
       : req.url?.startsWith("/panel") ? PANEL
       : req.url?.startsWith("/fleet") ? FLEET

@@ -29,7 +29,14 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
-import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
+import { installRequestGate, type GatedContext } from "../security/browser-gate.js";
+import {
+  assertSafeNavigationUrl,
+  createRequestGate,
+  gateWebSockets,
+  resolveAndPinHost,
+  type RequestGate,
+} from "../security/url-policy.js";
 
 const VIEWPORT = { width: 1920, height: 1080 };
 const DPR = 2;
@@ -279,6 +286,31 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   // assigned inside try (so failures can't leak the browser); helpers close over them
   let page!: Page;
   let cdp!: CDPSession;
+  /** guard ON only: the policy gate, and what it refused */
+  let gate: RequestGate | undefined;
+  let gated: GatedContext | undefined;
+  let blockedSeen = 0;
+
+  /**
+   * Guard ON: after each action, refuse to keep filming if the action led the
+   * page somewhere the policy forbids — a click or submit whose navigation
+   * (or any redirect hop of it) the gate blocked leaves an error page, and a
+   * page that settled on a non-http(s) or private URL is not the product.
+   * Throwing fails the scene through the normal scene-failure path.
+   */
+  async function assertPagePolicy(): Promise<void> {
+    if (allowPrivateNetwork) return;
+    const blocked = gated?.blockedNavigations ?? [];
+    if (blocked.length > blockedSeen) {
+      const url = blocked[blocked.length - 1];
+      blockedSeen = blocked.length;
+      throw new Error(`navigation to ${url} was blocked by the private-network policy`);
+    }
+    const current = page.url();
+    if (gate && current !== "about:blank" && !(await gate.allows(current))) {
+      throw new Error(`the page left the allowed network: ${current}`);
+    }
+  }
 
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
@@ -525,19 +557,24 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   }
 
   try {
-    page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DPR });
+    // guard ON: service workers are blocked — a registered worker's fetches
+    // are not routed through the context, which would hand the page an
+    // ungated network channel
+    page = await browser.newPage({
+      viewport: VIEWPORT,
+      deviceScaleFactor: DPR,
+      ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
+    });
     // guard ON: gate EVERY in-flight request (clicked links, Enter submits,
-    // redirects, subresources) — assertSafeNavigationUrl only covers entry/goto
-    // URLs known from the recipe, but a click on an a[href] or a submit
-    // navigates with no pre-check. Installed ONLY when the guard is engaged:
-    // route interception funnels every request through Node, and the default
-    // local-app path must not pay that tax during a 60fps capture.
+    // subresources) and every redirect hop of each — assertSafeNavigationUrl
+    // only covers entry/goto URLs known from the recipe, but a click on an
+    // a[href] or a submit navigates with no pre-check. Installed ONLY when the
+    // guard is engaged: route interception funnels every request through
+    // Node, and the default local-app path must not pay that tax during a
+    // 60fps capture.
     if (!allowPrivateNetwork) {
-      const gate = createRequestGate({ allowPrivateNetwork });
-      await page.context().route("**/*", async (route) => {
-        if (!(await gate.allows(route.request().url()))) return route.abort();
-        return route.continue();
-      });
+      gate = createRequestGate({ allowPrivateNetwork });
+      gated = await installRequestGate(page.context(), gate);
       // WebSocket upgrades bypass ctx.route — gate them separately
       if (!(await gateWebSockets(page.context(), gate))) {
         console.error(
@@ -643,6 +680,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       }
 
       events.push({ t: stamp(clock), observed_t: observedNow(), type: "scene", name: scene.name, priority: scene.priority });
+      // a block that already failed an earlier scene must not fail this one
+      blockedSeen = gated?.blockedNavigations.length ?? 0;
 
       try {
         if (i > 0) {
@@ -673,12 +712,15 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             clock = stamp(ceilToFrame(navEnd));
           }
         }
-        for (const a of scene.entry.prelude) await runAction(a);
-        for (const a of scene.actions) await runAction(a);
+        for (const a of [...scene.entry.prelude, ...scene.actions]) {
+          await runAction(a);
+          await assertPagePolicy();
+        }
         // Hold the scene's final frame; it is validated and budgeted by the schema.
         if (scene.hold_ms > 0) {
           await sleep(scene.hold_ms);
           clock = stamp(clock + scene.hold_ms);
+          await assertPagePolicy();
         }
       } catch (err) {
         failedScenes.push(scene.name);

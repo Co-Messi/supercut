@@ -137,14 +137,26 @@ each redirect hop):
 node dist/cli/index.js generate --url https://untrusted.example --block-private-network --yes
 ```
 
-(`--allow-private-network` is a deprecated no-op kept for back-compat. With the guard on,
-both the crawler and the `record` stage resolve-and-pin their target hosts' DNS so a
-rebinding hostname can't swap in a private IP mid-run, and every in-flight browser
-request — navigations from clicked links and submits, `fetch`/XHR, images, scripts,
-and WebSocket connections — is checked against the policy before it leaves the
-browser. WebSocket gating relies on Playwright's `routeWebSocket`; if you run supercut
-against a Playwright older than 1.48 it prints a warning and WebSocket connections are
-**not** policy-checked.)
+(`--allow-private-network` is a deprecated no-op kept for back-compat.) With the guard on,
+every in-flight browser request is checked against the policy before it leaves the
+browser. That covers navigations from clicked links and submits, `fetch`/XHR, images,
+scripts, and WebSocket connections, and it covers **every redirect hop** of each request.
+To see redirect hops at all, supercut makes the guarded requests itself (from Node),
+checks each `Location` before following it, and hands the browser the final response.
+A click that ends on a blocked or private page fails the scene instead of filming an
+error page. Service workers are blocked while the guard is on.
+
+The guard has costs and limits:
+- A redirected page renders at the URL that was requested, not the one it redirected
+  to. Responses are buffered, not streamed.
+- WebSocket gating relies on Playwright's `routeWebSocket`. On a Playwright older than
+  1.48, supercut prints a warning and WebSocket connections are **not** policy-checked.
+- The guard is **best-effort against active DNS rebinding.** It checks each hostname
+  with a DNS lookup, and the connection makes its own lookup a moment later. A hostname
+  built to answer "public" to the first and "private" to the second can slip between
+  them. Enforcing at the connection would need a filtering proxy, which supercut does
+  not ship. For a genuinely hostile target, run supercut on a machine or network
+  namespace that cannot reach anything private.
 
 > ⚠️ **supercut drives and may MUTATE the target app** — it performs real clicks and
 > typing on whatever you point it at. Destructive controls (Delete, Remove, Pay, …)

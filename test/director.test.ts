@@ -1181,4 +1181,76 @@ describe("LLM completion accounting (M-new-6)", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it("retries an empty (reasoning-only) response instead of failing the run on the first one", async () => {
+    const { OpenAICompatibleClient } = await import("../src/director/llm.js");
+    const realFetch = globalThis.fetch;
+    let sent = 0;
+    globalThis.fetch = (async () => {
+      sent++;
+      const message = sent === 1 ? { content: "", reasoning_content: "thinking…" } : { content: '{"ok":true}' };
+      return new Response(JSON.stringify({ choices: [{ message, finish_reason: sent === 1 ? "length" : "stop" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const client = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      await expect(client.chat({ system: "s", user: [{ type: "text", text: "t" }] })).resolves.toBe('{"ok":true}');
+      expect(sent).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("retries when the connection drops while the response body is being read", async () => {
+    const { OpenAICompatibleClient } = await import("../src/director/llm.js");
+    const realFetch = globalThis.fetch;
+    let sent = 0;
+    globalThis.fetch = (async () => {
+      sent++;
+      if (sent === 1) {
+        const body = new ReadableStream({ start: (c) => c.error(new TypeError("terminated")) });
+        return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: "done" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const client = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      await expect(client.chat({ system: "s", user: [{ type: "text", text: "t" }] })).resolves.toBe("done");
+      expect(sent).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("meters provider-billed tokens against the budget even when the call ultimately fails", async () => {
+    const { OpenAICompatibleClient, BudgetedLlmClient: BudgetedLlm } = await import("../src/director/llm.js");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "", reasoning_content: "…" }, finish_reason: "length" }],
+          usage: { total_tokens: 100 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const inner = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      const llm = new BudgetedLlm(inner, 1_000_000);
+      await expect(llm.chat({ system: "s", user: [{ type: "text", text: "t" }] })).rejects.toThrow(/empty response/);
+      expect(llm.meteredTokens).toBe(400);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
 });

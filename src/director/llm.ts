@@ -102,10 +102,20 @@ export class OpenAICompatibleClient implements LlmClient {
         continue;
       }
       if (res.ok) {
-        const data = (await res.json()) as {
-          choices?: { message?: { content?: string; reasoning_content?: string } }[];
+        type Completion = {
+          choices?: { message?: { content?: string; reasoning_content?: string }; finish_reason?: string }[];
           usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
         };
+        let data: Completion;
+        try {
+          // a long non-streamed completion can lose its connection mid-body
+          // ("terminated"); that is as transient as a failed connect
+          data = (await res.json()) as Completion;
+        } catch (err) {
+          lastErr = `response body: ${err instanceof Error ? err.message : String(err)}`;
+          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+          continue;
+        }
         // best-effort cost telemetry: prefer total_tokens, else sum prompt+completion
         const u = data.usage;
         const billed =
@@ -119,13 +129,13 @@ export class OpenAICompatibleClient implements LlmClient {
         // tokens mid-thought returns empty content plus its chain of thought;
         // a draft JSON inside that reasoning must never be accepted as output.
         const text = msg?.content;
-        if (!text) {
-          throw new Error(
-            `LLM returned an empty response (${this.label})` +
-              (msg?.reasoning_content ? " — only reasoning, no answer (likely hit max_tokens mid-reasoning)" : ""),
-          );
-        }
-        return text;
+        if (text) return text;
+        // reasoning length varies run to run, so an empty answer is retried
+        // rather than failing the whole run on one unlucky sample
+        lastErr =
+          `empty response` +
+          (msg?.reasoning_content ? " — only reasoning, no answer (likely hit max_tokens mid-reasoning)" : "");
+        continue;
       }
       // A2: drain the body, but the raw provider response can echo prompt text
       // or account metadata. Only surface it when SUPERCUT_VERBOSE is set;
@@ -240,7 +250,19 @@ export class BudgetedLlmClient implements LlmClient {
       );
     }
     const before = this.inner.tokensUsed ?? 0;
-    const out = await this.inner.chat(opts);
+    let out: string;
+    try {
+      out = await this.inner.chat(opts);
+    } catch (err) {
+      // a call that fails after the provider billed it (e.g. every attempt came
+      // back empty) still spent those tokens
+      const billed = (this.inner.tokensUsed ?? 0) - before;
+      if (billed > 0) {
+        this.metered += billed;
+        this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + billed);
+      }
+      throw err;
+    }
     const providerDelta = (this.inner.tokensUsed ?? 0) - before;
     // prefer the provider's number for this call; fall back to the local
     // estimate (prompt + completion) so a usage-less provider is still metered

@@ -1,5 +1,5 @@
 {
-  "name": "supercut",
+  "name": "@co-messi/supercut",
   "version": "0.1.0",
   "description": "An AI director that films your real web app by itself: it decides the money moments, drives a browser to perform them, and renders a cinematic 60s launch video — camera, motion blur, music, done",
   "keywords": [
@@ -42,6 +42,9 @@
     "examples/demo-app",
     "examples/demo.recipe.json"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",

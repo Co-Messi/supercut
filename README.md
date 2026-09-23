@@ -55,14 +55,14 @@ Each stage hands off a plain-JSON artifact, so you can stop at any point, hand-e
 
 ```bash
 # your app running locally? one command:
-npx supercut generate --url http://localhost:3000 --yes
+npx @co-messi/supercut generate --url http://localhost:3000 --yes
 ```
 
 `generate` needs an LLM key in a `.env` (see [provider setup](#-llm-provider-setup)),
 plus Chromium and ffmpeg: `npx playwright install chromium`, an `ffmpeg` on your PATH,
-and `npx supercut doctor` checks both.
+and `npx @co-messi/supercut doctor` checks both.
 
-> Any command accepts `--help` to print its own usage (e.g. `npx supercut generate --help`).
+> Any command accepts `--help` to print its own usage (e.g. `npx @co-messi/supercut generate --help`).
 
 ### From source (contributors — and the no-API-key demo)
 

@@ -327,7 +327,9 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // real Delete/Pay; --allow-destructive re-includes them.
     const labels = [text, aria, value].filter((s): s is string => Boolean(s));
     if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
-      if (text) excludedDestructive.push(text);
+      // name it by whichever label tripped the filter: an <input type=button>
+      // has no text, only a value, and must still be counted in the notice
+      excludedDestructive.push(labels[0]!);
       continue;
     }
 

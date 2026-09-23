@@ -167,6 +167,7 @@ const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
     <div id="danger-div" data-testid="danger" onclick="return false">Delete account</div>
     <div data-testid="danger-row">delete-worker</div>
     <button>Delete-all</button>
+    <input type="button" value="Remove member">
   </main>
   </div>
   <script>

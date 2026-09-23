@@ -231,6 +231,81 @@ describe(".env loading", () => {
     }
   });
 
+  describe("parser edge cases (M-new-4)", () => {
+    const ENV_KEYS = [
+      "SUPERCUT_TEST_EMPTY", "SUPERCUT_TEST_COMMENT", "SUPERCUT_TEST_HASH_QUOTED", "SUPERCUT_TEST_HASH_GLUED",
+      "SUPERCUT_TEST_EXPORTED", "SUPERCUT_TEST_CRLF", "SUPERCUT_TEST_SQ", "DATABASE_URL_SUPERCUT_TEST",
+      "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "SUPERCUT_MODEL",
+    ];
+    const before = new Map(ENV_KEYS.map((k) => [k, process.env[k]]));
+    afterEach(() => {
+      for (const [k, v] of before) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
+
+    function load(text: string) {
+      for (const k of ENV_KEYS) delete process.env[k];
+      const dir = mkdtempSync(join(tmpdir(), "supercut-env-edge-"));
+      try {
+        const path = join(dir, ".env");
+        writeFileSync(path, text);
+        return loadDotEnv(path);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("an empty value is unset, not an empty string", () => {
+      load("SUPERCUT_TEST_EMPTY=\nSUPERCUT_MODEL=\n");
+      expect("SUPERCUT_TEST_EMPTY" in process.env).toBe(false);
+      expect("SUPERCUT_MODEL" in process.env).toBe(false);
+    });
+
+    it("strips an unquoted inline comment but keeps # inside quotes or glued to the value", () => {
+      load(
+        [
+          "SUPERCUT_TEST_COMMENT=sk-abc123   # my deepseek key",
+          'SUPERCUT_TEST_HASH_QUOTED="a # b"   # trailing note',
+          "SUPERCUT_TEST_HASH_GLUED=abc#def",
+          "SUPERCUT_TEST_SQ='single # quoted'",
+        ].join("\n"),
+      );
+      expect(process.env.SUPERCUT_TEST_COMMENT).toBe("sk-abc123");
+      expect(process.env.SUPERCUT_TEST_HASH_QUOTED).toBe("a # b");
+      expect(process.env.SUPERCUT_TEST_HASH_GLUED).toBe("abc#def");
+      expect(process.env.SUPERCUT_TEST_SQ).toBe("single # quoted");
+    });
+
+    it("accepts `export KEY=val` and CRLF line endings", () => {
+      load("export SUPERCUT_TEST_EXPORTED=yes\r\nSUPERCUT_TEST_CRLF=crlf\r\n");
+      expect(process.env.SUPERCUT_TEST_EXPORTED).toBe("yes");
+      expect(process.env.SUPERCUT_TEST_CRLF).toBe("crlf");
+    });
+
+    it("imports only supercut's own variables, never the app's", () => {
+      load("DATABASE_URL_SUPERCUT_TEST=postgres://secret\nDEEPSEEK_API_KEY=ds\nOPENROUTER_API_KEY=or\n");
+      expect("DATABASE_URL_SUPERCUT_TEST" in process.env).toBe(false);
+      expect(process.env.DEEPSEEK_API_KEY).toBe("ds");
+      expect(process.env.OPENROUTER_API_KEY).toBe("or");
+    });
+  });
+
+  it("empty provider variables fall through to the defaults instead of failing", () => {
+    const p = resolved({
+      DEEPSEEK_API_KEY: "ds-key",
+      SUPERCUT_PROVIDER: "",
+      SUPERCUT_MODEL: "",
+      SUPERCUT_LLM_BASE_URL: "",
+      SUPERCUT_VISION: "",
+    });
+    expect(p.provider).toBe("deepseek");
+    expect(p.model).toBe("deepseek-v4-pro");
+    expect(p.baseUrl).toBe("https://api.deepseek.com");
+    expect(p.vision).toBe(false);
+  });
+
   it("reports a missing file without pretending success", () => {
     const res = loadDotEnv(join(tmpdir(), "supercut-definitely-missing.env"));
     expect(res.loaded).toBe(false);

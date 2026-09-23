@@ -15,12 +15,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { record, type RecordResult } from "../capture/index.js";
-import { renderTake, resolveMusicTrack } from "../render/index.js";
+import { assessCaptureHealth, renderTake, resolveMusicTrack } from "../render/index.js";
 import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { crawlApp, type PageDigest } from "./inventory.js";
 import { BudgetedLlmClient, type LlmClient } from "./llm.js";
-import { applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
+import { AllScenesCutError, applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { writeRecipe } from "./script.js";
 import { assertSafeNavigationUrl, urlResolvesPrivate } from "../security/url-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
@@ -68,10 +68,25 @@ export interface GenerateOptions {
   /** hard cumulative token ceiling for the run's LLM calls (prompt+completion,
    *  provider-reported). 0 disables. Default: 300000. */
   maxTokens?: number;
+  /** preview mode: run analyze + script, print the FULL action list (every
+   *  selector, every typed string), write recipe.json — and stop before the
+   *  capture browser ever touches the app. The recipe can be reviewed and then
+   *  filmed with `supercut record --recipe <dir>/recipe.json`. */
+  dryRun?: boolean;
+  /** skip the preflight HTTP reachability probe. Escape hatch for apps the
+   *  bare-fetch probe misjudges (aggressive UA gating, unusual status codes at
+   *  `/`); the ffmpeg check and all URL policy checks still run. */
+  skipPreflight?: boolean;
+  /** asked once, after the action preview is printed and before the capture
+   *  browser first touches the app; resolving false cancels the run (the
+   *  recipe is still written). The CLI supplies it when a human can answer
+   *  (stdin is a TTY and --yes is absent). */
+  confirmCapture?: () => Promise<boolean>;
   log?: (msg: string) => void;
 }
 
 export interface GenerateResult {
+  /** empty string on a --dry-run (nothing was filmed or rendered) */
   outFile: string;
   recipe: Recipe;
   analysis: AppAnalysis;
@@ -79,7 +94,12 @@ export interface GenerateResult {
   verdictLog: SceneVerdict[][];
 }
 
-async function preflight(url: string, allowPrivateNetwork: boolean): Promise<void> {
+export async function preflight(
+  url: string,
+  allowPrivateNetwork: boolean,
+  opts: { skipReachability?: boolean; skipRenderDeps?: boolean; log?: (msg: string) => void } = {},
+): Promise<void> {
+  const log = opts.log ?? ((m: string) => console.error(`[generate] ${m}`));
   // app reachable — error in seconds, never after 10 minutes of work.
   // Follow redirects MANUALLY and validate EVERY hop BEFORE the request: a
   // default `fetch` follows 3xx automatically, so a public URL that 302s to
@@ -87,34 +107,62 @@ async function preflight(url: string, allowPrivateNetwork: boolean): Promise<voi
   // have made the internal request before any post-hoc check. SSRF-guard errors
   // propagate as-is (a security failure, not "cannot reach"); only network
   // errors get the friendly reachability message.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    let current = url;
-    let status = 0;
-    for (let hop = 0; hop < 6; hop++) {
-      await assertSafeNavigationUrl(current, { allowPrivateNetwork });
-      let res: Response;
-      try {
-        res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
-      } catch (err) {
+  if (!opts.skipReachability) {
+    // even when the probe is skipped, the URL itself is still policy-checked
+    // by the caller and the crawl; here it gates the probe's own fetch
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      let current = url;
+      let status = 0;
+      for (let hop = 0; hop < 6; hop++) {
+        await assertSafeNavigationUrl(current, { allowPrivateNetwork });
+        let res: Response;
+        try {
+          res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
+        } catch (err) {
+          throw new Error(
+            `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+          );
+        }
+        status = res.status;
+        const loc = res.headers.get("location");
+        if (status >= 300 && status < 400 && loc) {
+          current = new URL(loc, current).href;
+          continue;
+        }
+        break;
+      }
+      // 401/403 at the root is NORMAL for the "film your own dev app" case —
+      // basic auth, a dev proxy, an SSO shim, an API-first backend. And this
+      // probe is a bare Node fetch (no browser UA, no cookies) while the crawl
+      // is Chromium, so a UA-gating edge can 403 a URL Chromium loads fine.
+      // Warn and continue; if the wall is real the crawl shows it in seconds.
+      // Everything else >= 400 is as doomed as it looks (a 404/410/5xx start
+      // page films as an error screen) and used to surface only deep in the
+      // crawl — fail here instead. --skip-preflight overrides the whole probe.
+      if (status === 401 || status === 403) {
+        log(
+          `preflight warning: ${url} responded ${status} — continuing (auth walls at the root are ` +
+            `normal for private dev apps, and this probe carries no browser UA or cookies). ` +
+            `If the whole app is behind that wall, the crawl will come back empty.`,
+        );
+      } else if (status >= 400) {
         throw new Error(
-          `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+          `app at ${url} responded ${status} — point --url at a page that loads, ` +
+            `or pass --skip-preflight if you know better`,
         );
       }
-      status = res.status;
-      const loc = res.headers.get("location");
-      if (status >= 300 && status < 400 && loc) {
-        current = new URL(loc, current).href;
-        continue;
-      }
-      break;
+      if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
+    } finally {
+      clearTimeout(timer);
     }
-    if (status >= 500) throw new Error(`app at ${url} responded ${status}`);
-    if (status >= 300 && status < 400) throw new Error(`preflight: ${url} kept redirecting (loop?)`);
-  } finally {
-    clearTimeout(timer);
   }
+  // (review) recipe preview must not need the render toolchain: --dry-run
+  // stops after analyze + script, so nothing is filmed or rendered and a
+  // machine without ffmpeg can still produce and review a recipe. The URL
+  // policy and reachability checks above still ran.
+  if (opts.skipRenderDeps) return;
   try {
     await exec("ffmpeg", ["-version"]);
   } catch {
@@ -172,6 +220,56 @@ export function pickMusic(
   }
 }
 
+/**
+ * Human-readable action list for a recipe — one line per action, including
+ * every `type` string and submit flag. Printed before capture on every run
+ * (and as the payload of --dry-run) so the operator can see exactly what the
+ * director is about to do to the live app; a prompt-injected `type` payload
+ * has to survive being shown to a human first.
+ */
+export function formatRecipePreview(recipe: Recipe): string[] {
+  const lines: string[] = [];
+  for (const [i, scene] of recipe.scenes.entries()) {
+    lines.push(
+      `scene ${i + 1} "${scene.name}" @ ${scene.entry.url}` +
+        (scene.depends_on.length ? ` (after ${scene.depends_on.join(", ")})` : ""),
+    );
+    for (const a of [...scene.entry.prelude, ...scene.actions]) {
+      let desc = a.kind as string;
+      if (a.kind === "goto" && a.url) desc += ` ${a.url}`;
+      if (a.selector) desc += ` ${a.selector}`;
+      if (a.kind === "type") desc += ` "${a.text ?? ""}"${a.submit ? " then press Enter" : ""}`;
+      desc += ` (${a.duration_ms}ms${a.focus_selector ? `, focus ${a.focus_selector}` : ""})`;
+      lines.push(`  · ${desc}`);
+    }
+    if (scene.hold_ms > 0) lines.push(`  · hold ${scene.hold_ms}ms`);
+  }
+  return lines;
+}
+
+/** POSIX-shell quote one argument for a command we print for the user to
+ *  paste: safe words pass through untouched, anything else is single-quoted
+ *  (an embedded ' becomes '\''). */
+export function shellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_\/.:=@%+,-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The follow-up command a --dry-run tells the user to copy. Flags that set
+ * record's SECURITY posture must survive the copy-paste: `record` allows
+ * private networks by default, so a recipe generated under
+ * --block-private-network must carry the flag into the suggested line — the
+ * user who asked for the guard and then runs exactly what the tool printed
+ * must not silently lose it.
+ */
+export function dryRunFollowUpCommand(outDir: string, opts: { blockPrivateNetwork?: boolean } = {}): string {
+  return (
+    `supercut record --recipe ${shellQuote(join(outDir, "recipe.json"))}` +
+    (opts.blockPrivateNetwork ? " --block-private-network" : "")
+  );
+}
+
 function repoNotes(repoPath: string): string | undefined {
   for (const f of ["README.md", "readme.md", "package.json"]) {
     const p = join(repoPath, f);
@@ -193,153 +291,261 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   // every LLM call in the run goes through the budget guard (analyze, script,
   // and vision QC all receive this wrapper) — no stage can spend past the cap
   const llm = new BudgetedLlmClient(opts.llm, budget);
+  // spend summary. The budget is ENFORCED against meteredTokens (provider-
+  // reported where available, locally estimated where not), so that is the
+  // headline number; on a mixed-reporting provider a diverging provider total
+  // is shown alongside instead of silently replacing the enforced one —
+  // "unavailable" only when nothing was called at all.
+  const usageLine = (): string => {
+    const metered = llm.meteredTokens;
+    const reported = llm.tokensUsed;
+    if (metered <= 0) return reported !== undefined ? `~${reported} tokens (${llm.breakdown()})` : "unavailable";
+    if (reported === undefined) {
+      return `~${metered} tokens (locally estimated — provider reported no usage; ${llm.breakdown()})`;
+    }
+    if (reported === metered) return `~${reported} tokens (${llm.breakdown()})`;
+    return `~${metered} tokens metered against the budget (provider reported ${reported}; ${llm.breakdown()})`;
+  };
   mkdirSync(opts.outDir, { recursive: true });
 
   log("preflight…");
   // a bad --music must die here, not after the LLM crawl and capture spend
   resolveMusicTrack(opts.music);
-  await preflight(opts.url, opts.allowPrivateNetwork ?? true);
+  if (opts.skipPreflight) log("   note: --skip-preflight — not probing the app URL before the crawl");
+  await preflight(opts.url, opts.allowPrivateNetwork ?? true, {
+    ...(opts.skipPreflight ? { skipReachability: true } : {}),
+    // dry runs never render — don't fail the preview on a missing ffmpeg
+    ...(opts.dryRun ? { skipRenderDeps: true } : {}),
+    log: (m) => log(`   ${m}`),
+  });
   if ((opts.allowPrivateNetwork ?? true) && !(await urlResolvesPrivate(opts.url))) {
     log("hint: target resolves to a public address — pass --block-private-network when filming untrusted targets");
   }
 
-  // read the app's source FIRST: derive real routes (seed the crawl so
-  // functional panels enter the inventory) + a product summary for the director
-  let seedUrls: string[] = [];
-  let sourceNotes: string | undefined;
-  if (opts.repoPath) {
-    const routes = extractAppRoutes(opts.repoPath, opts.appName ? { appName: opts.appName } : {});
-    if (routes.length > 0) {
-      const sn = routesToSeedAndNotes(routes, opts.url);
-      seedUrls = sn.seedUrls;
-      sourceNotes = sn.notes;
-      log(`   source: ${routes.length} route(s) found, seeding ${seedUrls.length} into the crawl`);
-    } else {
-      log(`   source: no routes detected at ${opts.repoPath} (crawling links only)`);
-    }
-  }
-
-  log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
-  // crawl the start page + every seeded route + a few link-discovered pages
-  const maxPages = Math.min(3 + seedUrls.length, 12);
-  // pre-flight spend estimate — printed before any paid call so a runaway
-  // config is visible up front
-  const callCeiling =
-    ANALYZE_ATTEMPTS + SCRIPT_ATTEMPTS + (vision ? VISION_QC_ATTEMPTS * (MAX_RETAKES + 1) : 0);
-  log(
-    `   LLM plan: ≤${maxPages} page(s) to crawl, vision ${vision ? "on" : "off"}, ` +
-      `≤${callCeiling} LLM call(s), token budget ${budget > 0 ? budget : "off"} (--max-tokens / SUPERCUT_MAX_TOKENS)`,
-  );
-  const digests: PageDigest[] = await crawlApp(opts.url, {
-    maxPages,
-    screenshots: vision,
-    allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
-    seedUrls,
-    allowDestructive: opts.allowDestructive ?? false,
-  });
-  log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
-  // LOUD, never silent: if we excluded destructive controls, say which — so a
-  // user whose hero action got filtered knows why and can opt back in.
-  const excluded = [...new Set(digests.flatMap((d) => d.excludedDestructive ?? []))];
-  if (excluded.length) {
-    log(`   note: excluded ${excluded.length} destructive control(s) from filming — ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
-  }
-
-  // analyze notes = source routes/summary + README/package.json. Both come
-  // from the app's source (string literals, README, package.json) — exactly
-  // where hardcoded tokens / internal URLs live — so redact them before egress,
-  // matching the redaction DOM text already gets (parity, no asymmetry).
-  const readme = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
-  const notes =
-    [sourceNotes, readme]
-      .filter((s): s is string => Boolean(s))
-      .map(redactForPrompt)
-      .join("\n\n") || undefined;
-  const analysis = await analyzeApp(llm, digests, notes);
-  log(`   product: ${analysis.product_summary.slice(0, 100)}`);
-  for (const m of analysis.money_moments) log(`   moment: ${m.title}`);
-
-  log("② script: writing recipe…");
-  llm.stage = "script";
-  const { recipe: firstRecipe, attempts } = await writeRecipe(llm, analysis, digests, opts.url);
-  log(`   recipe valid after ${attempts} attempt(s): ${firstRecipe.scenes.length} scenes`);
-
-  let recipe = firstRecipe;
+  // Everything the run learns is kept here so the finalizer can write it on
+  // ANY exit: the runs that fail (aborted capture, sparse capture, stage
+  // exhaustion, budget exceeded, render failure) are exactly the ones whose
+  // spend and model output the user most needs to see.
+  let analysis: AppAnalysis | undefined;
+  /** always the recipe of the take being (or last) filmed */
+  let recipe: Recipe | undefined;
   let retakes = 0;
   const verdictLog: SceneVerdict[][] = [];
-  let result: RecordResult;
-  let takeDir: string;
+  let usageLogged = false;
+  const logUsage = (): void => {
+    if (usageLogged) return;
+    usageLogged = true;
+    log(`LLM usage: ${usageLine()}`);
+  };
+  const writeArtifacts = (extra: { dryRun?: boolean; error?: string } = {}): void => {
+    if (recipe) writeFileSync(join(opts.outDir, "recipe.json"), JSON.stringify(recipe, null, 2));
+    writeFileSync(
+      join(opts.outDir, "director-report.json"),
+      JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label, ...extra }, null, 2),
+    );
+  };
 
-  for (;;) {
-    takeDir = join(opts.outDir, `take-${retakes}`);
-    rmSync(takeDir, { recursive: true, force: true });
-    log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
-    result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
-    if (result.aborted) {
+  try {
+    // read the app's source FIRST: derive real routes (seed the crawl so
+    // functional panels enter the inventory) + a product summary for the director
+    let seedUrls: string[] = [];
+    let sourceNotes: string | undefined;
+    if (opts.repoPath) {
+      const routes = extractAppRoutes(opts.repoPath, opts.appName ? { appName: opts.appName } : {});
+      if (routes.length > 0) {
+        const sn = routesToSeedAndNotes(routes, opts.url);
+        seedUrls = sn.seedUrls;
+        sourceNotes = sn.notes;
+        log(`   source: ${routes.length} route(s) found, seeding ${seedUrls.length} into the crawl`);
+      } else {
+        log(`   source: no routes detected at ${opts.repoPath} (crawling links only)`);
+      }
+    }
+
+    log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
+    // crawl the start page + every seeded route + a few link-discovered pages
+    const maxPages = Math.min(3 + seedUrls.length, 12);
+    // pre-flight spend estimate — printed before any paid call so a runaway
+    // config is visible up front
+    const callCeiling =
+      ANALYZE_ATTEMPTS + SCRIPT_ATTEMPTS + (vision ? VISION_QC_ATTEMPTS * (MAX_RETAKES + 1) : 0);
+    log(
+      `   LLM plan: ≤${maxPages} page(s) to crawl, vision ${vision ? "on" : "off"}, ` +
+        `≤${callCeiling} LLM call(s), token budget ${budget > 0 ? budget : "off"} (--max-tokens / SUPERCUT_MAX_TOKENS)`,
+    );
+    const digests: PageDigest[] = await crawlApp(opts.url, {
+      maxPages,
+      screenshots: vision,
+      allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
+      seedUrls,
+      allowDestructive: opts.allowDestructive ?? false,
+    });
+    log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
+    // LOUD, never silent: if we excluded destructive controls, say which — so a
+    // user whose hero action got filtered knows why and can opt back in.
+    const excluded = [...new Set(digests.flatMap((d) => d.excludedDestructive ?? []))];
+    if (excluded.length) {
+      log(`   note: excluded ${excluded.length} destructive control(s) from filming — ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
+    }
+
+    // analyze notes = source routes/summary + README/package.json. Both come
+    // from the app's source (string literals, README, package.json) — exactly
+    // where hardcoded tokens / internal URLs live — so redact them before egress,
+    // matching the redaction DOM text already gets (parity, no asymmetry).
+    const readme = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
+    const notes =
+      [sourceNotes, readme]
+        .filter((s): s is string => Boolean(s))
+        .map(redactForPrompt)
+        .join("\n\n") || undefined;
+    analysis = await analyzeApp(llm, digests, notes);
+    log(`   product: ${analysis.product_summary.slice(0, 100)}`);
+    for (const m of analysis.money_moments) log(`   moment: ${m.title}`);
+
+    log("② script: writing recipe…");
+    llm.stage = "script";
+    const written = await writeRecipe(llm, analysis, digests, opts.url);
+    recipe = written.recipe;
+    log(`   recipe valid after ${written.attempts} attempt(s): ${recipe.scenes.length} scenes`);
+    if (written.warning) log(`   warning: ${written.warning}`);
+    // full action preview BEFORE the capture browser touches the app — every
+    // selector and every typed string is on the record for the operator
+    for (const line of formatRecipePreview(recipe)) log(`   ${line}`);
+
+    if (opts.dryRun) {
+      writeArtifacts({ dryRun: true });
+      logUsage();
+      log(`dry run: recipe written to ${join(opts.outDir, "recipe.json")} — nothing was filmed`);
+      return { outFile: "", recipe, analysis, retakes: 0, verdictLog: [] };
+    }
+
+    if (opts.confirmCapture && !(await opts.confirmCapture())) {
       throw new Error(
-        `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
+        `capture cancelled — nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
+          `review or edit it, then film it with: ${dryRunFollowUpCommand(opts.outDir, {
+            blockPrivateNetwork: !(opts.allowPrivateNetwork ?? true),
+          })}`,
       );
     }
 
-    log("④ qc: deterministic checks…");
-    const verdicts = deterministicChecks(result);
-    if (vision) {
-      log("④ qc: vision pass…");
-      llm.stage = "qc";
-      verdicts.push(...await visionQc(llm, takeDir, result.eventLog));
-    }
-    verdictLog.push(verdicts);
-    const notOk = verdicts.filter((v) => v.verdict !== "ok");
-    if (notOk.length === 0) {
-      log("   QC clean");
-      break;
-    }
-    for (const v of notOk) log(`   ${v.verdict.toUpperCase()} "${v.scene}": ${v.reason}`);
+    let result: RecordResult;
+    let takeDir: string;
 
-    const applied = applyVerdicts(recipe, verdicts);
-    if (!applied.changed || retakes >= MAX_RETAKES) {
-      if (retakes >= MAX_RETAKES) {
-        log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
+    for (;;) {
+      takeDir = join(opts.outDir, `take-${retakes}`);
+      rmSync(takeDir, { recursive: true, force: true });
+      log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
+      result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
+      log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
+      if (result.aborted) {
+        throw new Error(
+          `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
+        );
       }
-      // Do NOT adopt the patched recipe here. `takeDir` was
-      // recorded from the CURRENT `recipe`; writing applied.recipe would make
-      // recipe.json/report describe scenes/holds that were never filmed (and
-      // for cuts, omit a scene that is still in the rendered video). The
-      // artifact must match the take. Render keys off events.json + frame
-      // index, so the video is whatever was recorded regardless.
-      break;
+      // capture-health gate, BEFORE any QC spend: a starved capture (repaint
+      // beacon dead, page never committing frames) renders as a slideshow no
+      // amount of QC patching can save — fail here, not after vision tokens.
+      {
+        const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
+        // shape guard mirrors renderTake's: a non-array would make `.length`
+        // undefined and the sparse comparison silently false — gate passed.
+        // record() just wrote this file, so today it can't happen; the guard is
+        // for whatever writes it tomorrow.
+        if (!Array.isArray(rawIndex)) throw new Error("generate: frames-index.json is not an array");
+        const health = assessCaptureHealth(result.eventLog, rawIndex);
+        if (health.action === "fail") {
+          if (process.env.SUPERCUT_ALLOW_SPARSE === "1") {
+            // LOUD, matching render/index.ts: someone who exported the variable
+            // once to salvage an old take must not keep generating starved
+            // videos with no line saying the health gate is off
+            console.error(`[generate] WARNING: ${health.reason} (continuing: SUPERCUT_ALLOW_SPARSE=1)`);
+          } else {
+            throw new Error(
+              `generate: ${health.reason}. The app may suspend rendering when headless, or the repaint ` +
+                `beacon failed to attach — try re-running; SUPERCUT_ALLOW_SPARSE=1 forces a render anyway.`,
+            );
+          }
+        }
+      }
+
+      log("④ qc: deterministic checks…");
+      const verdicts = deterministicChecks(result);
+      if (vision) {
+        log("④ qc: vision pass…");
+        llm.stage = "qc";
+        verdicts.push(...await visionQc(llm, takeDir, result.eventLog));
+      }
+      verdictLog.push(verdicts);
+      const notOk = verdicts.filter((v) => v.verdict !== "ok");
+      if (notOk.length === 0) {
+        log("   QC clean");
+        break;
+      }
+      for (const v of notOk) log(`   ${v.verdict.toUpperCase()} "${v.scene}": ${v.reason}`);
+
+      let applied: ReturnType<typeof applyVerdicts>;
+      try {
+        applied = applyVerdicts(recipe, verdicts);
+      } catch (err) {
+        if (!(err instanceof AllScenesCutError)) throw err;
+        // Refusing to render an empty video is right; discarding a recorded,
+        // renderable take after the full crawl + both LLM stages + a complete
+        // capture is not. The finalizer preserves every artifact; fail with the
+        // way out.
+        throw new Error(
+          `QC cut every scene (${err.cut.join(", ")}) — refusing to render an empty video. ` +
+            `The recorded take is preserved at ${takeDir} (recipe.json and director-report.json ` +
+            `sit beside it); inspect the verdicts, and render it anyway with: ` +
+            `supercut render --take ${shellQuote(takeDir)}`,
+        );
+      }
+      if (!applied.changed || retakes >= MAX_RETAKES) {
+        if (retakes >= MAX_RETAKES) {
+          log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
+        }
+        // Do NOT adopt the patched recipe here. `takeDir` was
+        // recorded from the CURRENT `recipe`; writing applied.recipe would make
+        // recipe.json/report describe scenes/holds that were never filmed (and
+        // for cuts, omit a scene that is still in the rendered video). The
+        // artifact must match the take. Render keys off events.json + frame
+        // index, so the video is whatever was recorded regardless.
+        break;
+      }
+      recipe = applied.recipe;
+      retakes++;
+      log(`   re-take ${retakes}/${MAX_RETAKES} with patched recipe${applied.cut.length ? ` (cut: ${applied.cut.join(", ")})` : ""}`);
     }
-    recipe = applied.recipe;
-    retakes++;
-    log(`   re-take ${retakes}/${MAX_RETAKES} with patched recipe${applied.cut.length ? ` (cut: ${applied.cut.join(", ")})` : ""}`);
+
+    // report + usage BEFORE render (the finalizer rewrites the report with
+    // the error if render fails): the artifacts exist even if the process is
+    // killed mid-encode
+    writeArtifacts();
+    logUsage();
+
+    log("⑤ render…");
+    const outFile = join(opts.outDir, "final.mp4");
+    const music = pickMusic(opts.music, recipe.music_track);
+    if (music.warning) log(`   warning: ${music.warning}`);
+    // NO on-screen text. supercut is a pure product demo — the product is the
+    // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
+    // it; nothing is ever drawn over the app. (The director still writes copy in
+    // the report for reference, but it is deliberately NOT rendered.)
+    const renderRes = await renderTake({
+      takeDir,
+      outFile,
+      ...(opts.background ? { background: opts.background } : {}),
+      ...(music.spec ? { music: music.spec } : {}),
+    });
+    log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
+
+    return { outFile, recipe, analysis, retakes, verdictLog };
+  } catch (err) {
+    try {
+      writeArtifacts({ error: err instanceof Error ? err.message : String(err) });
+    } catch {
+      /* never mask the run's own error with a report-write failure */
+    }
+    logUsage();
+    throw err;
   }
-
-  writeFileSync(join(opts.outDir, "recipe.json"), JSON.stringify(recipe, null, 2));
-
-  log("⑤ render…");
-  const outFile = join(opts.outDir, "final.mp4");
-  const music = pickMusic(opts.music, recipe.music_track);
-  if (music.warning) log(`   warning: ${music.warning}`);
-  // NO on-screen text. supercut is a pure product demo — the product is the
-  // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
-  // it; nothing is ever drawn over the app. (The director still writes copy in
-  // the report for reference, but it is deliberately NOT rendered.)
-  const renderRes = await renderTake({
-    takeDir,
-    outFile,
-    ...(opts.background ? { background: opts.background } : {}),
-    ...(music.spec ? { music: music.spec } : {}),
-  });
-  log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
-
-  writeFileSync(
-    join(opts.outDir, "director-report.json"),
-    JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label }, null, 2),
-  );
-
-  // best-effort cost telemetry (the hard cap lives in BudgetedLlmClient)
-  const tokens = llm.tokensUsed;
-  log(`LLM usage: ${tokens !== undefined ? `~${tokens} tokens (${llm.breakdown()})` : "unavailable"}`);
-
-  return { outFile, recipe, analysis, retakes, verdictLog };
 }

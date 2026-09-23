@@ -6,7 +6,7 @@
  *        ▼
  *   ┌─ buildRenderPlan ───────────────────────────────────────────┐
  *   │ duration → output frame count (60fps grid)                   │
- *   │ source mapping: output frame → captured frame (nearest hold) │
+ *   │ source mapping: output frame → captured frame (floor hold)   │
  *   │ camera: spring-integrated zoom/focus, 8 subframes per frame  │
  *   │ cursor: interpolated track + click pulses (canvas coords)    │
  *   └──────────────────────────────────────────────────────────────┘
@@ -125,7 +125,8 @@ export interface RenderPlan {
   frames: number;
   layout: Layout;
   background: BackgroundStyle;
-  /** output frame → index into frameIndex (nearest-hold) */
+  /** output frame → index into frameIndex (floor-hold: the last captured
+   *  frame at or before the output time is held — not the temporally nearest) */
   sourceByFrame: number[];
   /** flattened [srcB, k] per output frame: when the frame time falls inside a
    *  source gap, srcB is the second source index and k its blend weight
@@ -230,6 +231,12 @@ export function buildRenderPlan(
     if (typeof e?.file !== "string" || e.file.length === 0 || typeof e?.t_source !== "number") {
       throw new Error(`render plan: frames-index entry ${i} is malformed`);
     }
+    // the host page fetches `/take/${file}` — constrain it to the frames/
+    // namespace (matching the server's sanitizer) so a hand-edited index can't
+    // point the fetch at other take artifacts
+    if (!/^frames\/[0-9a-zA-Z._-]+$/.test(e.file)) {
+      throw new Error(`render plan: frames-index entry ${i} file must be "frames/<name>" (got "${e.file}")`);
+    }
     if (!Number.isFinite(e.t_source) || e.t_source < 0 || e.t_source < prevT) {
       throw new Error(`render plan: frames-index t_source not finite/monotonic at entry ${i}`);
     }
@@ -273,7 +280,8 @@ export function buildRenderPlan(
     );
   }
 
-  // ---- source mapping (nearest-hold per Event-Log Schema v0) ----
+  // ---- source mapping (floor-hold per Event-Log Schema v0: hold the last
+  // frame whose t_source is <= the output frame time) ----
   const sourceByFrame = new Array<number>(frames);
   let p = 0;
   for (let f = 0; f < frames; f++) {

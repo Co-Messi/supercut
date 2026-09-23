@@ -167,6 +167,7 @@ const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
     <div id="danger-div" data-testid="danger" onclick="return false">Delete account</div>
     <div data-testid="danger-row">delete-worker</div>
     <button>Delete-all</button>
+    <input type="button" value="Remove member">
   </main>
   </div>
   <script>
@@ -198,6 +199,37 @@ const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon �
   <div id="modal"><h3>Confirm your plan</h3><button id="confirm">Continue</button></div>
 </body></html>`;
 
+/** SSRF-probe page for the request-gate wiring tests: fires a fetch() and a
+ *  WebSocket at attacker-chosen targets from the query string — exactly the
+ *  in-flight requests the guard must stop that no recipe URL check can see.
+ *  `link` renders a clickable/crawlable <a id="hop"> to an attacker-chosen
+ *  href (e.g. a same-origin /redirect that 302s somewhere private). */
+const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Probe</title></head><body>
+  <h1 id="t">probe page</h1><div id="status">pending</div>
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const l = qs.get("link");
+    if (l) {
+      const a = document.createElement("a");
+      a.id = "hop"; a.href = l; a.textContent = "Open the report";
+      a.style.cssText = "display:inline-block;padding:16px 32px;font-size:20px";
+      document.body.appendChild(a);
+    }
+    const out = { fetch: "skipped", ws: "skipped" };
+    const tasks = [];
+    const f = qs.get("fetch");
+    if (f) tasks.push(fetch(f, { mode: "no-cors" }).then(() => { out.fetch = "ok"; }, () => { out.fetch = "blocked"; }));
+    const w = qs.get("ws");
+    if (w) tasks.push(new Promise((resolve) => {
+      const sock = new WebSocket(w);
+      sock.onopen = () => { out.ws = "open"; resolve(); };
+      sock.onclose = (e) => { if (out.ws !== "open") out.ws = "closed:" + e.code; resolve(); };
+      setTimeout(() => { if (out.ws === "skipped") { out.ws = "timeout"; resolve(); } }, 2500);
+    }));
+    Promise.all(tasks).then(() => { document.getElementById("status").textContent = JSON.stringify(out); });
+  </script>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -205,10 +237,19 @@ export interface DemoApp {
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
   const server: Server = createServer((req, res) => {
+    // open redirect: /redirect?to=<url> answers 302 → <url>. The gate tests
+    // use it as the "public" first hop of a chain that ends on a private host.
+    if (req.url?.startsWith("/redirect")) {
+      const to = new URL(req.url, "http://fixture.invalid").searchParams.get("to") ?? "/";
+      res.writeHead(302, { location: to });
+      res.end();
+      return;
+    }
     const body = req.url?.startsWith("/dash") ? DASH
       : req.url?.startsWith("/panel") ? PANEL
       : req.url?.startsWith("/fleet") ? FLEET
       : req.url?.startsWith("/overlay") ? OVERLAY
+      : req.url?.startsWith("/probe") ? PROBE
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);

@@ -24,7 +24,7 @@ Use them in your videos — commercial or not — with no attribution required.
 
 | track          | vibe                          | length | bpm  |
 | -------------- | ----------------------------- | ------ | ---- |
-| `pulse.mp3`    | minimal tech-house, sleek     | 95s    | ~104 |
-| `daybreak.mp3` | bright melodic house, upbeat  | 95s    | ~110 |
-| `midnight.mp3` | dark synthwave/techno, premium| 100s   | ~100 |
-| `momentum.mp3` | driving minimal techno        | 95s    | ~122 |
+| `pulse.mp3`    | minimal tech-house, sleek     | 92s    | ~104 |
+| `daybreak.mp3` | bright melodic house, upbeat  | 92s    | ~110 |
+| `midnight.mp3` | dark synthwave/techno, premium| 92s    | ~100 |
+| `momentum.mp3` | driving minimal techno        | 91s    | ~122 |

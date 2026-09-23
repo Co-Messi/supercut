@@ -31,6 +31,9 @@ export interface ResolvedProvider {
   model: string;
   baseUrl: string;
   vision: boolean;
+  /** which env var supplied the credential (e.g. "DEEPSEEK_API_KEY") —
+   *  surfaced in the summary so a user always sees which key is being sent */
+  keySource: string;
   summary: string;
 }
 
@@ -38,6 +41,50 @@ const DEEPSEEK_BASE = "https://api.deepseek.com";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
+
+/** the only host a provider-scoped credential may ever be sent to */
+const PROVIDER_HOSTS: Record<Exclude<ProviderName, "custom">, string> = {
+  deepseek: new URL(DEEPSEEK_BASE).hostname,
+  openrouter: new URL(OPENROUTER_BASE).hostname,
+};
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
+
+/**
+ * The base URL decides where the bearer key goes. Invariants:
+ *  - deepseek/openrouter keys only ever reach that provider's own host, so a
+ *    stray SUPERCUT_LLM_BASE_URL (in a .env, a shell profile, a CI secret)
+ *    can never redirect them to a third party — refused, not ignored, so the
+ *    user learns their config is not what they think it is;
+ *  - every key travels over https, except to a loopback host (a local model
+ *    server, where there is no network path to sniff).
+ */
+function assertSafeBaseUrl(raw: string, provider: ProviderName): void {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`SUPERCUT_LLM_BASE_URL is not a valid URL: ${raw}`);
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+    throw new Error(
+      `SUPERCUT_LLM_BASE_URL must use https (plain http is allowed only for a loopback host): ${raw}`,
+    );
+  }
+  if (provider !== "custom") {
+    const expected = PROVIDER_HOSTS[provider];
+    if (url.hostname.toLowerCase() !== expected) {
+      throw new Error(
+        `SUPERCUT_LLM_BASE_URL points at ${url.hostname}, but provider ${provider} only sends its key ` +
+          `to ${expected}. To use another endpoint, set SUPERCUT_PROVIDER=custom with its own ` +
+          `SUPERCUT_API_KEY, or unset SUPERCUT_LLM_BASE_URL.`,
+      );
+    }
+  }
+}
 
 function parseProvider(value: string | undefined): ProviderName | undefined {
   if (!value) return undefined;
@@ -47,7 +94,7 @@ function parseProvider(value: string | undefined): ProviderName | undefined {
 }
 
 function parseVision(value: string | undefined): boolean | undefined {
-  if (value === undefined) return undefined;
+  if (!value) return undefined;
   const v = value.toLowerCase();
   if (v === "true" || v === "1" || v === "yes") return true;
   if (v === "false" || v === "0" || v === "no") return false;
@@ -82,18 +129,40 @@ export function resolveProvider(
     );
   }
 
-  const apiKey =
-    provider === "deepseek" ? env.DEEPSEEK_API_KEY || env.SUPERCUT_API_KEY || "" :
-    provider === "openrouter" ? env.OPENROUTER_API_KEY || env.SUPERCUT_API_KEY || "" :
-    env.SUPERCUT_API_KEY || env.DEEPSEEK_API_KEY || env.OPENROUTER_API_KEY || "";
+  let apiKey: string;
+  let keySource: string;
+  if (provider === "deepseek") {
+    apiKey = env.DEEPSEEK_API_KEY || env.SUPERCUT_API_KEY || "";
+    keySource = env.DEEPSEEK_API_KEY ? "DEEPSEEK_API_KEY" : "SUPERCUT_API_KEY";
+  } else if (provider === "openrouter") {
+    apiKey = env.OPENROUTER_API_KEY || env.SUPERCUT_API_KEY || "";
+    keySource = env.OPENROUTER_API_KEY ? "OPENROUTER_API_KEY" : "SUPERCUT_API_KEY";
+  } else {
+    // custom endpoints take SUPERCUT_API_KEY ONLY. A provider-scoped key must
+    // never fall through here: SUPERCUT_LLM_BASE_URL is an arbitrary
+    // user-supplied host, and a leftover DEEPSEEK_API_KEY in a .env or shell
+    // profile would be sent to it as a bearer token the user never intended
+    // to share. Refuse loudly instead of silently borrowing a credential.
+    apiKey = env.SUPERCUT_API_KEY || "";
+    keySource = "SUPERCUT_API_KEY";
+    if (!apiKey && (env.DEEPSEEK_API_KEY || env.OPENROUTER_API_KEY)) {
+      throw new Error(
+        "SUPERCUT_API_KEY is required when SUPERCUT_PROVIDER=custom — provider-scoped keys " +
+          "(DEEPSEEK_API_KEY / OPENROUTER_API_KEY) are never sent to a custom endpoint",
+      );
+    }
+  }
   if (!apiKey) throw new Error(`no API key found for provider ${provider}`);
 
-  const baseUrl = overrides.baseUrl ?? env.SUPERCUT_LLM_BASE_URL ?? (
+  // `||`, not `??`: an empty variable (e.g. `SUPERCUT_MODEL=` left in a
+  // shell profile) means "unset" and falls through to the default
+  const baseUrl = overrides.baseUrl || env.SUPERCUT_LLM_BASE_URL || (
     provider === "deepseek" ? DEEPSEEK_BASE : provider === "openrouter" ? OPENROUTER_BASE : ""
   );
   if (!baseUrl) throw new Error("SUPERCUT_LLM_BASE_URL is required when SUPERCUT_PROVIDER=custom");
+  assertSafeBaseUrl(baseUrl, provider);
 
-  const model = overrides.model ?? env.SUPERCUT_MODEL ?? (
+  const model = overrides.model || env.SUPERCUT_MODEL || (
     provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL :
     provider === "openrouter" ? DEFAULT_OPENROUTER_MODEL : ""
   );
@@ -119,7 +188,8 @@ export function resolveProvider(
     model,
     baseUrl,
     vision,
-    summary: `${client.label} @ ${baseUrl} · vision ${vision ? "on" : "off (DOM-only)"}`,
+    keySource,
+    summary: `${client.label} @ ${baseUrl} · key from ${keySource} · vision ${vision ? "on" : "off (DOM-only)"}`,
   };
 }
 
@@ -131,8 +201,8 @@ export interface DotEnvLoadResult {
 
 /** Best-effort .env loader. Always uses the internal parser — NOT the native
  *  process.loadEnvFile — so semantics are identical on every Node ≥20 version:
- *  a real environment variable always wins over the .env file (the native
- *  loader can override existing process.env on some versions). */
+ *  a non-empty real environment variable always wins over the .env file (the
+ *  native loader can override existing process.env on some versions). */
 export function loadDotEnv(path = ".env"): DotEnvLoadResult {
   if (!existsSync(path)) return { path, loaded: false, reason: "not found" };
   try {
@@ -143,20 +213,35 @@ export function loadDotEnv(path = ".env"): DotEnvLoadResult {
   }
 }
 
-/** Minimal KEY=VALUE .env parser (fallback for Node < 20.12). Skips blanks and
- *  `#` comments, strips matching surrounding quotes, never overrides an existing
- *  real environment variable. */
+/** the only variables a .env may set: supercut's own. The file is read from
+ *  the cwd, which is normally the user's APP directory, so importing
+ *  everything would pull the app's own secrets (DATABASE_URL, …) into this
+ *  process and every child it spawns (Chromium, ffmpeg). */
+function isSupercutVar(key: string): boolean {
+  return key.startsWith("SUPERCUT_") || key === "DEEPSEEK_API_KEY" || key === "OPENROUTER_API_KEY";
+}
+
+/** Minimal KEY=VALUE .env parser. Skips blanks and `#` comment lines, accepts
+ *  an `export ` prefix, strips matching surrounding quotes (a quoted value is
+ *  taken verbatim, `#` included), strips an unquoted inline comment (a `#`
+ *  preceded by whitespace), treats an empty value as unset, imports only
+ *  supercut's own variables, and never overrides a non-empty real
+ *  environment variable. */
 function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): void {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
     if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
+    const key = line.slice(0, eq).trim().replace(/^export\s+/, "");
+    if (!isSupercutVar(key)) continue;
     let val = line.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
+    const quote = val[0];
+    if ((quote === '"' || quote === "'") && val.indexOf(quote, 1) > 0) {
+      val = val.slice(1, val.indexOf(quote, 1));
+    } else {
+      val = val.replace(/\s+#.*$/, "");
     }
-    if (!(key in env)) env[key] = val;
+    if (val && !env[key]) env[key] = val;
   }
 }

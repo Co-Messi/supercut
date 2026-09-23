@@ -5,7 +5,8 @@
  * construction: it fails the whitelist check and bounces back for retry.
  */
 import { chromium, type Browser, type Page } from "playwright";
-import { assertSafeNavigationUrl, navigationRequestAllowed, resolveAndPinHost } from "../security/url-policy.js";
+import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
+import { installRequestGate, settleGatedRedirect } from "../security/browser-gate.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 /**
@@ -64,6 +65,26 @@ export interface PageDigest {
 }
 
 const cssEscape = (s: string) => s.replace(/["\\]/g, "\\$&");
+
+/**
+ * Escape a raw id for the CSS IDENT position (`#id`). cssEscape above is
+ * enough inside quoted attribute selectors, but an id used as `#id` is an
+ * identifier: a dot, colon, comma, brackets, or a leading digit produce a
+ * wrong or invalid selector, and the `.catch(() => 0)` count probe then
+ * swallows the failure — the element vanishes from the inventory silently.
+ * Minimal CSS.escape: leading digit as a code-point escape, backslash-escape
+ * everything outside [-_a-zA-Z0-9\u00A0-\uFFFF].
+ */
+export const cssIdent = (s: string): string => {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (i === 0 && ch >= "0" && ch <= "9") out += `\\3${ch} `;
+    else if (/[-_a-zA-Z0-9\u00A0-\uFFFF]/.test(ch)) out += ch;
+    else out += `\\${ch}`;
+  }
+  return out;
+};
 
 /** ceiling on distinct :nth-match entries per duplicated base selector — six
  *  rows are plenty to tell a switch-between-items story */
@@ -149,7 +170,7 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
     const id = await el.getAttribute("id").catch(() => null);
     const role = await el.getAttribute("role").catch(() => null);
     let selector: string;
-    if (id) selector = `#${id}`;
+    if (id) selector = `#${cssIdent(id)}`;
     else if (tag === "main") selector = "main";
     else if (role) selector = `[role="${cssEscape(role)}"]`;
     else continue; // no stable handle — skip
@@ -306,7 +327,9 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // real Delete/Pay; --allow-destructive re-includes them.
     const labels = [text, aria, value].filter((s): s is string => Boolean(s));
     if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
-      if (text) excludedDestructive.push(text);
+      // name it by whichever label tripped the filter: an <input type=button>
+      // has no text, only a value, and must still be counted in the notice
+      excludedDestructive.push(labels[0]!);
       continue;
     }
 
@@ -315,7 +338,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // verification) and gives same-testid siblings a shared base that the
     // :nth-match pass below splits into distinct per-row entries.
     let selector: string;
-    if (id) selector = `#${id}`;
+    if (id) selector = `#${cssIdent(id)}`;
     else if (testid) selector = `[data-testid="${cssEscape(testid)}"]`;
     else if (aria) selector = `[aria-label="${cssEscape(aria)}"]`;
     else if (placeholder) selector = `[placeholder="${cssEscape(placeholder)}"]`;
@@ -415,30 +438,45 @@ export async function crawlApp(
 
   const browser: Browser = await chromium.launch({ headless: true, args: launchArgs });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    // guard ON: service workers are blocked — a registered worker's fetches
+    // are not routed through the context, which would hand the page an
+    // ungated network channel
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+      ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
+    });
     const digests: PageDigest[] = [];
     const visited = new Set<string>();
 
-    // block downloads outright so a stray file link can't hang/crash the crawl
-    const ctx = page.context();
-    await ctx.route("**/*", async (route) => {
-      const u = route.request().url();
+    // download navigations are aborted so a stray file link can't crash the
+    // crawl
+    const isDownloadNavigation = (request: { url(): string; isNavigationRequest(): boolean }): boolean => {
       try {
-        if (route.request().isNavigationRequest()) {
-          // guard ON: validate every navigation BEFORE the request leaves the
-          // browser. The post-settle checks below only run AFTER Chromium has
-          // already fetched a 302/meta/JS redirect target — this gate is what
-          // stops the request to a private host from happening at all.
-          if (!allowPrivateNetwork && !(await navigationRequestAllowed(u, { allowPrivateNetwork }))) {
-            return route.abort();
-          }
-          if (NON_HTML_EXT.test(new URL(u).pathname)) {
-            return route.abort();
-          }
-        }
-      } catch { /* fall through */ }
-      return route.continue();
-    });
+        return request.isNavigationRequest() && NON_HTML_EXT.test(new URL(request.url()).pathname);
+      } catch {
+        return false;
+      }
+    };
+    const ctx = page.context();
+    if (allowPrivateNetwork) {
+      await ctx.route("**/*", (route) =>
+        isDownloadNavigation(route.request()) ? route.abort() : route.continue(),
+      );
+    } else {
+      // guard ON: EVERY request type — navigation, fetch/XHR, <img>,
+      // <script>, <link>, form POST — AND every redirect hop of each is
+      // policy-checked before it leaves the browser (see browser-gate.ts for
+      // why redirects need the request to be made from Node). A navigation
+      // the gate refuses fails page.goto, so the page is skipped below.
+      const gate = createRequestGate({ allowPrivateNetwork });
+      await installRequestGate(ctx, gate, { veto: isDownloadNavigation });
+      // WebSocket upgrades bypass ctx.route — gate them separately
+      if (!(await gateWebSockets(ctx, gate))) {
+        console.error(
+          "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+        );
+      }
+    }
 
     // start page first, then source-derived routes (same-origin only), then
     // link-discovered pages. Seeds ensure functional panels get crawled even
@@ -460,7 +498,13 @@ export async function crawlApp(
       // kill the whole crawl — skip it and keep going
       try {
         await assertSafeNavigationUrl(target, { allowPrivateNetwork });
-        const response = await page.goto(target, { timeout: 15_000, waitUntil: "load" });
+        // guard ON: a redirected navigation first lands on the gate's stub,
+        // which replaces itself with the target — wait for the real document
+        const response = await settleGatedRedirect(
+          page,
+          await page.goto(target, { timeout: 15_000, waitUntil: "load" }),
+          { timeout: 15_000, waitUntil: "load" },
+        );
         await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         await page.waitForTimeout(400); // settle: load ≠ ready
         // re-validate where the page SETTLED: a client-side redirect (JS,

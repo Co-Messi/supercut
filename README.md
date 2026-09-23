@@ -63,6 +63,8 @@ plus Chromium and ffmpeg: `npx playwright install chromium`, an `ffmpeg` on your
 and `npx @co-messi/supercut doctor` checks both.
 
 > Any command accepts `--help` to print its own usage (e.g. `npx @co-messi/supercut generate --help`).
+> Examples further down write the command as plain `supercut …`: run it as
+> `npx @co-messi/supercut …`, or `node dist/cli/index.js …` from a source checkout.
 
 ### From source (contributors — and the no-API-key demo)
 

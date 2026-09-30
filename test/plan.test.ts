@@ -251,8 +251,14 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
   });
 });
 
-describe("source cross-blend: nav crossfades + gap smoothing", () => {
-  // 60fps source with a 1000ms capture hole between 2000 and 3000
+describe("source mapping: floor-hold, never a double exposure", () => {
+  // Behaviour change (was: linear cross-blend across 25-500ms gaps, a late
+  // 350ms crossfade across nav/long gaps). Two DIFFERENT source frames mixed
+  // at partial weight is a double exposure — on a real 39fps generate take
+  // 46% of output frames were ghosted. The plan has no pixels to prove two
+  // frames near-identical, and blending near-identical frames is a visual
+  // no-op, so every gap is now floor-held and a page change is a clean cut.
+  // The blend array stays in the plan (all -1/0) for host-page compatibility.
   const gapIndex = [
     ...Array.from({ length: 121 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
@@ -264,18 +270,14 @@ describe("source cross-blend: nav crossfades + gap smoothing", () => {
     })),
   ];
   const frameMs = 1000 / 60;
-  const blendAt = (plan: ReturnType<typeof buildRenderPlan>, tMs: number) => {
+  const at = (plan: ReturnType<typeof buildRenderPlan>, tMs: number) => {
     const f = Math.round(tMs / frameMs);
-    return { srcB: plan.blend[f * 2]!, k: plan.blend[f * 2 + 1]! };
+    return { src: plan.sourceByFrame[f]!, srcB: plan.blend[f * 2]!, k: plan.blend[f * 2 + 1]! };
   };
 
-  it("linearly blends across a short residual (non-nav) source gap", () => {
-    // 60fps source with a 400ms capture hole between 2000 and 2400
+  it("holds the last frame across a short residual gap instead of dissolving", () => {
     const shortGapIndex = [
-      ...Array.from({ length: 121 }, (_, i) => ({
-        file: `frames/${String(i).padStart(6, "0")}.png`,
-        t_source: Math.round(i * (2000 / 120)),
-      })),
+      ...gapIndex.slice(0, 121),
       ...Array.from({ length: 60 }, (_, i) => ({
         file: `frames/${String(121 + i).padStart(6, "0")}.png`,
         t_source: 2400 + Math.round(i * (2000 / 120)),
@@ -286,29 +288,32 @@ describe("source cross-blend: nav crossfades + gap smoothing", () => {
       { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
     ]);
     const plan = buildRenderPlan(log, shortGapIndex);
-    // inside the gap: blends toward the NEXT source by temporal position
-    expect(blendAt(plan, 2100).srcB).toBe(121);
-    expect(blendAt(plan, 2100).k).toBeCloseTo(0.25, 1);
-    expect(blendAt(plan, 2300).k).toBeCloseTo(0.75, 1);
-    // outside the gap: no blend
-    expect(blendAt(plan, 1000).srcB).toBe(-1);
-    expect(blendAt(plan, 3000).srcB).toBe(-1);
+    for (const t of [2100, 2300]) {
+      expect(at(plan, t)).toEqual({ src: 120, srcB: -1, k: 0 });
+    }
+    // the next source takes over exactly when it exists
+    expect(at(plan, 2420).src).toBe(121);
   });
 
-  it("a LONG residual gap holds then fades late — never a seconds-long linear dissolve", () => {
-    // no scene marker near the gap: e.g. slow pre-nav DNS work pushed the real
-    // reload gap outside naive attribution — it must still read as a quick fade
+  it("a navigation gap holds the old page, then cuts cleanly to the new one", () => {
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
+      { t: 1990, type: "scene", name: "s2", priority: 2 },
     ]);
     const plan = buildRenderPlan(log, gapIndex);
-    // early/mid gap: HOLD, no mush
-    expect(blendAt(plan, 2200).srcB).toBe(-1);
-    expect(blendAt(plan, 2500).srcB).toBe(-1);
-    // final ~350ms: quick dissolve
-    expect(blendAt(plan, 2800).srcB).toBe(121);
-    expect(blendAt(plan, 2800).k).toBeCloseTo((2800 - 2650) / 350, 1);
+    for (const t of [2200, 2500, 2800, 2980]) expect(at(plan, t)).toEqual({ src: 120, srcB: -1, k: 0 });
+    expect(at(plan, 3010).src).toBe(121);
+  });
+
+  it("an irregular sub-60fps source never blends", () => {
+    const log = makeLog([{ t: 0, type: "scene", name: "s1", priority: 1 }]);
+    const irregular = Array.from({ length: 200 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: Math.round(i * 25.6 + (i % 3) * 7),
+    }));
+    const plan = buildRenderPlan(log, irregular);
+    for (let f = 0; f < plan.frames; f++) expect(plan.blend[f * 2]).toBe(-1);
   });
 
   it("dense 60fps capture (~17ms spacing) never blends", () => {
@@ -319,22 +324,6 @@ describe("source cross-blend: nav crossfades + gap smoothing", () => {
     }));
     const plan = buildRenderPlan(log, dense);
     for (let f = 0; f < plan.frames; f++) expect(plan.blend[f * 2]).toBe(-1);
-  });
-
-  it("a nav gap holds the last pre-nav frame, then crossfades ~350ms into the new page", () => {
-    const log = makeLog([
-      { t: 0, type: "scene", name: "s1", priority: 1 },
-      { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
-      { t: 1990, type: "scene", name: "s2", priority: 2 }, // right before the gap → it's a navigation
-    ]);
-    const plan = buildRenderPlan(log, gapIndex);
-    // early in the gap: HOLD (no dissolve mush while the page reloads)
-    expect(blendAt(plan, 2200).srcB).toBe(-1);
-    expect(blendAt(plan, 2500).srcB).toBe(-1);
-    // final 350ms: crossfade ramps into the first post-nav frame
-    expect(blendAt(plan, 2800).srcB).toBe(121);
-    expect(blendAt(plan, 2800).k).toBeCloseTo((2800 - 2650) / 350, 1);
-    expect(blendAt(plan, 2980).k).toBeGreaterThan(0.9);
   });
 });
 

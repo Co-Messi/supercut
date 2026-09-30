@@ -91,9 +91,9 @@ type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend";
  * table shrinking to empty IS the before/after record.
  */
 const PENDING: Record<string, Check[]> = {
-  "synthetic multi-scene take @ ~39fps source": ["marker", "navGap", "tail", "blend"],
+  "synthetic multi-scene take @ ~39fps source": ["marker", "navGap", "tail"],
   "synthetic multi-scene take @ ~60fps source": ["marker", "navGap", "tail"],
-  "real demo take (main @ 013d6b8)": ["marker", "navGap", "wideRest", "arrival", "blend"],
+  "real demo take (main @ 013d6b8)": ["marker", "navGap", "wideRest", "arrival"],
 };
 
 const scenarios: [string, () => { log: EventLog; index: FrameIndexEntry[] }][] = [

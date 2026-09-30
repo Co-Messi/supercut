@@ -128,9 +128,10 @@ export interface RenderPlan {
   /** output frame → index into frameIndex (floor-hold: the last captured
    *  frame at or before the output time is held — not the temporally nearest) */
   sourceByFrame: number[];
-  /** flattened [srcB, k] per output frame: when the frame time falls inside a
-   *  source gap, srcB is the second source index and k its blend weight
-   *  (srcB = -1, k = 0 where no blend applies) */
+  /** flattened [srcB, k] per output frame: a second source index and its
+   *  blend weight. The planner no longer blends (srcB = -1, k = 0 everywhere
+   *  — see "source blend" in buildRenderPlan); the field stays so the host
+   *  page contract is unchanged. */
   blend: number[];
   /** flattened [z, fx, fy] per subframe: frames × SUBFRAMES × 3 (canvas coords) */
   camera: number[];
@@ -163,19 +164,6 @@ const MIN_CONTEXT_FRAC = 0.55;
  *  fraction of the content diagonal the camera widens between beats instead
  *  of dragging a tight crop across the page */
 const MERGE_DIST_FRAC = 0.5;
-/** scene-boundary crossfade length (last pre-nav frame → first post-nav
- *  frame) — a deliberate dissolve instead of a freeze-then-snap */
-const CROSSFADE_MS = 350;
-/** source gaps longer than this get temporally cross-blended so residual
- *  capture stalls read as motion, not a held still */
-const BLEND_MIN_GAP_MS = 25;
-/** residual gaps longer than this are held-then-faded like a navigation —
- *  dissolving linearly across a long gap reads as mush, not motion */
-const RESIDUAL_BLEND_MAX_MS = 500;
-/** a scene marker within this much before a source gap attributes the gap to
- *  that scene's navigation (frames keep flowing while pre-nav work — URL
- *  policy DNS checks on real networks — runs after the marker) */
-const NAV_MARKER_SLACK_MS = 1000;
 /** a framed RESULT (focus_bbox) is the payoff — hold on it longer than a plain
  *  interaction so the viewer reads the graph/results before the camera moves */
 const FOCUS_DWELL_MS = 2400;
@@ -298,35 +286,18 @@ export function buildRenderPlan(
   const navMarkers = sceneMarkers.slice(1);
   const sceneStarts = [0, ...navMarkers];
 
-  // ---- source cross-blend: nav crossfades + residual gap smoothing ----
-  // one source bitmap per output frame turns a source gap into a freeze;
-  // blending toward the next source turns a navigation into a deliberate
-  // dissolve and a residual capture stall into continuous motion.
+  // ---- source blend: none (floor-hold only) ----
+  // Mixing two DIFFERENT source frames at partial weight is a double
+  // exposure: cross-blending every 25-500ms gap ghosted ~46% of output frames
+  // on a 39fps take, and a nav crossfade superimposed two pages. The plan has
+  // no pixels to prove two frames near-identical — and blending near-identical
+  // frames is a visual no-op — so every gap is floor-held and a page change is
+  // a clean cut (the camera is wide by then, see below). The array stays in
+  // the plan contract (srcB = -1, k = 0) so the host page is unchanged.
   const blend = new Array<number>(frames * 2);
   for (let f = 0; f < frames; f++) {
     blend[f * 2] = -1;
     blend[f * 2 + 1] = 0;
-    const t = f * frameMs;
-    const a = sourceByFrame[f]!;
-    if (a + 1 >= frameIndex.length) continue;
-    const tA = frameIndex[a]!.t_source;
-    const tB = frameIndex[a + 1]!.t_source;
-    const gap = tB - tA;
-    if (gap <= BLEND_MIN_GAP_MS || t <= tA) continue;
-    const isNav = navMarkers.some((nt) => nt >= tA - NAV_MARKER_SLACK_MS && nt < tB);
-    let k: number;
-    if (isNav || gap > RESIDUAL_BLEND_MAX_MS) {
-      // hold the old frame, then crossfade at the end: a long gap dissolved
-      // linearly across its whole length reads as seconds of mush between two
-      // different page states — a quick late fade reads as deliberate
-      const fadeStart = Math.max(tA, tB - CROSSFADE_MS);
-      if (t < fadeStart) continue;
-      k = (t - fadeStart) / (tB - fadeStart);
-    } else {
-      k = (t - tA) / gap;
-    }
-    blend[f * 2] = a + 1;
-    blend[f * 2 + 1] = Math.min(1, Math.max(0, k));
   }
 
   // ---- camera segments ----

@@ -586,12 +586,11 @@ describe("record E2E on fixture app", () => {
     });
     const out = mkdtempSync(join(tmpdir(), "supercut-samepage-"));
     dirs.push(out);
+    const dashLoads = app.hits.get("/dash") ?? 0;
     const res = await record({ recipe, outDir: out, seed: 5, allowPrivateNetwork: true });
     expect(res.failedScenes).toEqual([]);
-    const idx = JSON.parse(readFileSync(join(out, "frames-index.json"), "utf8")) as { t_source: number }[];
-    let maxGap = 0;
-    for (let i = 1; i < idx.length; i++) maxGap = Math.max(maxGap, idx[i]!.t_source - idx[i - 1]!.t_source);
-    expect(maxGap).toBeLessThan(250); // no reload gap anywhere in the take
+    // the page was fetched ONCE: scene 2 reused it instead of reloading
+    expect((app.hits.get("/dash") ?? 0) - dashLoads).toBe(1);
     const scenes = res.eventLog.events.filter((e) => e.type === "scene");
     const hovers = res.eventLog.events.filter((e) => e.type === "hover");
     expect(hovers[1]!.t).toBeGreaterThanOrEqual(scenes[1]!.t + 1000); // the scene still opens at rest
@@ -623,7 +622,9 @@ describe("record E2E on fixture app", () => {
     const end = idx[idx.length - 1]!.t_source;
     // the last 1.5s of the hold: counters long clamped, row hovered
     const tail = idx.filter((e) => e.t_source >= end - 1500);
-    expect(tail.length / 1.5).toBeGreaterThanOrEqual(45);
+    // floor well under a healthy capture (CI's software compositor sustains
+    // ~47fps) but far above the 20fps the corner beacon fell to
+    expect(tail.length / 1.5).toBeGreaterThanOrEqual(35);
   }, 120_000);
 
   it("scroll actions keep the distance/slot contract while easing across the whole slot", async () => {

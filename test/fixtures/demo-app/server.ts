@@ -260,11 +260,18 @@ export interface DemoApp {
   close: () => Promise<void>;
   /** bodies POSTed to /keylog by the /keys page, oldest first */
   keylogs: unknown[];
+  /** GET count per path (query stripped) — proves whether a page reloaded */
+  hits: Map<string, number>;
 }
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
   const keylogs: unknown[] = [];
+  const hits = new Map<string, number>();
   const server: Server = createServer((req, res) => {
+    if (req.method === "GET") {
+      const path = (req.url ?? "/").split("?")[0]!;
+      hits.set(path, (hits.get(path) ?? 0) + 1);
+    }
     if (req.url === "/keylog" && req.method === "POST") {
       let body = "";
       req.on("data", (c) => (body += c));
@@ -298,6 +305,7 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
   return {
     url: `http://127.0.0.1:${addr.port}`,
     keylogs,
+    hits,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

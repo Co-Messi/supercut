@@ -196,6 +196,11 @@ const GLIDE_Z = 1.1;
  *  capture drops frames while the next document loads, and ordinary capture
  *  jitter at ~60fps never comes close */
 export const NAV_GAP_MS = 250;
+/** a gap NOT explained by a scene marker or a logged navigation must be this
+ *  long to count as a page change: action-triggered navigations are logged,
+ *  and an ordinary capture hiccup on a loaded machine (up to ~400ms) must
+ *  never snap the camera while the same page is still showing */
+export const UNATTRIBUTED_GAP_MS = 500;
 /** a navigation gap starting within this window around a scene marker is
  *  that scene's entry navigation (the marker is emitted before the goto; on
  *  real networks policy DNS checks run between them) */
@@ -319,9 +324,13 @@ export function buildRenderPlan(
       boundaries.push({ out: m - ZOOM_OUT_MS, in: m, snap: false });
     }
   }
+  const navTimes = log.events.filter((e) => e.type === "navigation").map((e) => e.t);
+  const loggedNav = (g: { tA: number }) =>
+    navTimes.some((t) => g.tA >= t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= t + NAV_EVENT_GAP_AFTER_MS);
   gaps.forEach((g, i) => {
     // a click-triggered navigation: widen while the old page freezes, cut wide
-    if (!claimed.has(i)) boundaries.push({ out: g.tA, in: g.tB, snap: true });
+    if (claimed.has(i)) return;
+    if (loggedNav(g) || g.tB - g.tA >= UNATTRIBUTED_GAP_MS) boundaries.push({ out: g.tA, in: g.tB, snap: true });
   });
   // an action-triggered navigation the recorder logged: a fast local one keeps
   // frames flowing (no gap to detect), so the logged commit time is the cut.

@@ -342,10 +342,13 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
 
   it("never bridges a punch across a click-triggered navigation gap", () => {
     // two nearby small targets 2.5s apart would bridge into one held zoom —
-    // but a source gap (the page reloaded) lies between them
+    // but a source gap (the page reloaded) lies between them. The recorder
+    // logs the navigation; its 400ms gap is then the cut (an UNLOGGED gap
+    // this short would be a capture hiccup — see the stall test below)
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+      { t: 2450, type: "navigation" },
       { t: 4400, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
     ]);
     const plan = buildRenderPlan(log, idxWithGap(2500, 2900, 7000));
@@ -372,6 +375,24 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
     for (let t = 1000; t <= 2110 + 800; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
     // the new page's first click still gets its punch, on time
     expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+  });
+
+  it("a short capture stall is not a page change: no snap, the punch is kept", () => {
+    // a 300ms hiccup mid-shot on a slow machine, with no scene marker and no
+    // logged navigation: the same page is still showing, so a snap to wide
+    // would be exactly the jump this planner exists to avoid
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 2000, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+      { t: 3300, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(2300, 2600, 6000));
+    const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+    // no discontinuity anywhere in the camera track
+    for (let f = 1; f < plan.frames; f++) expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(0.05);
+    // held punched-in through the stall and on for the second click
+    expect(zAtT(plan, 2450)).toBeGreaterThan(1.3);
+    expect(zAtT(plan, 3300)).toBeGreaterThan(1.3);
   });
 
   it("skips a punch that could only land after the click", () => {

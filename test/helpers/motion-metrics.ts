@@ -11,6 +11,7 @@ import { SUBFRAMES, type FrameIndexEntry, type RenderPlan } from "../../src/rend
 /** a source gap at least this long is a page transition (navigation /
  *  reload), never ordinary capture jitter */
 export const NAV_GAP_MS = 250;
+const UNATTRIBUTED_GAP_MS = 500;
 /** a navigation gap attributed to a scene marker may start this long before
  *  the marker or up to this long after it */
 const MARKER_WINDOW_BEFORE_MS = 1000;
@@ -39,12 +40,19 @@ export interface MotionMetrics {
   blendedShare: number;
 }
 
-export function navGaps(frameIndex: FrameIndexEntry[]): { tA: number; tB: number }[] {
+/** source gaps that are page changes: ≥ 250ms near a scene marker or a
+ *  logged navigation, ≥ 500ms otherwise (a shorter unexplained gap is a
+ *  capture hiccup on the same page, where the camera must NOT cut) */
+export function navGaps(frameIndex: FrameIndexEntry[], log?: EventLog): { tA: number; tB: number }[] {
+  const anchors = (log?.events ?? [])
+    .filter((e) => e.type === "scene" || e.type === "navigation")
+    .map((e) => e.t);
   const gaps: { tA: number; tB: number }[] = [];
   for (let i = 1; i < frameIndex.length; i++) {
     const tA = frameIndex[i - 1]!.t_source;
     const tB = frameIndex[i]!.t_source;
-    if (tB - tA >= NAV_GAP_MS) gaps.push({ tA, tB });
+    const anchored = anchors.some((t) => tA >= t - MARKER_WINDOW_BEFORE_MS && tA <= t + MARKER_WINDOW_AFTER_MS);
+    if (tB - tA >= (anchored ? NAV_GAP_MS : UNATTRIBUTED_GAP_MS)) gaps.push({ tA, tB });
   }
   return gaps;
 }
@@ -57,7 +65,7 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
   const zAt = (t: number) => zAtFrame(frameAt(t));
 
   const markers = log.events.filter((e) => e.type === "scene").map((e) => e.t);
-  const gaps = navGaps(frameIndex);
+  const gaps = navGaps(frameIndex, log);
 
   let maxZAtSceneMarker = 1;
   for (const m of markers.slice(1)) maxZAtSceneMarker = Math.max(maxZAtSceneMarker, zAt(m));

@@ -29,6 +29,17 @@ export interface LlmClient {
   readonly tokensUsed?: number | undefined;
 }
 
+/** a reasoning model can spend its whole max_tokens thinking and return an
+ *  empty answer (finish_reason "length"). Each such attempt doubles
+ *  max_tokens, up to this multiple of the requested size (8k → 16k → 32k). */
+const ESCALATION_FACTOR = 4;
+
+/** the largest max_tokens a call requesting `maxTokens` may be escalated to —
+ *  what a budget must reserve for that call's completion */
+export function escalationCeiling(maxTokens: number): number {
+  return maxTokens * ESCALATION_FACTOR;
+}
+
 export interface OpenAICompatibleConfig {
   apiKey: string;
   model: string;
@@ -71,18 +82,25 @@ export class OpenAICompatibleClient implements LlmClient {
         ? { type: "text" as const, text: p.text }
         : { type: "image_url" as const, image_url: { url: p.dataUrl } },
     );
-    const body = {
+    const requested = opts.maxTokens ?? 4096;
+    const ceiling = escalationCeiling(requested);
+    let maxTokens = requested;
+    /** the largest max_tokens this provider has accepted in this call */
+    let accepted = requested;
+    let escalationRefused = false;
+    const bodyFor = (max: number) => ({
       model: this.model,
-      max_tokens: opts.maxTokens ?? 4096,
+      max_tokens: max,
       ...(opts.json ? { response_format: { type: "json_object" } } : {}),
       messages: [
         { role: "system", content: opts.system },
         { role: "user", content },
       ],
-    };
+    });
 
     let lastErr = "";
     for (let attempt = 0; attempt < 4; attempt++) {
+      const body = bodyFor(maxTokens);
       let res: Response;
       try {
         res = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -124,7 +142,9 @@ export class OpenAICompatibleClient implements LlmClient {
             ? (u?.prompt_tokens ?? 0) + (u?.completion_tokens ?? 0)
             : undefined);
         if (billed !== undefined) this._tokensUsed = (this._tokensUsed ?? 0) + billed;
-        const msg = data.choices?.[0]?.message;
+        accepted = Math.max(accepted, maxTokens);
+        const choice = data.choices?.[0];
+        const msg = choice?.message;
         // the answer is `content` only. A reasoning model that ran out of
         // tokens mid-thought returns empty content plus its chain of thought;
         // a draft JSON inside that reasoning must never be accepted as output.
@@ -134,7 +154,14 @@ export class OpenAICompatibleClient implements LlmClient {
         // rather than failing the whole run on one unlucky sample
         lastErr =
           `empty response` +
-          (msg?.reasoning_content ? " — only reasoning, no answer (likely hit max_tokens mid-reasoning)" : "");
+          (msg?.reasoning_content ? " — only reasoning, no answer (likely hit max_tokens mid-reasoning)" : "") +
+          ` at max_tokens ${maxTokens}`;
+        // truncated mid-reasoning: the same budget would most likely truncate
+        // again — give the next attempt twice the room (bounded by the
+        // ceiling the budget wrapper reserved for this call)
+        if (choice?.finish_reason === "length" && !escalationRefused) {
+          maxTokens = Math.min(ceiling, maxTokens * 2);
+        }
         continue;
       }
       // A2: drain the body, but the raw provider response can echo prompt text
@@ -142,6 +169,14 @@ export class OpenAICompatibleClient implements LlmClient {
       // otherwise keep status + provider label (+ auth hint) and omit the body.
       const snippet = (await res.text()).slice(0, 300);
       const detail = process.env.SUPERCUT_VERBOSE ? ` ${snippet}` : "";
+      if (res.status === 400 && maxTokens > accepted) {
+        // the provider caps output below the escalated size: go back to the
+        // largest size it accepted and stop escalating (retry, don't fail)
+        lastErr = `400 at escalated max_tokens ${maxTokens}:${detail}`;
+        maxTokens = accepted;
+        escalationRefused = true;
+        continue;
+      }
       if (res.status === 401 || res.status === 403) {
         throw new Error(`LLM auth failed (${res.status}, ${this.label}) — check your API key.${detail}`);
       }
@@ -235,8 +270,10 @@ export class BudgetedLlmClient implements LlmClient {
   async chat(opts: ChatOptions): Promise<string> {
     const promptEstimate = estimateTokens(opts);
     // reserve the call's worst-case completion too: on reasoning models the
-    // completion, not the prompt, dominates the bill
-    const completionReserve = opts.maxTokens ?? 0;
+    // completion, not the prompt, dominates the bill — and a truncated
+    // reasoning answer escalates max_tokens up to escalationCeiling(), so
+    // reserve that, not just the first attempt's size
+    const completionReserve = opts.maxTokens ? escalationCeiling(opts.maxTokens) : 0;
     const worstCase = promptEstimate + completionReserve;
     if (this.budget > 0 && (this.metered >= this.budget || this.metered + worstCase > this.budget)) {
       const sizeNote =

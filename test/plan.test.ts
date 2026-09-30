@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { assessSkew } from "../src/render/index.js";
-import { buildRenderPlan, defaultLayout, SUBFRAMES } from "../src/render/plan.js";
+import { assessSkew, musicFilterChain } from "../src/render/index.js";
+import { buildRenderPlan, defaultLayout, FADE_IN_MS, FADE_OUT_MS, SUBFRAMES } from "../src/render/plan.js";
 import type { EventLog } from "../src/schema/index.js";
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
@@ -163,9 +163,13 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
     }));
     const plan = buildRenderPlan(log, idx);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
-    // mid-take glide between the scenes sits above 1 (still engaged)…
-    expect(zAt(Math.round(6000 / (1000 / 60)))).toBeGreaterThan(1.05);
-    // …but the second scene OPENS wide: midway through its establishing shot
+    // Behaviour change: the camera used to "glide" at z=1.1 on scene 1's stale
+    // focus right up to scene 2 (6000ms read 1.1). A scene change is a cut to
+    // a different page — the camera is fully wide before it, never parked on
+    // a target that no longer exists.
+    expect(zAt(Math.round(6000 / (1000 / 60)))).toBeLessThan(1.02);
+    expect(zAt(Math.round(8000 / (1000 / 60)))).toBeLessThan(1.02);
+    // the second scene OPENS wide: midway through its establishing shot
     expect(zAt(Math.round(8450 / (1000 / 60)))).toBeLessThan(1.06);
     // then punches back in for its click
     expect(zAt(Math.round(10600 / (1000 / 60)))).toBeGreaterThan(1.4);
@@ -324,6 +328,66 @@ describe("source mapping: floor-hold, never a double exposure", () => {
     }));
     const plan = buildRenderPlan(log, dense);
     for (let f = 0; f < plan.frames; f++) expect(plan.blend[f * 2]).toBe(-1);
+  });
+});
+
+describe("scene boundaries: cuts, snaps, tail and fades", () => {
+  const frameMs = 1000 / 60;
+  const zAtT = (plan: ReturnType<typeof buildRenderPlan>, t: number) =>
+    plan.camera[Math.round(t / frameMs) * SUBFRAMES * 3]!;
+  const idxWithGap = (gapFrom: number, gapTo: number, end: number) =>
+    Array.from({ length: Math.ceil(end / 17) }, (_, i) => i * 17)
+      .filter((t) => t <= gapFrom || t >= gapTo)
+      .map((t, i) => ({ file: `frames/${String(i).padStart(6, "0")}.jpg`, t_source: t }));
+
+  it("never bridges a punch across a click-triggered navigation gap", () => {
+    // two nearby small targets 2.5s apart would bridge into one held zoom —
+    // but a source gap (the page reloaded) lies between them
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+      { t: 4400, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(2500, 2900, 7000));
+    // camera wide on the first new-page frame and through its establishing read
+    expect(zAtT(plan, 2910)).toBeLessThan(1.02);
+    expect(zAtT(plan, 3300)).toBeLessThan(1.02);
+    // and still punches for the click on the new page, arriving on time
+    expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+  });
+
+  it("skips a punch that could only land after the click", () => {
+    // a click 500ms into a new page: the establishing shot owns the opening,
+    // so there is no time to arrive — no late zoom chasing the click
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 500, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(99999, 99999, 3000));
+    for (let t = 0; t < 3000; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
+  });
+
+  it("extends the take until the camera has settled, with at least 1s of tail", () => {
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+    ]);
+    const idx = idxWithGap(99999, 99999, 2000); // footage ends right after the click
+    const plan = buildRenderPlan(log, idx);
+    const endMs = plan.frames * frameMs;
+    expect(endMs).toBeGreaterThanOrEqual(1600 + 1200 + 1000);
+    const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+    for (let f = plan.frames - 18; f < plan.frames; f++) {
+      expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(1e-4);
+    }
+  });
+
+  it("declares picture fades that match the music fades", () => {
+    const long = Array.from({ length: 600 }, (_, i) => ({ file: `frames/${String(i).padStart(6, "0")}.jpg`, t_source: i * 17 }));
+    const plan = buildRenderPlan(clickLog, long);
+    expect(plan.fade).toEqual({ inFrames: Math.round(FADE_IN_MS / frameMs), outFrames: Math.round(FADE_OUT_MS / frameMs) });
+    expect(musicFilterChain(10)).toContain(`afade=t=in:st=0:d=${FADE_IN_MS / 1000}`);
+    expect(musicFilterChain(10)).toContain(`d=${FADE_OUT_MS / 1000}`);
   });
 });
 

@@ -52,6 +52,10 @@ const ENTRY_NAV_ALLOWANCE_MS = 1_000;
 /** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
  *  a settle pause before the schedule continues */
 const SETTLE_MS = 400;
+/** every page opens at rest for at least this long before its first action:
+ *  the render's establishing shot reads the page wide, and the first punch-in
+ *  has time to arrive BEFORE the first click instead of chasing it */
+const PRE_ROLL_MS = 1_000;
 
 /**
  * CDP screencast is change-driven: a static page produces NO compositor
@@ -211,6 +215,16 @@ function ceilToFrame(ms: number): number {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** same document URL (normalized; a differing fragment still counts as a
+ *  different entry, so the recipe's explicit navigation is honoured) */
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return false;
+  }
+}
 
 // Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
 // from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
@@ -680,6 +694,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         ? firstFrameStamp
         : Date.now();
 
+    // pre-roll: the opening page at rest before anything moves
+    {
+      const wait = PRE_ROLL_MS - observedNow();
+      if (wait > 0) await sleep(wait);
+      clock = stamp(Math.max(PRE_ROLL_MS, ceilToFrame(observedNow())));
+    }
+
     for (let i = 0; i < recipe.scenes.length; i++) {
       const scene: Scene = recipe.scenes[i]!;
 
@@ -703,31 +724,37 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
-          // suppress capture across the reload so the blank page never lands in
-          // the footage (the scene-change flash); resume once it has painted.
-          // MUST reset in finally: if gotoReady/assert throws, leaving this true
-          // would make the screencast handler drop EVERY subsequent frame and
-          // freeze the rest of the video on the previous scene.
-          isNavigating = true;
-          try {
-            const response = await gotoReady(page, scene.entry.url);
-            await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
-            await sleep(SETTLE_MS);
-          } finally {
-            isNavigating = false;
+          // the previous scene already left the browser on this exact page:
+          // re-navigating only reloads it — a second freeze in the footage and
+          // a flash of the same page. Skipped only after a scene that completed
+          // (a failed one may have left the page in a state a reload resets).
+          const prev = recipe.scenes[i - 1]!;
+          const alreadyThere =
+            !failedScenes.includes(prev.name) && sameUrl(page.url(), scene.entry.url);
+          if (!alreadyThere) {
+            // suppress capture across the reload so the blank page never lands in
+            // the footage (the scene-change flash); resume once it has painted.
+            // MUST reset in finally: if gotoReady/assert throws, leaving this true
+            // would make the screencast handler drop EVERY subsequent frame and
+            // freeze the rest of the video on the previous scene.
+            isNavigating = true;
+            try {
+              const response = await gotoReady(page, scene.entry.url);
+              await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
+              await sleep(SETTLE_MS);
+            } finally {
+              isNavigating = false;
+            }
           }
-          // Timestamp canon: when nav finishes early, dwell out
-          // the unused allowance in WALL time so pixels and schedule stay in
-          // lockstep — advancing only the clock made the footage run ~1s ahead
-          // of every logged event after a fast local navigation
+          // Timestamp canon: when nav finishes early, dwell out the unused
+          // allowance in WALL time so pixels and schedule stay in lockstep —
+          // advancing only the clock made the footage run ~1s ahead of every
+          // logged event after a fast local navigation. The new page (its
+          // first captured frame is at navEnd) also gets its pre-roll.
           const navEnd = observedNow();
-          const target = clock + ENTRY_NAV_ALLOWANCE_MS;
-          if (navEnd < target) {
-            await sleep(target - navEnd);
-            clock = stamp(target);
-          } else {
-            clock = stamp(ceilToFrame(navEnd));
-          }
+          const target = Math.max(clock + ENTRY_NAV_ALLOWANCE_MS, navEnd + PRE_ROLL_MS);
+          await sleep(target - navEnd);
+          clock = stamp(ceilToFrame(target));
         }
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
           await runAction(a);

@@ -40,7 +40,7 @@ async function main() {
   }
 
   const plan = await (await fetchOk("/take/render-plan.json")).json();
-  const { fps, frames, layout, background, sourceByFrame, blend, camera, cursor, sourceFiles } = plan;
+  const { fps, frames, layout, background, fade, sourceByFrame, blend, camera, cursor, sourceFiles } = plan;
   const SUB = 8;
   const W = layout.canvasW, H = layout.canvasH;
   const C = layout.content;
@@ -313,6 +313,22 @@ async function main() {
       ctx.scale(cs, cs);
       drawCursor(ctx, 0, 0, cur[2]);
       ctx.restore();
+    }
+
+    // 4) picture fade from / to black, matching the music bed's afades
+    {
+      const ease = (x) => x * x * (3 - 2 * x);
+      const fin = fade ? fade.inFrames : 0, fout = fade ? fade.outFrames : 0;
+      let dark = 0;
+      if (f < fin) dark = 1 - ease((f + 1) / (fin + 1));
+      if (f >= frames - fout) dark = Math.max(dark, ease((f - (frames - fout) + 1) / fout));
+      if (dark > 0.002) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = dark;
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, W, H);
+        ctx.globalAlpha = 1;
+      }
     }
 
     const vf = new VideoFrame(canvas, { timestamp: Math.round((f * 1e6) / fps) });

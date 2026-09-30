@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 import { parseEventLog, type EventLog } from "../schema/index.js";
-import { buildRenderPlan, type FrameIndexEntry } from "./plan.js";
+import { buildRenderPlan, FADE_IN_MS, FADE_OUT_MS, type FrameIndexEntry } from "./plan.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 
 const exec = promisify(execFile);
@@ -138,7 +138,11 @@ export function frameMimeType(name: string): string {
 export function musicFilterChain(durationS: number): string {
   const filters = ["loudnorm=I=-20:TP=-2:LRA=9"];
   if (durationS >= 2.5) {
-    filters.push("afade=t=in:st=0:d=0.6", `afade=t=out:st=${(durationS - 1.8).toFixed(3)}:d=1.8`);
+    // the picture fades with the SAME lengths (plan.fade), so sound and
+    // image open and close together
+    const fin = FADE_IN_MS / 1000;
+    const fout = FADE_OUT_MS / 1000;
+    filters.push(`afade=t=in:st=0:d=${fin}`, `afade=t=out:st=${(durationS - fout).toFixed(3)}:d=${fout}`);
   }
   return filters.join(",");
 }

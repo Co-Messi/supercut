@@ -263,6 +263,14 @@ describe("record E2E on fixture app", () => {
     expect(scene2T).toBeGreaterThanOrEqual(5000);
     const hoverEvent = log.events.find((e) => e.type === "hover")!;
     expect(hoverEvent.t).toBeGreaterThanOrEqual(scene2T + 1000);
+    // pre-roll: the take opens on the page at rest for ≥ 1s before the first
+    // interaction, so the establishing shot plays out and the first punch-in
+    // can land before the first click instead of chasing it
+    const firstClick = log.events.find((e) => e.type === "click")!;
+    expect(firstClick.t).toBeGreaterThanOrEqual(1000);
+    // and each later scene gets the same rest after its new page has painted
+    const firstNewFrame = idx.find((e) => e.t_source > scene2T + 100 && e.t_source - idx[idx.indexOf(e) - 1]!.t_source > 200);
+    expect(hoverEvent.t - (firstNewFrame?.t_source ?? scene2T)).toBeGreaterThanOrEqual(1000);
 
     // capture fluency: the repaint beacon must defeat change-driven screencast
     // starvation — sustained frame flow, and no stall outside the one deliberate
@@ -476,6 +484,41 @@ describe("record E2E on fixture app", () => {
     expect(plan.camera[i]!).toBeGreaterThan(1.05); // a real punch-in
     expect(Math.abs(plan.camera[i + 1]! - expected.x)).toBeLessThan(40);
     expect(Math.abs(plan.camera[i + 2]! - expected.y)).toBeLessThan(40);
+  }, 120_000);
+
+  it("does not reload when the next scene enters on the page already showing", async () => {
+    // a second scene whose entry URL is the page the first scene left us on:
+    // re-navigating froze the footage for a redundant reload
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "dash-a", priority: 1,
+          entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1000 }],
+          hold_ms: 200,
+        },
+        {
+          name: "dash-b", priority: 2,
+          entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#tasks li:nth-child(2)", duration_ms: 1000 }],
+          hold_ms: 200,
+        },
+      ],
+    });
+    const out = mkdtempSync(join(tmpdir(), "supercut-samepage-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 5, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    const idx = JSON.parse(readFileSync(join(out, "frames-index.json"), "utf8")) as { t_source: number }[];
+    let maxGap = 0;
+    for (let i = 1; i < idx.length; i++) maxGap = Math.max(maxGap, idx[i]!.t_source - idx[i - 1]!.t_source);
+    expect(maxGap).toBeLessThan(250); // no reload gap anywhere in the take
+    const scenes = res.eventLog.events.filter((e) => e.type === "scene");
+    const hovers = res.eventLog.events.filter((e) => e.type === "hover");
+    expect(hovers[1]!.t).toBeGreaterThanOrEqual(scenes[1]!.t + 1000); // the scene still opens at rest
   }, 120_000);
 
   it("holds ~60fps source on a hovered dashboard whose timer re-sets identical text", async () => {

@@ -82,12 +82,19 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
     return (f - f0) * frameMs;
   });
 
+  const interactions = log.events
+    .filter((e) => e.type === "click" || e.type === "type" || e.type === "hover")
+    .map((e) => e.t);
   const clickArrival = log.events
     .filter((e) => e.type === "click")
     .map((e) => {
       const f = frameAt(e.t);
-      let target = 1;
-      for (let g = f; g <= frameAt(e.t + 1000); g++) target = Math.max(target, zAtFrame(g));
+      // the punch's settled zoom: the peak within 1s after the click, but
+      // never reaching into the NEXT beat's lead-in (that zoom is not ours)
+      const nextBeat = interactions.find((t) => t > e.t) ?? Infinity;
+      const windowEnd = Math.min(e.t + 1000, nextBeat - 800);
+      let target = zAtFrame(f);
+      for (let g = f; g <= frameAt(windowEnd); g++) target = Math.max(target, zAtFrame(g));
       if (target - 1 < 0.02) return null; // never punched: skipped, fine
       return (zAtFrame(f) - 1) / (target - 1);
     });

@@ -66,6 +66,11 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
   const firstFrameShowing = (tB: number) => Math.min(last, Math.ceil(tB / frameMs - 1e-9));
   let maxZAfterNavGap = 1;
   for (const g of gaps) maxZAfterNavGap = Math.max(maxZAfterNavGap, zAtFrame(firstFrameShowing(g.tB)));
+  // a logged action-triggered navigation that left no gap: the frame after
+  // its commit already shows (or is about to show) the new page
+  for (const e of log.events) {
+    if (e.type === "navigation") maxZAfterNavGap = Math.max(maxZAfterNavGap, zAtFrame(Math.min(last, frameAt(e.t) + 1)));
+  }
 
   // each scene's first NEW frame: the take head for scene 1; for later scenes
   // the first frame after the nav gap attributed to the marker (or the marker

@@ -122,6 +122,17 @@ export function resolveBackgroundSpec(
   return { spec, isImage };
 }
 
+/** content type for a captured frame file. The recorder writes JPEG since
+ *  the 60fps capture change; takes recorded before it hold PNG frames and
+ *  must keep rendering. */
+export function frameMimeType(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return "application/octet-stream";
+}
+
 /** gentle loudness normalization + edge fades (skipped on clips too short to
  *  fade without eating the whole track) */
 export function musicFilterChain(durationS: number): string {
@@ -392,7 +403,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       try {
         const name = url.slice("/take/frames/".length).replace(/[^0-9a-zA-Z._-]/g, "");
         const buf = readFileSync(join(takeDir, "frames", name));
-        res.writeHead(200, { "content-type": "image/png" });
+        res.writeHead(200, { "content-type": frameMimeType(name) });
         res.end(buf);
       } catch {
         res.writeHead(404);

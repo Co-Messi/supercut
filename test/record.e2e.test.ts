@@ -235,7 +235,10 @@ describe("record E2E on fixture app", () => {
 
     // frames captured and index monotonic
     expect(r1.frameCount).toBeGreaterThan(60); // ≥1s of footage at minimum
-    const idx = JSON.parse(readFileSync(join(out1, "frames-index.json"), "utf8")) as { t_source: number }[];
+    const idx = JSON.parse(readFileSync(join(out1, "frames-index.json"), "utf8")) as { file: string; t_source: number }[];
+    // JPEG screencast: PNG at 3840x2160 capped the source well below 60fps
+    expect(idx.every((e) => /^frames\/\d{6}\.jpg$/.test(e.file))).toBe(true);
+    expect(statSync(join(out1, idx[0]!.file)).size).toBeGreaterThan(1000);
     for (let i = 1; i < idx.length; i++) {
       expect(idx[i]!.t_source).toBeGreaterThanOrEqual(idx[i - 1]!.t_source);
     }
@@ -473,6 +476,35 @@ describe("record E2E on fixture app", () => {
     expect(plan.camera[i]!).toBeGreaterThan(1.05); // a real punch-in
     expect(Math.abs(plan.camera[i + 1]! - expected.x)).toBeLessThan(40);
     expect(Math.abs(plan.camera[i + 2]! - expected.y)).toBeLessThan(40);
+  }, 120_000);
+
+  it("holds ~60fps source on a hovered dashboard whose timer re-sets identical text", async () => {
+    // Found on the demo app: once /dash's counters clamp, its 50ms interval
+    // keeps re-setting identical textContent; with a hovered (transformed) row
+    // a 1px repaint beacon stopped registering and the source fell to exactly
+    // the interval rate (20fps) for the rest of the scene.
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "dash-hover-hold", priority: 1,
+          entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1400 }],
+          hold_ms: 3000,
+        },
+      ],
+    });
+    const out = mkdtempSync(join(tmpdir(), "supercut-hoverfps-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 3, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    const idx = JSON.parse(readFileSync(join(out, "frames-index.json"), "utf8")) as { t_source: number }[];
+    const end = idx[idx.length - 1]!.t_source;
+    // the last 1.5s of the hold: counters long clamped, row hovered
+    const tail = idx.filter((e) => e.t_source >= end - 1500);
+    expect(tail.length / 1.5).toBeGreaterThanOrEqual(45);
   }, 120_000);
 
   it("scroll actions keep the distance/slot contract while easing across the whole slot", async () => {

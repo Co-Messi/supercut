@@ -5,7 +5,7 @@
  *              │ for each scene:                              │
  *              │   entry navigation (fixed scheduled allowance)│
  *              │   for each action:                           │
- *              │     cursor path → CDP mouse events           │──▶ frames/*.png
+ *              │     cursor path → CDP mouse events           │──▶ frames/*.jpg
  *              │     perform (click/type/scroll/hover/wait)   │    + frame index
  *              │     log event {t scheduled, observed_t}      │──▶ events.json
  *              │   on action timeout → scene failed, continue │
@@ -20,8 +20,10 @@
  * (design doc, stage 3). On a local fixture the structure and geometry are
  * byte-identical across runs; `t` carries only wall-clock jitter of a few ms.
  *
- * Capture path: CDP screencast PNG at
- * 2x DPR, ack-throttled, frames streamed straight to disk.
+ * Capture path: CDP screencast JPEG (q92) at 2x DPR, frames streamed straight
+ * to disk. PNG at 3840x2160 spent so long encoding each frame that the source
+ * topped out well under 60fps; JPEG at q92 is visually lossless for UI at
+ * this resolution (every output pixel is a ~2x downsample of the source).
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -43,6 +45,9 @@ const DPR = 2;
 const FPS = 60;
 const FRAME_MS = 1000 / FPS;
 const ACTION_TIMEOUT_MS = 10_000;
+/** screencast JPEG quality: q92 keeps 2x-DPR text edges clean after the
+ *  renderer's downsample while encoding fast enough for a 60fps source */
+const JPEG_QUALITY = 92;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
 /** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
  *  a settle pause before the schedule continues */
@@ -53,10 +58,15 @@ const SETTLE_MS = 400;
  * commits, so capture collapses to a few fps and the renderer stretches one
  * frame across seconds. This rAF beacon — a 1×1px fixed corner element on its
  * own compositor layer, toggling between two sub-perceptual opacities — forces
- * one commit per display frame. 1/255 alpha on one pixel is invisible in the
- * PNGs and below any encoder threshold; pointer-events:none + no layout means
- * it can never interfere with the page. Injected as an init script so it
- * survives full navigations; the rAF loop itself survives SPA route changes.
+ * one commit per display frame. It covers the WHOLE viewport at 1-2e-4
+ * opacity: a 1px corner beacon stopped registering damage in some page states
+ * (a hovered, transformed row plus a timer re-setting identical text dropped
+ * the source to the timer's 20Hz), while full-viewport damage always
+ * captures. 2e-4 alpha moves no 8-bit channel by even half a level, so the
+ * frames are pixel-identical to the page; pointer-events:none + fixed
+ * positioning means it can never interfere with hit-testing or layout.
+ * Injected as an init script so it survives full navigations; the rAF loop
+ * itself survives SPA route changes.
  */
 const REPAINT_BEACON_ID = "__supercut_repaint_beacon__";
 const REPAINT_BEACON_SCRIPT = `(() => {
@@ -71,15 +81,15 @@ const REPAINT_BEACON_SCRIPT = `(() => {
         el = document.createElement("div");
         el.id = ${JSON.stringify(REPAINT_BEACON_ID)};
         el.setAttribute("aria-hidden", "true");
-        el.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;" +
-          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.004;" +
+        el.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;" +
+          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.0001;" +
           "will-change:opacity;contain:strict";
         root.appendChild(el);
       }
     }
     if (el) {
       flip = !flip;
-      el.style.opacity = flip ? "0.008" : "0.004";
+      el.style.opacity = flip ? "0.0002" : "0.0001";
     }
     requestAnimationFrame(tick);
   };
@@ -616,7 +626,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           firstFrameStamp = stampMs;
           signalFirstFrame();
         }
-        const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
+        const file = `frames/${String(frameCounter++).padStart(6, "0")}.jpg`;
         try {
           await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
           // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
@@ -650,7 +660,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
     if (captureFrames) {
       await cdp.send("Page.startScreencast", {
-        format: "png",
+        format: "jpeg",
+        quality: JPEG_QUALITY,
         maxWidth: VIEWPORT.width * DPR,
         maxHeight: VIEWPORT.height * DPR,
         everyNthFrame: 1,

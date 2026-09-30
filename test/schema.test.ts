@@ -46,6 +46,18 @@ function makeRecipe(overrides: Record<string, unknown> = {}) {
 }
 
 describe("event log schema", () => {
+  it("accepts a navigation event (a page change an action triggered)", () => {
+    const log = parseEventLog({
+      ...validEventLog,
+      events: [...validEventLog.events, { t: 4100, observed_t: 4100, type: "navigation" }],
+    });
+    expect(log.events[2]).toEqual({ t: 4100, observed_t: 4100, type: "navigation" });
+    // strict like every other event: no smuggled fields (e.g. a URL)
+    expect(() =>
+      parseEventLog({ ...validEventLog, events: [{ t: 1, type: "navigation", url: "https://x" }] }),
+    ).toThrow();
+  });
+
   it("parses a valid event log", () => {
     const log = parseEventLog(validEventLog);
     expect(log.events).toHaveLength(2);

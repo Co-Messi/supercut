@@ -201,6 +201,10 @@ export const NAV_GAP_MS = 250;
  *  real networks policy DNS checks run between them) */
 const MARKER_GAP_BEFORE_MS = 1000;
 const MARKER_GAP_AFTER_MS = 4000;
+/** a logged navigation whose reload also left a source gap starting in this
+ *  window is already covered by that gap's boundary */
+const NAV_EVENT_GAP_BEFORE_MS = 200;
+const NAV_EVENT_GAP_AFTER_MS = 1500;
 /** zoom-out lead before a scene change: from a full punch the spring reaches
  *  z ≤ 1.02 in ~710ms, so the camera is wide when the page changes */
 const ZOOM_OUT_MS = 800;
@@ -319,6 +323,14 @@ export function buildRenderPlan(
     // a click-triggered navigation: widen while the old page freezes, cut wide
     if (!claimed.has(i)) boundaries.push({ out: g.tA, in: g.tB, snap: true });
   });
+  // an action-triggered navigation the recorder logged: a fast local one keeps
+  // frames flowing (no gap to detect), so the logged commit time is the cut.
+  // A slow one also left a gap — that boundary already covers it.
+  for (const e of log.events) {
+    if (e.type !== "navigation") continue;
+    if (gaps.some((g) => g.tA >= e.t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= e.t + NAV_EVENT_GAP_AFTER_MS)) continue;
+    boundaries.push({ out: e.t, in: e.t, snap: true });
+  }
   boundaries.sort((x, y) => x.in - y.in);
   /** the new-page time that opens the stretch containing t (0 = take head) */
   const openingOf = (t: number) => boundaries.reduce((m, b) => (b.in <= t && b.in > m ? b.in : m), 0);

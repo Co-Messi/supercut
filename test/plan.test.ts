@@ -356,6 +356,24 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
     expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
   });
 
+  it("cuts wide at a click-triggered navigation even when capture never paused", () => {
+    // a fast local navigation keeps frames flowing (paint holding) — no source
+    // gap to detect. The recorder logs the page change; the camera must not
+    // zoom into the old page's link and carry that zoom onto the new page.
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 2000, type: "click", bbox: [1700, 20, 120, 30], selector: "#nav", point: [1760, 35] },
+      { t: 2110, type: "navigation" },
+      { t: 4400, type: "click", bbox: [600, 300, 120, 40], selector: "#b", point: [660, 320] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(99999, 99999, 7000));
+    // no punch on the navigating click: wide from before it through the new
+    // page's establishing read
+    for (let t = 1000; t <= 2110 + 800; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
+    // the new page's first click still gets its punch, on time
+    expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+  });
+
   it("skips a punch that could only land after the click", () => {
     // a click 500ms into a new page: the establishing shot owns the opening,
     // so there is no time to arrive — no late zoom chasing the click

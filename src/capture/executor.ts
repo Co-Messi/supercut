@@ -347,6 +347,23 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     }
   }
 
+  /** true while the recipe itself navigates (entry / goto): those page changes
+   *  are scene structure, not action results, and are not logged */
+  let recipeNavInFlight = false;
+  /** capture timeline started (events may be stamped) */
+  let capturing = false;
+  /** an action-triggered main-frame navigation request is in flight */
+  let actionNavPending = false;
+  async function recipeNavigation<T>(go: () => Promise<T>): Promise<T> {
+    recipeNavInFlight = true;
+    try {
+      return await go();
+    } finally {
+      recipeNavInFlight = false;
+      actionNavPending = false;
+    }
+  }
+
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
   let wallStart = 0;
@@ -466,7 +483,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     armed: boolean,
     slotEnd: number,
   ): Promise<void> {
-    const ev = events[events.length - 1];
+    // this action's own event: the latest interaction event (a navigation the
+    // action triggered may have been logged after it)
+    let ev: KnownEvent | undefined;
+    for (let i = events.length - 1; i >= 0 && !ev; i--) {
+      const e = events[i]!;
+      if (e.type === "click" || e.type === "type" || e.type === "hover") ev = e;
+      else if (e.type !== "navigation") break;
+    }
     if (!ev || (ev.type !== "click" && ev.type !== "type" && ev.type !== "hover")) return;
     if (a.zoom) {
       ev.focus_bbox = a.zoom;
@@ -510,7 +534,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
-        const response = await gotoReady(page, a.url);
+        const response = await recipeNavigation(() => gotoReady(page, a.url!));
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
@@ -661,6 +685,21 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);
 
+    // log page changes an ACTION caused (a clicked link, a form submit): a
+    // cross-document navigation request from the main frame that the recipe
+    // did not issue itself, stamped when the new document commits
+    page.on("request", (req) => {
+      if (capturing && !recipeNavInFlight && req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+        actionNavPending = true;
+      }
+    });
+    page.on("framenavigated", (frame) => {
+      if (frame !== page.mainFrame() || !actionNavPending || recipeNavInFlight) return;
+      actionNavPending = false;
+      const now = observedNow();
+      events.push({ t: stamp(now), observed_t: now, type: "navigation" });
+    });
+
     if (captureFrames) {
       // ack-AFTER-write: Chromium won't send the next frame until we ack, so
       // awaiting the disk write before acking gives true backpressure (one
@@ -739,6 +778,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         ? firstFrameStamp
         : Date.now();
 
+    capturing = true;
     // pre-roll: the opening page at rest before anything moves
     {
       const wait = PRE_ROLL_MS - observedNow();
@@ -784,7 +824,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             // freeze the rest of the video on the previous scene.
             isNavigating = true;
             try {
-              const response = await gotoReady(page, scene.entry.url);
+              const response = await recipeNavigation(() => gotoReady(page, scene.entry.url));
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
               await sleep(SETTLE_MS);
             } finally {

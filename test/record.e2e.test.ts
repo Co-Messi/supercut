@@ -527,6 +527,41 @@ describe("record E2E on fixture app", () => {
     expect(log.enter - log.keys[log.keys.length - 1]!).toBeGreaterThanOrEqual(200);
   }, 120_000);
 
+  it("logs a navigation event when a click changes the page — and none for scene-entry gotos", async () => {
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "landing", priority: 1,
+          entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "click", selector: "#nav-dash", duration_ms: 1200 }],
+          hold_ms: 600,
+        },
+        {
+          name: "back-home", priority: 2,
+          entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#cta", duration_ms: 800 }],
+          hold_ms: 0,
+        },
+      ],
+    });
+    const out = mkdtempSync(join(tmpdir(), "supercut-clicknav-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 2, captureFrames: false, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    const events = res.eventLog.events;
+    const navs = events.filter((e) => e.type === "navigation");
+    expect(navs).toHaveLength(1); // the click's, not scene 2's entry goto
+    const click = events.find((e) => e.type === "click")!;
+    const scene2 = events.filter((e) => e.type === "scene")[1]!;
+    expect(navs[0]!.t).toBeGreaterThanOrEqual(click.t);
+    expect(navs[0]!.t).toBeLessThan(scene2.t);
+    // and the log round-trips through the public parser
+    expect(() => parseEventLog(JSON.parse(readFileSync(join(out, "events.json"), "utf8")))).not.toThrow();
+  }, 120_000);
+
   it("does not reload when the next scene enters on the page already showing", async () => {
     // a second scene whose entry URL is the page the first scene left us on:
     // re-navigating froze the footage for a redundant reload

@@ -30,7 +30,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
-import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
+import { cursorPath, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { installRequestGate, settleGatedRedirect, type GatedContext } from "../security/browser-gate.js";
 import {
   assertSafeNavigationUrl,
@@ -56,6 +56,11 @@ const SETTLE_MS = 400;
  *  the render's establishing shot reads the page wide, and the first punch-in
  *  has time to arrive BEFORE the first click instead of chasing it */
 const PRE_ROLL_MS = 1_000;
+/** the pointer comes to rest on a target before pressing, and a press is
+ *  held like a finger does — a zero-length press/release pair right at the
+ *  end of the travel read as robotic */
+const PRESS_SETTLE_MS = 100;
+const PRESS_HOLD_MS = 70;
 
 /**
  * CDP screencast is change-driven: a static page produces NO compositor
@@ -378,11 +383,42 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     const pre = await loc.boundingBox();
     const alreadyInView =
       !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
+    if (!alreadyInView) {
+      // an eased page scroll that centres the target, filmed as motion — an
+      // instant scrollIntoView reads as a jump cut in the middle of a shot
+      await loc
+        .evaluate(async (el) => {
+          const r = el.getBoundingClientRect();
+          const root = document.scrollingElement ?? document.documentElement;
+          const startY = window.scrollY;
+          const maxY = Math.max(0, root.scrollHeight - window.innerHeight);
+          const targetY = Math.max(0, Math.min(maxY, startY + r.top + r.height / 2 - window.innerHeight / 2));
+          const dist = targetY - startY;
+          if (Math.abs(dist) < 1) return;
+          const dur = Math.min(900, Math.max(350, Math.abs(dist) * 0.5));
+          const ease = (q: number) => (q < 0.5 ? 4 * q * q * q : 1 - (-2 * q + 2) ** 3 / 2);
+          await new Promise<void>((done) => {
+            const t0 = performance.now();
+            const step = (now: number) => {
+              const q = Math.min(1, (now - t0) / dur);
+              // "instant": a page-level `scroll-behavior: smooth` must not
+              // turn every step into its own competing animation
+              window.scrollTo({ left: window.scrollX, top: startY + dist * ease(q), behavior: "instant" });
+              if (q < 1) requestAnimationFrame(step);
+              else done();
+            };
+            requestAnimationFrame(step);
+          });
+        })
+        .catch(() => {});
+    }
+    // backstop (a target inside a nested scroll container the page scroll
+    // cannot reach): a no-op when the eased scroll already revealed it
     await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS });
     // settle ONLY when a scroll actually happened — an unconditional sleep adds
     // wall-time to every action, tipping in-view actions into the overrun path
     // and breaking the scheduled-timeline determinism contract on fixtures
-    if (!alreadyInView) await sleep(350);
+    if (!alreadyInView) await sleep(150);
     const box = await loc.boundingBox();
     if (!box) throw new Error(`selector "${selector}" has no bounding box`);
     return { x: box.x, y: box.y, w: box.width, h: box.height };
@@ -500,12 +536,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         await moveCursor(points, startT);
         const armed = a.kind !== "hover" && !a.zoom ? await armMutationObserver() : false;
         const pathEndT = startT + (points[points.length - 1]?.t ?? 0);
+        if (a.kind === "click" || a.kind === "type") await sleep(PRESS_SETTLE_MS);
         const dispatchT = observedNow();
 
         if (a.kind === "click" || a.kind === "type") {
           await cdp.send("Input.dispatchMouseEvent", {
             type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1,
           });
+          await sleep(PRESS_HOLD_MS);
           await cdp.send("Input.dispatchMouseEvent", {
             type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1,
           });
@@ -523,11 +561,17 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
         if (a.kind === "type") {
           const text = a.text ?? "";
+          const chars = [...text];
           const remaining = Math.max(200, a.duration_ms - (observedNow() - scheduledT));
-          const perChar = Math.min(90, remaining / Math.max(text.length, 1));
-          for (const ch of text) {
+          // human rhythm: a beat after the focusing click, log-normal gaps
+          // around ~100ms (longer after spaces/punctuation, never under 45ms),
+          // a beat before Enter. A slot too short for this overruns and the
+          // schedule shifts (timestamp canon) — never a pasted-in string.
+          const rhythm = typingPlan(text, remaining, rng);
+          await sleep(rhythm.beforeFirstKey);
+          for (const [i, ch] of chars.entries()) {
             await cdp.send("Input.insertText", { text: ch });
-            await sleep(perChar);
+            if (i < chars.length - 1) await sleep(rhythm.keyDelays[i]!);
           }
           events.push({
             t: stamp(observedNow()), observed_t: observedNow(), type: "type",
@@ -538,6 +582,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             // Many query inputs only reveal their payoff on submit (a form's
             // submit handler / an Enter keydown). Typing alone leaves the app in
             // its idle state — the video would show a filled box and no result.
+            await sleep(rhythm.beforeEnter);
             await page.keyboard.press("Enter");
           }
         }

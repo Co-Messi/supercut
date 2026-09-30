@@ -486,6 +486,47 @@ describe("record E2E on fixture app", () => {
     expect(Math.abs(plan.camera[i + 2]! - expected.y)).toBeLessThan(40);
   }, 120_000);
 
+  it("operates controls like a person: eased scroll, settled press, varied typing, beat before Enter", async () => {
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "keys", priority: 1,
+          entry: { url: `${app.url}/keys`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "type", selector: "#k", text: "weekly digest, please", submit: true, duration_ms: 2500 }],
+          hold_ms: 300,
+        },
+      ],
+    });
+    const before = app.keylogs.length;
+    const out = mkdtempSync(join(tmpdir(), "supercut-keys-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 11, captureFrames: false, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    await new Promise((r) => setTimeout(r, 300));
+    const log = app.keylogs[before] as {
+      moves: number[]; down: number; up: number; keys: number[]; enter: number; scrolls: [number, number][];
+    };
+    expect(log).toBeDefined();
+    // the input sits ~1700px down: reached by a smooth scroll over several
+    // frames, not one instant jump
+    const moving = log.scrolls.filter(([, y]) => y > 0 && y < log.scrolls[log.scrolls.length - 1]![1]);
+    expect(moving.length).toBeGreaterThanOrEqual(5);
+    // the pointer settles on the target before pressing, and holds the press
+    const lastMoveBeforeDown = Math.max(...log.moves.filter((t) => t <= log.down));
+    expect(log.down - lastMoveBeforeDown).toBeGreaterThanOrEqual(80);
+    expect(log.up - log.down).toBeGreaterThanOrEqual(55);
+    // a beat before the first key; varied gaps, none paste-fast
+    expect(log.keys[0]! - log.up).toBeGreaterThanOrEqual(200);
+    const gaps = log.keys.slice(1).map((t, i) => t - log.keys[i]!);
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(35);
+    expect(Math.max(...gaps) - Math.min(...gaps)).toBeGreaterThan(40);
+    // a beat before Enter
+    expect(log.enter - log.keys[log.keys.length - 1]!).toBeGreaterThanOrEqual(200);
+  }, 120_000);
+
   it("does not reload when the next scene enters on the page already showing", async () => {
     // a second scene whose entry URL is the page the first scene left us on:
     // re-navigating froze the footage for a redundant reload

@@ -20,11 +20,41 @@ export const ENCODER_BITRATE = 16_000_000;
  *  ~120MB, so 512MB is generous headroom without risking an in-tab OOM */
 export const MAX_ENCODED_BYTES = 512e6;
 
+/**
+ * Motion-blur pass count for one output frame: enough shutter samples that
+ * consecutive copies of the content window sit ≤ 1px apart at the corner that
+ * moves the MOST (a zoom about a point near one corner barely moves that
+ * corner while the opposite one sweeps tens of px — sizing from the top-left
+ * alone left stepped "onion ring" ghosts on the far side). Rounded up to a
+ * power of two: 1/n is then exact in the float16 accumulator, so the n
+ * weights sum to exactly 1 (no dimming). `a`/`b` are the [z, offX, offY]
+ * camera transforms at the shutter's open/close. Embedded verbatim into the
+ * host page below (via toString), so the page runs exactly this code.
+ */
+export function blurPassCount(
+  a: readonly number[],
+  b: readonly number[],
+  c: { x: number; y: number; w: number; h: number },
+  cap: number,
+): number {
+  let disp = 0;
+  const corners = [[c.x, c.y], [c.x + c.w, c.y], [c.x, c.y + c.h], [c.x + c.w, c.y + c.h]];
+  for (const [px, py] of corners) {
+    const dx = b[0]! * px! + b[1]! - (a[0]! * px! + a[1]!);
+    const dy = b[0]! * py! + b[2]! - (a[0]! * py! + a[2]!);
+    disp = Math.max(disp, Math.hypot(dx, dy));
+  }
+  let n = 1;
+  while (n < disp && n < cap) n *= 2;
+  return n;
+}
+
 export const HOST_PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>supercut render host</title></head>
 <body style="margin:0;background:#111;color:#9a9">
 <script type="module">
 const log = (m) => console.log("[render] " + m);
+${blurPassCount.toString()}
 
 async function main() {
   const TOKEN = new URLSearchParams(location.search).get("t") || "";
@@ -53,11 +83,25 @@ async function main() {
 
   const canvas = new OffscreenCanvas(W, H);
   const ctx = canvas.getContext("2d");
-  // motion-blur accumulator: 'lighter' (additive) at 1/8 alpha per subframe is
-  // a TRUE average — 8 × src-over at 1/8 alpha only reaches ~66% opacity and
-  // washes the content dark.
+  // motion-blur accumulator: 'lighter' (additive) at 1/n alpha per pass is a
+  // TRUE average — n × src-over at 1/n alpha only reaches ~66% opacity and
+  // washes the content dark. It accumulates in float16 where available: in
+  // an 8-bit buffer every 1/n-weighted pass rounds, and 48 passes of white
+  // summed to 240/255 (visible dimming and banding during every zoom).
   const accumCanvas = new OffscreenCanvas(W, H);
-  const actx = accumCanvas.getContext("2d");
+  let actx = accumCanvas.getContext("2d", { colorType: "float16" });
+  const floatAccum = !!(actx && actx.getContextAttributes &&
+    actx.getContextAttributes().colorType === "float16");
+  if (!actx) actx = accumCanvas.getContext("2d");
+  // 8-bit fallback: keep n small so per-pass rounding cannot add up
+  const MAX_PASSES = floatAccum ? 32 : 8;
+  log("blur accumulator: " + (floatAccum ? "float16, up to 32 passes" : "8-bit, up to 8 passes"));
+  // downscaling the 2x-DPR source with the default (low / bilinear) filter
+  // aliased text into shimmering stair-steps; 'high' is a proper resampler
+  for (const c of [ctx, actx]) {
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = "high";
+  }
 
   // --- encoder: H.264 annexb so Node can mux the raw stream with ffmpeg -c copy ---
   const chunks = [];
@@ -110,7 +154,22 @@ async function main() {
     let bmp = bmpCache.get(idx);
     if (bmp) return bmp;
     const resp = await fetchOk("/take/" + sourceFiles[idx]);
-    bmp = await createImageBitmap(await resp.blob());
+    const full = await createImageBitmap(await resp.blob());
+    // pre-resample ONCE per source frame to the largest size it is ever drawn
+    // at (content width × max zoom 1.42, with headroom): every blur pass then
+    // draws a ≤ 1.5× downscale, which 'high' smoothing renders cleanly, instead
+    // of resampling the full 3840px frame up to 32 times per output frame
+    const maxW = Math.ceil(C.w * 1.5);
+    if (full.width > maxW) {
+      bmp = await createImageBitmap(full, {
+        resizeWidth: maxW,
+        resizeHeight: Math.round((full.height * maxW) / full.width),
+        resizeQuality: "high",
+      });
+      full.close();
+    } else {
+      bmp = full;
+    }
     bmpCache.set(idx, bmp);
     return bmp;
   }
@@ -199,17 +258,9 @@ async function main() {
       return [z, fx * (1 - z) + (cx - fx) * (1 - 1 / z), fy * (1 - z) + (cy - fy) * (1 - 1 / z)];
     };
 
-    // adaptive blur: pass count scales with corner displacement across the
-    // shutter so ghost spacing stays ≲1px at any camera speed (the residual
-    // Border rings come from 8 discrete copies of
-    // fast frames + 8 stacked shadows)
-    const [z0, ox0, oy0] = camAt(0);
-    const [z1, ox1, oy1] = camAt(1);
-    const disp = Math.hypot(
-      (z1 * C.x + ox1) - (z0 * C.x + ox0),
-      (z1 * C.y + oy1) - (z0 * C.y + oy0),
-    );
-    const passes = Math.max(1, Math.min(48, Math.ceil(disp / 1.0)));
+    // adaptive blur: pass count scales with the LARGEST corner displacement
+    // across the shutter so ghost spacing stays ≤ 1px everywhere
+    const passes = blurPassCount(camAt(0), camAt(1), C, MAX_PASSES);
     if (passes > 1) actx.globalCompositeOperation = "lighter";
     actx.globalAlpha = 1 / passes;
 

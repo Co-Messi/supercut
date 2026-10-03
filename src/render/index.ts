@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 import { parseEventLog, type EventLog } from "../schema/index.js";
-import { buildRenderPlan, type FrameIndexEntry } from "./plan.js";
+import { buildRenderPlan, FADE_IN_MS, FADE_OUT_MS, type FrameIndexEntry } from "./plan.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 
 const exec = promisify(execFile);
@@ -122,12 +122,27 @@ export function resolveBackgroundSpec(
   return { spec, isImage };
 }
 
+/** content type for a captured frame file. The recorder writes JPEG since
+ *  the 60fps capture change; takes recorded before it hold PNG frames and
+ *  must keep rendering. */
+export function frameMimeType(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return "application/octet-stream";
+}
+
 /** gentle loudness normalization + edge fades (skipped on clips too short to
  *  fade without eating the whole track) */
 export function musicFilterChain(durationS: number): string {
   const filters = ["loudnorm=I=-20:TP=-2:LRA=9"];
   if (durationS >= 2.5) {
-    filters.push("afade=t=in:st=0:d=0.6", `afade=t=out:st=${(durationS - 1.8).toFixed(3)}:d=1.8`);
+    // the picture fades with the SAME lengths (plan.fade), so sound and
+    // image open and close together
+    const fin = FADE_IN_MS / 1000;
+    const fout = FADE_OUT_MS / 1000;
+    filters.push(`afade=t=in:st=0:d=${fin}`, `afade=t=out:st=${(durationS - fout).toFixed(3)}:d=${fout}`);
   }
   return filters.join(",");
 }
@@ -392,7 +407,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       try {
         const name = url.slice("/take/frames/".length).replace(/[^0-9a-zA-Z._-]/g, "");
         const buf = readFileSync(join(takeDir, "frames", name));
-        res.writeHead(200, { "content-type": "image/png" });
+        res.writeHead(200, { "content-type": frameMimeType(name) });
         res.end(buf);
       } catch {
         res.writeHead(404);

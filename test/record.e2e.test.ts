@@ -235,7 +235,10 @@ describe("record E2E on fixture app", () => {
 
     // frames captured and index monotonic
     expect(r1.frameCount).toBeGreaterThan(60); // ≥1s of footage at minimum
-    const idx = JSON.parse(readFileSync(join(out1, "frames-index.json"), "utf8")) as { t_source: number }[];
+    const idx = JSON.parse(readFileSync(join(out1, "frames-index.json"), "utf8")) as { file: string; t_source: number }[];
+    // JPEG screencast: PNG at 3840x2160 capped the source well below 60fps
+    expect(idx.every((e) => /^frames\/\d{6}\.jpg$/.test(e.file))).toBe(true);
+    expect(statSync(join(out1, idx[0]!.file)).size).toBeGreaterThan(1000);
     for (let i = 1; i < idx.length; i++) {
       expect(idx[i]!.t_source).toBeGreaterThanOrEqual(idx[i - 1]!.t_source);
     }
@@ -260,6 +263,14 @@ describe("record E2E on fixture app", () => {
     expect(scene2T).toBeGreaterThanOrEqual(5000);
     const hoverEvent = log.events.find((e) => e.type === "hover")!;
     expect(hoverEvent.t).toBeGreaterThanOrEqual(scene2T + 1000);
+    // pre-roll: the take opens on the page at rest for ≥ 1s before the first
+    // interaction, so the establishing shot plays out and the first punch-in
+    // can land before the first click instead of chasing it
+    const firstClick = log.events.find((e) => e.type === "click")!;
+    expect(firstClick.t).toBeGreaterThanOrEqual(1000);
+    // and each later scene gets the same rest after its new page has painted
+    const firstNewFrame = idx.find((e) => e.t_source > scene2T + 100 && e.t_source - idx[idx.indexOf(e) - 1]!.t_source > 200);
+    expect(hoverEvent.t - (firstNewFrame?.t_source ?? scene2T)).toBeGreaterThanOrEqual(1000);
 
     // capture fluency: the repaint beacon must defeat change-driven screencast
     // starvation — sustained frame flow, and no stall outside the one deliberate
@@ -473,6 +484,147 @@ describe("record E2E on fixture app", () => {
     expect(plan.camera[i]!).toBeGreaterThan(1.05); // a real punch-in
     expect(Math.abs(plan.camera[i + 1]! - expected.x)).toBeLessThan(40);
     expect(Math.abs(plan.camera[i + 2]! - expected.y)).toBeLessThan(40);
+  }, 120_000);
+
+  it("operates controls like a person: eased scroll, settled press, varied typing, beat before Enter", async () => {
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "keys", priority: 1,
+          entry: { url: `${app.url}/keys`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "type", selector: "#k", text: "weekly digest, please", submit: true, duration_ms: 2500 }],
+          hold_ms: 300,
+        },
+      ],
+    });
+    const before = app.keylogs.length;
+    const out = mkdtempSync(join(tmpdir(), "supercut-keys-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 11, captureFrames: false, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    await new Promise((r) => setTimeout(r, 300));
+    const log = app.keylogs[before] as {
+      moves: number[]; down: number; up: number; keys: number[]; enter: number; scrolls: [number, number][];
+    };
+    expect(log).toBeDefined();
+    // the input sits ~1700px down: reached by a smooth scroll over several
+    // frames, not one instant jump
+    const moving = log.scrolls.filter(([, y]) => y > 0 && y < log.scrolls[log.scrolls.length - 1]![1]);
+    expect(moving.length).toBeGreaterThanOrEqual(5);
+    // the pointer settles on the target before pressing, and holds the press
+    const lastMoveBeforeDown = Math.max(...log.moves.filter((t) => t <= log.down));
+    expect(log.down - lastMoveBeforeDown).toBeGreaterThanOrEqual(80);
+    expect(log.up - log.down).toBeGreaterThanOrEqual(55);
+    // a beat before the first key; varied gaps, none paste-fast
+    expect(log.keys[0]! - log.up).toBeGreaterThanOrEqual(200);
+    const gaps = log.keys.slice(1).map((t, i) => t - log.keys[i]!);
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(35);
+    expect(Math.max(...gaps) - Math.min(...gaps)).toBeGreaterThan(40);
+    // a beat before Enter
+    expect(log.enter - log.keys[log.keys.length - 1]!).toBeGreaterThanOrEqual(200);
+  }, 120_000);
+
+  it("logs a navigation event when a click changes the page — and none for scene-entry gotos", async () => {
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "landing", priority: 1,
+          entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "click", selector: "#nav-dash", duration_ms: 1200 }],
+          hold_ms: 600,
+        },
+        {
+          name: "back-home", priority: 2,
+          entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#cta", duration_ms: 800 }],
+          hold_ms: 0,
+        },
+      ],
+    });
+    const out = mkdtempSync(join(tmpdir(), "supercut-clicknav-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 2, captureFrames: false, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    const events = res.eventLog.events;
+    const navs = events.filter((e) => e.type === "navigation");
+    expect(navs).toHaveLength(1); // the click's, not scene 2's entry goto
+    const click = events.find((e) => e.type === "click")!;
+    const scene2 = events.filter((e) => e.type === "scene")[1]!;
+    expect(navs[0]!.t).toBeGreaterThanOrEqual(click.t);
+    expect(navs[0]!.t).toBeLessThan(scene2.t);
+    // and the log round-trips through the public parser
+    expect(() => parseEventLog(JSON.parse(readFileSync(join(out, "events.json"), "utf8")))).not.toThrow();
+  }, 120_000);
+
+  it("does not reload when the next scene enters on the page already showing", async () => {
+    // a second scene whose entry URL is the page the first scene left us on:
+    // re-navigating froze the footage for a redundant reload
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "dash-a", priority: 1,
+          entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1000 }],
+          hold_ms: 200,
+        },
+        {
+          name: "dash-b", priority: 2,
+          entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#tasks li:nth-child(2)", duration_ms: 1000 }],
+          hold_ms: 200,
+        },
+      ],
+    });
+    const out = mkdtempSync(join(tmpdir(), "supercut-samepage-"));
+    dirs.push(out);
+    const dashLoads = app.hits.get("/dash") ?? 0;
+    const res = await record({ recipe, outDir: out, seed: 5, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    // the page was fetched ONCE: scene 2 reused it instead of reloading
+    expect((app.hits.get("/dash") ?? 0) - dashLoads).toBe(1);
+    const scenes = res.eventLog.events.filter((e) => e.type === "scene");
+    const hovers = res.eventLog.events.filter((e) => e.type === "hover");
+    expect(hovers[1]!.t).toBeGreaterThanOrEqual(scenes[1]!.t + 1000); // the scene still opens at rest
+  }, 120_000);
+
+  it("holds ~60fps source on a hovered dashboard whose timer re-sets identical text", async () => {
+    // Found on the demo app: once /dash's counters clamp, its 50ms interval
+    // keeps re-setting identical textContent; with a hovered (transformed) row
+    // a 1px repaint beacon stopped registering and the source fell to exactly
+    // the interval rate (20fps) for the rest of the scene.
+    const recipe = parseRecipe({
+      version: 0,
+      app_url: app.url,
+      music_track: "institutional-01",
+      scenes: [
+        {
+          name: "dash-hover-hold", priority: 1,
+          entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+          actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 1400 }],
+          hold_ms: 3000,
+        },
+      ],
+    });
+    const out = mkdtempSync(join(tmpdir(), "supercut-hoverfps-"));
+    dirs.push(out);
+    const res = await record({ recipe, outDir: out, seed: 3, allowPrivateNetwork: true });
+    expect(res.failedScenes).toEqual([]);
+    const idx = JSON.parse(readFileSync(join(out, "frames-index.json"), "utf8")) as { t_source: number }[];
+    const end = idx[idx.length - 1]!.t_source;
+    // the last 1.5s of the hold: counters long clamped, row hovered
+    const tail = idx.filter((e) => e.t_source >= end - 1500);
+    // floor well under a healthy capture (CI's software compositor sustains
+    // ~47fps) but far above the 20fps the corner beacon fell to
+    expect(tail.length / 1.5).toBeGreaterThanOrEqual(35);
   }, 120_000);
 
   it("scroll actions keep the distance/slot contract while easing across the whole slot", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { assessSkew } from "../src/render/index.js";
-import { buildRenderPlan, defaultLayout, SUBFRAMES } from "../src/render/plan.js";
+import { assessSkew, musicFilterChain } from "../src/render/index.js";
+import { buildRenderPlan, defaultLayout, FADE_IN_MS, FADE_OUT_MS, SUBFRAMES } from "../src/render/plan.js";
 import type { EventLog } from "../src/schema/index.js";
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
@@ -163,9 +163,13 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
     }));
     const plan = buildRenderPlan(log, idx);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
-    // mid-take glide between the scenes sits above 1 (still engaged)…
-    expect(zAt(Math.round(6000 / (1000 / 60)))).toBeGreaterThan(1.05);
-    // …but the second scene OPENS wide: midway through its establishing shot
+    // Behaviour change: the camera used to "glide" at z=1.1 on scene 1's stale
+    // focus right up to scene 2 (6000ms read 1.1). A scene change is a cut to
+    // a different page — the camera is fully wide before it, never parked on
+    // a target that no longer exists.
+    expect(zAt(Math.round(6000 / (1000 / 60)))).toBeLessThan(1.02);
+    expect(zAt(Math.round(8000 / (1000 / 60)))).toBeLessThan(1.02);
+    // the second scene OPENS wide: midway through its establishing shot
     expect(zAt(Math.round(8450 / (1000 / 60)))).toBeLessThan(1.06);
     // then punches back in for its click
     expect(zAt(Math.round(10600 / (1000 / 60)))).toBeGreaterThan(1.4);
@@ -251,8 +255,14 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
   });
 });
 
-describe("source cross-blend: nav crossfades + gap smoothing", () => {
-  // 60fps source with a 1000ms capture hole between 2000 and 3000
+describe("source mapping: floor-hold, never a double exposure", () => {
+  // Behaviour change (was: linear cross-blend across 25-500ms gaps, a late
+  // 350ms crossfade across nav/long gaps). Two DIFFERENT source frames mixed
+  // at partial weight is a double exposure — on a real 39fps generate take
+  // 46% of output frames were ghosted. The plan has no pixels to prove two
+  // frames near-identical, and blending near-identical frames is a visual
+  // no-op, so every gap is now floor-held and a page change is a clean cut.
+  // The blend array stays in the plan (all -1/0) for host-page compatibility.
   const gapIndex = [
     ...Array.from({ length: 121 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
@@ -264,18 +274,14 @@ describe("source cross-blend: nav crossfades + gap smoothing", () => {
     })),
   ];
   const frameMs = 1000 / 60;
-  const blendAt = (plan: ReturnType<typeof buildRenderPlan>, tMs: number) => {
+  const at = (plan: ReturnType<typeof buildRenderPlan>, tMs: number) => {
     const f = Math.round(tMs / frameMs);
-    return { srcB: plan.blend[f * 2]!, k: plan.blend[f * 2 + 1]! };
+    return { src: plan.sourceByFrame[f]!, srcB: plan.blend[f * 2]!, k: plan.blend[f * 2 + 1]! };
   };
 
-  it("linearly blends across a short residual (non-nav) source gap", () => {
-    // 60fps source with a 400ms capture hole between 2000 and 2400
+  it("holds the last frame across a short residual gap instead of dissolving", () => {
     const shortGapIndex = [
-      ...Array.from({ length: 121 }, (_, i) => ({
-        file: `frames/${String(i).padStart(6, "0")}.png`,
-        t_source: Math.round(i * (2000 / 120)),
-      })),
+      ...gapIndex.slice(0, 121),
       ...Array.from({ length: 60 }, (_, i) => ({
         file: `frames/${String(121 + i).padStart(6, "0")}.png`,
         t_source: 2400 + Math.round(i * (2000 / 120)),
@@ -286,29 +292,32 @@ describe("source cross-blend: nav crossfades + gap smoothing", () => {
       { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
     ]);
     const plan = buildRenderPlan(log, shortGapIndex);
-    // inside the gap: blends toward the NEXT source by temporal position
-    expect(blendAt(plan, 2100).srcB).toBe(121);
-    expect(blendAt(plan, 2100).k).toBeCloseTo(0.25, 1);
-    expect(blendAt(plan, 2300).k).toBeCloseTo(0.75, 1);
-    // outside the gap: no blend
-    expect(blendAt(plan, 1000).srcB).toBe(-1);
-    expect(blendAt(plan, 3000).srcB).toBe(-1);
+    for (const t of [2100, 2300]) {
+      expect(at(plan, t)).toEqual({ src: 120, srcB: -1, k: 0 });
+    }
+    // the next source takes over exactly when it exists
+    expect(at(plan, 2420).src).toBe(121);
   });
 
-  it("a LONG residual gap holds then fades late — never a seconds-long linear dissolve", () => {
-    // no scene marker near the gap: e.g. slow pre-nav DNS work pushed the real
-    // reload gap outside naive attribution — it must still read as a quick fade
+  it("a navigation gap holds the old page, then cuts cleanly to the new one", () => {
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
+      { t: 1990, type: "scene", name: "s2", priority: 2 },
     ]);
     const plan = buildRenderPlan(log, gapIndex);
-    // early/mid gap: HOLD, no mush
-    expect(blendAt(plan, 2200).srcB).toBe(-1);
-    expect(blendAt(plan, 2500).srcB).toBe(-1);
-    // final ~350ms: quick dissolve
-    expect(blendAt(plan, 2800).srcB).toBe(121);
-    expect(blendAt(plan, 2800).k).toBeCloseTo((2800 - 2650) / 350, 1);
+    for (const t of [2200, 2500, 2800, 2980]) expect(at(plan, t)).toEqual({ src: 120, srcB: -1, k: 0 });
+    expect(at(plan, 3010).src).toBe(121);
+  });
+
+  it("an irregular sub-60fps source never blends", () => {
+    const log = makeLog([{ t: 0, type: "scene", name: "s1", priority: 1 }]);
+    const irregular = Array.from({ length: 200 }, (_, i) => ({
+      file: `frames/${String(i).padStart(6, "0")}.png`,
+      t_source: Math.round(i * 25.6 + (i % 3) * 7),
+    }));
+    const plan = buildRenderPlan(log, irregular);
+    for (let f = 0; f < plan.frames; f++) expect(plan.blend[f * 2]).toBe(-1);
   });
 
   it("dense 60fps capture (~17ms spacing) never blends", () => {
@@ -320,21 +329,104 @@ describe("source cross-blend: nav crossfades + gap smoothing", () => {
     const plan = buildRenderPlan(log, dense);
     for (let f = 0; f < plan.frames; f++) expect(plan.blend[f * 2]).toBe(-1);
   });
+});
 
-  it("a nav gap holds the last pre-nav frame, then crossfades ~350ms into the new page", () => {
+describe("scene boundaries: cuts, snaps, tail and fades", () => {
+  const frameMs = 1000 / 60;
+  const zAtT = (plan: ReturnType<typeof buildRenderPlan>, t: number) =>
+    plan.camera[Math.round(t / frameMs) * SUBFRAMES * 3]!;
+  const idxWithGap = (gapFrom: number, gapTo: number, end: number) =>
+    Array.from({ length: Math.ceil(end / 17) }, (_, i) => i * 17)
+      .filter((t) => t <= gapFrom || t >= gapTo)
+      .map((t, i) => ({ file: `frames/${String(i).padStart(6, "0")}.jpg`, t_source: t }));
+
+  it("never bridges a punch across a click-triggered navigation gap", () => {
+    // two nearby small targets 2.5s apart would bridge into one held zoom —
+    // but a source gap (the page reloaded) lies between them. The recorder
+    // logs the navigation; its 400ms gap is then the cut (an UNLOGGED gap
+    // this short would be a capture hiccup — see the stall test below)
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
-      { t: 500, type: "click", bbox: [600, 300, 200, 60], selector: "#a", point: [700, 330] },
-      { t: 1990, type: "scene", name: "s2", priority: 2 }, // right before the gap → it's a navigation
+      { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+      { t: 2450, type: "navigation" },
+      { t: 4400, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
     ]);
-    const plan = buildRenderPlan(log, gapIndex);
-    // early in the gap: HOLD (no dissolve mush while the page reloads)
-    expect(blendAt(plan, 2200).srcB).toBe(-1);
-    expect(blendAt(plan, 2500).srcB).toBe(-1);
-    // final 350ms: crossfade ramps into the first post-nav frame
-    expect(blendAt(plan, 2800).srcB).toBe(121);
-    expect(blendAt(plan, 2800).k).toBeCloseTo((2800 - 2650) / 350, 1);
-    expect(blendAt(plan, 2980).k).toBeGreaterThan(0.9);
+    const plan = buildRenderPlan(log, idxWithGap(2500, 2900, 7000));
+    // camera wide on the first new-page frame and through its establishing read
+    expect(zAtT(plan, 2910)).toBeLessThan(1.02);
+    expect(zAtT(plan, 3300)).toBeLessThan(1.02);
+    // and still punches for the click on the new page, arriving on time
+    expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+  });
+
+  it("cuts wide at a click-triggered navigation even when capture never paused", () => {
+    // a fast local navigation keeps frames flowing (paint holding) — no source
+    // gap to detect. The recorder logs the page change; the camera must not
+    // zoom into the old page's link and carry that zoom onto the new page.
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 2000, type: "click", bbox: [1700, 20, 120, 30], selector: "#nav", point: [1760, 35] },
+      { t: 2110, type: "navigation" },
+      { t: 4400, type: "click", bbox: [600, 300, 120, 40], selector: "#b", point: [660, 320] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(99999, 99999, 7000));
+    // no punch on the navigating click: wide from before it through the new
+    // page's establishing read
+    for (let t = 1000; t <= 2110 + 800; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
+    // the new page's first click still gets its punch, on time
+    expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+  });
+
+  it("a short capture stall is not a page change: no snap, the punch is kept", () => {
+    // a 300ms hiccup mid-shot on a slow machine, with no scene marker and no
+    // logged navigation: the same page is still showing, so a snap to wide
+    // would be exactly the jump this planner exists to avoid
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 2000, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+      { t: 3300, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(2300, 2600, 6000));
+    const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+    // no discontinuity anywhere in the camera track
+    for (let f = 1; f < plan.frames; f++) expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(0.05);
+    // held punched-in through the stall and on for the second click
+    expect(zAtT(plan, 2450)).toBeGreaterThan(1.3);
+    expect(zAtT(plan, 3300)).toBeGreaterThan(1.3);
+  });
+
+  it("skips a punch that could only land after the click", () => {
+    // a click 500ms into a new page: the establishing shot owns the opening,
+    // so there is no time to arrive — no late zoom chasing the click
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 500, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+    ]);
+    const plan = buildRenderPlan(log, idxWithGap(99999, 99999, 3000));
+    for (let t = 0; t < 3000; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
+  });
+
+  it("extends the take until the camera has settled, with at least 1s of tail", () => {
+    const log = makeLog([
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+    ]);
+    const idx = idxWithGap(99999, 99999, 2000); // footage ends right after the click
+    const plan = buildRenderPlan(log, idx);
+    const endMs = plan.frames * frameMs;
+    expect(endMs).toBeGreaterThanOrEqual(1600 + 1200 + 1000);
+    const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+    for (let f = plan.frames - 18; f < plan.frames; f++) {
+      expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(1e-4);
+    }
+  });
+
+  it("declares picture fades that match the music fades", () => {
+    const long = Array.from({ length: 600 }, (_, i) => ({ file: `frames/${String(i).padStart(6, "0")}.jpg`, t_source: i * 17 }));
+    const plan = buildRenderPlan(clickLog, long);
+    expect(plan.fade).toEqual({ inFrames: Math.round(FADE_IN_MS / frameMs), outFrames: Math.round(FADE_OUT_MS / frameMs) });
+    expect(musicFilterChain(10)).toContain(`afade=t=in:st=0:d=${FADE_IN_MS / 1000}`);
+    expect(musicFilterChain(10)).toContain(`d=${FADE_OUT_MS / 1000}`);
   });
 });
 

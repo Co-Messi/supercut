@@ -5,7 +5,7 @@
  *              │ for each scene:                              │
  *              │   entry navigation (fixed scheduled allowance)│
  *              │   for each action:                           │
- *              │     cursor path → CDP mouse events           │──▶ frames/*.png
+ *              │     cursor path → CDP mouse events           │──▶ frames/*.jpg
  *              │     perform (click/type/scroll/hover/wait)   │    + frame index
  *              │     log event {t scheduled, observed_t}      │──▶ events.json
  *              │   on action timeout → scene failed, continue │
@@ -20,15 +20,17 @@
  * (design doc, stage 3). On a local fixture the structure and geometry are
  * byte-identical across runs; `t` carries only wall-clock jitter of a few ms.
  *
- * Capture path: CDP screencast PNG at
- * 2x DPR, ack-throttled, frames streamed straight to disk.
+ * Capture path: CDP screencast JPEG (q92) at 2x DPR, frames streamed straight
+ * to disk. PNG at 3840x2160 spent so long encoding each frame that the source
+ * topped out well under 60fps; JPEG at q92 is visually lossless for UI at
+ * this resolution (every output pixel is a ~2x downsample of the source).
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
-import { cursorPath, makeRng, type CursorPoint } from "./cursor.js";
+import { cursorPath, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { installRequestGate, settleGatedRedirect, type GatedContext } from "../security/browser-gate.js";
 import {
   assertSafeNavigationUrl,
@@ -43,20 +45,37 @@ const DPR = 2;
 const FPS = 60;
 const FRAME_MS = 1000 / FPS;
 const ACTION_TIMEOUT_MS = 10_000;
+/** screencast JPEG quality: q92 keeps 2x-DPR text edges clean after the
+ *  renderer's downsample while encoding fast enough for a 60fps source */
+const JPEG_QUALITY = 92;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
 /** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
  *  a settle pause before the schedule continues */
 const SETTLE_MS = 400;
+/** every page opens at rest for at least this long before its first action:
+ *  the render's establishing shot reads the page wide, and the first punch-in
+ *  has time to arrive BEFORE the first click instead of chasing it */
+const PRE_ROLL_MS = 1_000;
+/** the pointer comes to rest on a target before pressing, and a press is
+ *  held like a finger does — a zero-length press/release pair right at the
+ *  end of the travel read as robotic */
+const PRESS_SETTLE_MS = 100;
+const PRESS_HOLD_MS = 70;
 
 /**
  * CDP screencast is change-driven: a static page produces NO compositor
  * commits, so capture collapses to a few fps and the renderer stretches one
  * frame across seconds. This rAF beacon — a 1×1px fixed corner element on its
  * own compositor layer, toggling between two sub-perceptual opacities — forces
- * one commit per display frame. 1/255 alpha on one pixel is invisible in the
- * PNGs and below any encoder threshold; pointer-events:none + no layout means
- * it can never interfere with the page. Injected as an init script so it
- * survives full navigations; the rAF loop itself survives SPA route changes.
+ * one commit per display frame. It covers the WHOLE viewport at 1-2e-4
+ * opacity: a 1px corner beacon stopped registering damage in some page states
+ * (a hovered, transformed row plus a timer re-setting identical text dropped
+ * the source to the timer's 20Hz), while full-viewport damage always
+ * captures. 2e-4 alpha moves no 8-bit channel by even half a level, so the
+ * frames are pixel-identical to the page; pointer-events:none + fixed
+ * positioning means it can never interfere with hit-testing or layout.
+ * Injected as an init script so it survives full navigations; the rAF loop
+ * itself survives SPA route changes.
  */
 const REPAINT_BEACON_ID = "__supercut_repaint_beacon__";
 const REPAINT_BEACON_SCRIPT = `(() => {
@@ -71,15 +90,15 @@ const REPAINT_BEACON_SCRIPT = `(() => {
         el = document.createElement("div");
         el.id = ${JSON.stringify(REPAINT_BEACON_ID)};
         el.setAttribute("aria-hidden", "true");
-        el.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;" +
-          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.004;" +
+        el.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;" +
+          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.0001;" +
           "will-change:opacity;contain:strict";
         root.appendChild(el);
       }
     }
     if (el) {
       flip = !flip;
-      el.style.opacity = flip ? "0.008" : "0.004";
+      el.style.opacity = flip ? "0.0002" : "0.0001";
     }
     requestAnimationFrame(tick);
   };
@@ -202,6 +221,16 @@ function ceilToFrame(ms: number): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** same document URL (normalized; a differing fragment still counts as a
+ *  different entry, so the recipe's explicit navigation is honoured) */
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return false;
+  }
+}
+
 // Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
 // from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
 // 10s budget blew on a page whose `load` only fired at ~12s, even though the DOM
@@ -318,6 +347,23 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     }
   }
 
+  /** true while the recipe itself navigates (entry / goto): those page changes
+   *  are scene structure, not action results, and are not logged */
+  let recipeNavInFlight = false;
+  /** capture timeline started (events may be stamped) */
+  let capturing = false;
+  /** an action-triggered main-frame navigation request is in flight */
+  let actionNavPending = false;
+  async function recipeNavigation<T>(go: () => Promise<T>): Promise<T> {
+    recipeNavInFlight = true;
+    try {
+      return await go();
+    } finally {
+      recipeNavInFlight = false;
+      actionNavPending = false;
+    }
+  }
+
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
   let wallStart = 0;
@@ -354,11 +400,42 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     const pre = await loc.boundingBox();
     const alreadyInView =
       !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
+    if (!alreadyInView) {
+      // an eased page scroll that centres the target, filmed as motion — an
+      // instant scrollIntoView reads as a jump cut in the middle of a shot
+      await loc
+        .evaluate(async (el) => {
+          const r = el.getBoundingClientRect();
+          const root = document.scrollingElement ?? document.documentElement;
+          const startY = window.scrollY;
+          const maxY = Math.max(0, root.scrollHeight - window.innerHeight);
+          const targetY = Math.max(0, Math.min(maxY, startY + r.top + r.height / 2 - window.innerHeight / 2));
+          const dist = targetY - startY;
+          if (Math.abs(dist) < 1) return;
+          const dur = Math.min(900, Math.max(350, Math.abs(dist) * 0.5));
+          const ease = (q: number) => (q < 0.5 ? 4 * q * q * q : 1 - (-2 * q + 2) ** 3 / 2);
+          await new Promise<void>((done) => {
+            const t0 = performance.now();
+            const step = (now: number) => {
+              const q = Math.min(1, (now - t0) / dur);
+              // "instant": a page-level `scroll-behavior: smooth` must not
+              // turn every step into its own competing animation
+              window.scrollTo({ left: window.scrollX, top: startY + dist * ease(q), behavior: "instant" });
+              if (q < 1) requestAnimationFrame(step);
+              else done();
+            };
+            requestAnimationFrame(step);
+          });
+        })
+        .catch(() => {});
+    }
+    // backstop (a target inside a nested scroll container the page scroll
+    // cannot reach): a no-op when the eased scroll already revealed it
     await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS });
     // settle ONLY when a scroll actually happened — an unconditional sleep adds
     // wall-time to every action, tipping in-view actions into the overrun path
     // and breaking the scheduled-timeline determinism contract on fixtures
-    if (!alreadyInView) await sleep(350);
+    if (!alreadyInView) await sleep(150);
     const box = await loc.boundingBox();
     if (!box) throw new Error(`selector "${selector}" has no bounding box`);
     return { x: box.x, y: box.y, w: box.width, h: box.height };
@@ -406,7 +483,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     armed: boolean,
     slotEnd: number,
   ): Promise<void> {
-    const ev = events[events.length - 1];
+    // this action's own event: the latest interaction event (a navigation the
+    // action triggered may have been logged after it)
+    let ev: KnownEvent | undefined;
+    for (let i = events.length - 1; i >= 0 && !ev; i--) {
+      const e = events[i]!;
+      if (e.type === "click" || e.type === "type" || e.type === "hover") ev = e;
+      else if (e.type !== "navigation") break;
+    }
     if (!ev || (ev.type !== "click" && ev.type !== "type" && ev.type !== "hover")) return;
     if (a.zoom) {
       ev.focus_bbox = a.zoom;
@@ -450,7 +534,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
-        const response = await gotoReady(page, a.url);
+        const response = await recipeNavigation(() => gotoReady(page, a.url!));
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
@@ -476,12 +560,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         await moveCursor(points, startT);
         const armed = a.kind !== "hover" && !a.zoom ? await armMutationObserver() : false;
         const pathEndT = startT + (points[points.length - 1]?.t ?? 0);
+        if (a.kind === "click" || a.kind === "type") await sleep(PRESS_SETTLE_MS);
         const dispatchT = observedNow();
 
         if (a.kind === "click" || a.kind === "type") {
           await cdp.send("Input.dispatchMouseEvent", {
             type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1,
           });
+          await sleep(PRESS_HOLD_MS);
           await cdp.send("Input.dispatchMouseEvent", {
             type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1,
           });
@@ -499,11 +585,17 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
         if (a.kind === "type") {
           const text = a.text ?? "";
+          const chars = [...text];
           const remaining = Math.max(200, a.duration_ms - (observedNow() - scheduledT));
-          const perChar = Math.min(90, remaining / Math.max(text.length, 1));
-          for (const ch of text) {
+          // human rhythm: a beat after the focusing click, log-normal gaps
+          // around ~100ms (longer after spaces/punctuation, never under 45ms),
+          // a beat before Enter. A slot too short for this overruns and the
+          // schedule shifts (timestamp canon) — never a pasted-in string.
+          const rhythm = typingPlan(text, remaining, rng);
+          await sleep(rhythm.beforeFirstKey);
+          for (const [i, ch] of chars.entries()) {
             await cdp.send("Input.insertText", { text: ch });
-            await sleep(perChar);
+            if (i < chars.length - 1) await sleep(rhythm.keyDelays[i]!);
           }
           events.push({
             t: stamp(observedNow()), observed_t: observedNow(), type: "type",
@@ -514,6 +606,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             // Many query inputs only reveal their payoff on submit (a form's
             // submit handler / an Enter keydown). Typing alone leaves the app in
             // its idle state — the video would show a filled box and no result.
+            await sleep(rhythm.beforeEnter);
             await page.keyboard.press("Enter");
           }
         }
@@ -592,6 +685,21 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);
 
+    // log page changes an ACTION caused (a clicked link, a form submit): a
+    // cross-document navigation request from the main frame that the recipe
+    // did not issue itself, stamped when the new document commits
+    page.on("request", (req) => {
+      if (capturing && !recipeNavInFlight && req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+        actionNavPending = true;
+      }
+    });
+    page.on("framenavigated", (frame) => {
+      if (frame !== page.mainFrame() || !actionNavPending || recipeNavInFlight) return;
+      actionNavPending = false;
+      const now = observedNow();
+      events.push({ t: stamp(now), observed_t: now, type: "navigation" });
+    });
+
     if (captureFrames) {
       // ack-AFTER-write: Chromium won't send the next frame until we ack, so
       // awaiting the disk write before acking gives true backpressure (one
@@ -616,7 +724,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           firstFrameStamp = stampMs;
           signalFirstFrame();
         }
-        const file = `frames/${String(frameCounter++).padStart(6, "0")}.png`;
+        const file = `frames/${String(frameCounter++).padStart(6, "0")}.jpg`;
         try {
           await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
           // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
@@ -650,7 +758,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
     if (captureFrames) {
       await cdp.send("Page.startScreencast", {
-        format: "png",
+        format: "jpeg",
+        quality: JPEG_QUALITY,
         maxWidth: VIEWPORT.width * DPR,
         maxHeight: VIEWPORT.height * DPR,
         everyNthFrame: 1,
@@ -668,6 +777,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       firstFrameStamp > 0 && Math.abs(Date.now() - firstFrameStamp) < 10_000
         ? firstFrameStamp
         : Date.now();
+
+    capturing = true;
+    // pre-roll: the opening page at rest before anything moves
+    {
+      const wait = PRE_ROLL_MS - observedNow();
+      if (wait > 0) await sleep(wait);
+      clock = stamp(Math.max(PRE_ROLL_MS, ceilToFrame(observedNow())));
+    }
 
     for (let i = 0; i < recipe.scenes.length; i++) {
       const scene: Scene = recipe.scenes[i]!;
@@ -692,31 +809,37 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
-          // suppress capture across the reload so the blank page never lands in
-          // the footage (the scene-change flash); resume once it has painted.
-          // MUST reset in finally: if gotoReady/assert throws, leaving this true
-          // would make the screencast handler drop EVERY subsequent frame and
-          // freeze the rest of the video on the previous scene.
-          isNavigating = true;
-          try {
-            const response = await gotoReady(page, scene.entry.url);
-            await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
-            await sleep(SETTLE_MS);
-          } finally {
-            isNavigating = false;
+          // the previous scene already left the browser on this exact page:
+          // re-navigating only reloads it — a second freeze in the footage and
+          // a flash of the same page. Skipped only after a scene that completed
+          // (a failed one may have left the page in a state a reload resets).
+          const prev = recipe.scenes[i - 1]!;
+          const alreadyThere =
+            !failedScenes.includes(prev.name) && sameUrl(page.url(), scene.entry.url);
+          if (!alreadyThere) {
+            // suppress capture across the reload so the blank page never lands in
+            // the footage (the scene-change flash); resume once it has painted.
+            // MUST reset in finally: if gotoReady/assert throws, leaving this true
+            // would make the screencast handler drop EVERY subsequent frame and
+            // freeze the rest of the video on the previous scene.
+            isNavigating = true;
+            try {
+              const response = await recipeNavigation(() => gotoReady(page, scene.entry.url));
+              await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
+              await sleep(SETTLE_MS);
+            } finally {
+              isNavigating = false;
+            }
           }
-          // Timestamp canon: when nav finishes early, dwell out
-          // the unused allowance in WALL time so pixels and schedule stay in
-          // lockstep — advancing only the clock made the footage run ~1s ahead
-          // of every logged event after a fast local navigation
+          // Timestamp canon: when nav finishes early, dwell out the unused
+          // allowance in WALL time so pixels and schedule stay in lockstep —
+          // advancing only the clock made the footage run ~1s ahead of every
+          // logged event after a fast local navigation. The new page (its
+          // first captured frame is at navEnd) also gets its pre-roll.
           const navEnd = observedNow();
-          const target = clock + ENTRY_NAV_ALLOWANCE_MS;
-          if (navEnd < target) {
-            await sleep(target - navEnd);
-            clock = stamp(target);
-          } else {
-            clock = stamp(ceilToFrame(navEnd));
-          }
+          const target = Math.max(clock + ENTRY_NAV_ALLOWANCE_MS, navEnd + PRE_ROLL_MS);
+          await sleep(target - navEnd);
+          clock = stamp(ceilToFrame(target));
         }
         for (const a of [...scene.entry.prelude, ...scene.actions]) {
           await runAction(a);

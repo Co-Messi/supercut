@@ -122,7 +122,7 @@ function heldPunchNavTake(): { log: EventLog; index: FrameIndexEntry[] } {
   };
 }
 
-type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend" | "framing" | "snapBlur";
+type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend" | "framing" | "snapBlur" | "lateRise";
 
 /**
  * Checks that still FAIL on the current code, per scenario. They run as
@@ -164,6 +164,10 @@ describe.each(scenarios)("motion quality: %s", (name, make) => {
 
   check("arrival")("every punch-in reaches ≥ 90% of its zoom by the click (or is skipped)", () => {
     expect(score(log, index).minClickArrival).toBeGreaterThanOrEqual(0.9);
+  });
+
+  check("lateRise")("no punch starts at or after its click (the camera never chases the action)", () => {
+    expect(score(log, index).maxLateRise).toBeLessThan(0.035);
   });
 
   check("tail")("the take ends at rest: |Δz| < 1e-4 per frame over the final 300ms", () => {

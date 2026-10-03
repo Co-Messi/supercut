@@ -32,6 +32,14 @@ export interface MotionMetrics {
   clickArrival: (number | null)[];
   /** min over clicks that punched */
   minClickArrival: number;
+  /** max zoom GAINED right after a click — from the click to 400ms later, cut
+   *  off where the next beat's 750ms lead-in could begin, so only this
+   *  click's own punch can contribute. An arrived punch gains < 0.02 here; a
+   *  punch that only starts at/after the click (the camera chasing the
+   *  action) gains ≥ 0.05 even in a short window. clickArrival cannot see
+   *  that case when the next beat follows closely (its window is truncated
+   *  and the late punch reads as "skipped"). */
+  maxLateRise: number;
   /** max |Δz| per output frame over the final 300ms */
   tailMaxDzPerFrame: number;
   /** final camera z */
@@ -169,6 +177,14 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
       return (zAtFrame(f) - 1) / (target - 1);
     });
   const punched = clickArrival.filter((a): a is number => a !== null);
+  let maxLateRise = 0;
+  for (const e of log.events) {
+    if (e.type !== "click") continue;
+    const nextBeat = interactions.find((t) => t > e.t) ?? Infinity;
+    const end = Math.min(e.t + 400, nextBeat - 750, last * frameMs);
+    if (end - e.t < 80) continue;
+    maxLateRise = Math.max(maxLateRise, zAt(end) - zAt(e.t));
+  }
 
   let tailMaxDzPerFrame = 0;
   for (let f = Math.max(1, last - Math.round(300 / frameMs)); f <= last; f++) {
@@ -200,6 +216,7 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
     wideRestMs,
     clickArrival,
     minClickArrival: punched.length ? Math.min(...punched) : 1,
+    maxLateRise,
     tailMaxDzPerFrame,
     finalZ: zAtFrame(last),
     blendedShare: blended / plan.frames,

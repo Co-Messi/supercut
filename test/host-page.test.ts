@@ -50,3 +50,37 @@ describe("compositor sharpness settings", () => {
     expect(src).not.toMatch(/__name|: number|import/);
   });
 });
+
+describe("camera framing ramp (cameraTransform)", () => {
+  // the default layout: 0.8-scale window, 8px above centre for the shadow
+  const W = 1920, H = 1080;
+  const C = { x: 192, y: 100, w: 1536, h: 864 };
+  const edges: [number, number][] = [
+    [C.x, C.y], [C.x + C.w, C.y], [C.x, C.y + C.h], [C.x + C.w, C.y + C.h],
+    [C.x, 540], [C.x + C.w, 540], [960, C.y], [960, C.y + C.h], [960, 540],
+  ];
+
+  it("a wide shot (z=1) is exactly the resting layout whatever the focus spring is doing", () => {
+    for (const [fx, fy] of edges) {
+      const [, offX, offY] = cameraTransform(1, fx, fy, W, H, C);
+      expect(Math.abs(offX)).toBeLessThan(1e-9);
+      expect(Math.abs(offY)).toBeLessThan(1e-9);
+    }
+  });
+
+  it("a gentle z≈1.1 glide nudges the window toward the focus — never jams it against an edge", () => {
+    const z = 1.1;
+    const centred = (W - z * C.w) / 2; // each side's margin when centred
+    for (const [fx, fy] of edges) {
+      const [, offX] = cameraTransform(z, fx, fy, W, H, C);
+      const left = z * C.x + offX;
+      const right = W - (z * (C.x + C.w) + offX);
+      expect(Math.min(left, right)).toBeGreaterThanOrEqual(centred / 2);
+      void fy;
+    }
+    // …but it does move toward an off-centre focus
+    const [, toRight] = cameraTransform(z, C.x + C.w, 540, W, H, C);
+    const [, toMid] = cameraTransform(z, 960, 540, W, H, C);
+    expect(toRight).toBeLessThan(toMid - 20);
+  });
+});

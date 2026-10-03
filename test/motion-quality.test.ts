@@ -104,7 +104,25 @@ function edgeTake(): { log: EventLog; index: FrameIndexEntry[] } {
   };
 }
 
-type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend" | "framing";
+/** the shape of the real gen2 take's first beat: a hover punch on a nav link,
+ *  the click 370ms later, and the logged navigation 80ms after that with NO
+ *  source gap (paint holding) — the camera snaps wide from a full punch */
+function heldPunchNavTake(): { log: EventLog; index: FrameIndexEntry[] } {
+  const events: EventLog["events"] = [
+    { t: 1016.7, type: "scene", name: "s1", priority: 1 },
+    { t: 1690.8, type: "hover", bbox: [1675.9, 27, 104.8, 18], selector: "#nav-dash" },
+    { t: 2059.8, type: "click", bbox: [1675.9, 27, 104.8, 18], selector: "#nav-dash", point: [1728.3, 36] },
+    { t: 2139.8, type: "navigation" },
+    { t: 3400, type: "click", bbox: [600, 500, 120, 40], selector: "#x", point: [660, 520] },
+    { t: 0, type: "cursor_path", points: [[0, 960, 980], [1690.8, 1728.3, 36], [3400, 660, 520]] },
+  ];
+  return {
+    log: { version: 0, t_source_unified: true, viewport, fps: 60, events },
+    index: numberFrames(sourceFrames(0, 6000, 16.7, 13)),
+  };
+}
+
+type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend" | "framing" | "snapBlur";
 
 /**
  * Checks that still FAIL on the current code, per scenario. They run as
@@ -117,6 +135,7 @@ const PENDING: Record<string, Check[]> = {
   "synthetic multi-scene take @ ~60fps source": [],
   "real demo take (main @ 013d6b8)": [],
   "edge and corner targets": [],
+  "punch held into a gapless click-navigation": [],
 };
 
 const scenarios: [string, () => { log: EventLog; index: FrameIndexEntry[] }][] = [
@@ -124,6 +143,7 @@ const scenarios: [string, () => { log: EventLog; index: FrameIndexEntry[] }][] =
   ["synthetic multi-scene take @ ~60fps source", () => syntheticTake(16.7)],
   ["real demo take (main @ 013d6b8)", demoTake],
   ["edge and corner targets", edgeTake],
+  ["punch held into a gapless click-navigation", heldPunchNavTake],
 ];
 
 describe.each(scenarios)("motion quality: %s", (name, make) => {
@@ -157,6 +177,10 @@ describe.each(scenarios)("motion quality: %s", (name, make) => {
     expect(m.maxOneSidedWallpaperPx).toBeLessThanOrEqual(0.5);
     expect(m.maxUncoveredWhileCoverablePx).toBeLessThanOrEqual(0.5);
     expect(m.maxFocusCentringErrorPx).toBeLessThanOrEqual(1);
+  });
+
+  check("snapBlur")("a camera snap at a page cut never motion-blurs one frame across the jump", () => {
+    expect(score(log, index).maxIntraFrameDz).toBeLessThan(0.02);
   });
 
   check("blend")("< 5% of output frames blend two different source frames", () => {

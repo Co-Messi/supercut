@@ -38,6 +38,10 @@ export interface MotionMetrics {
   finalZ: number;
   /** share of output frames that blend two different source frames */
   blendedShare: number;
+  /** max z range across ONE output frame's shutter samples — a camera snap
+   *  that lands mid-shutter motion-blurs the whole window across the jump
+   *  (one smeared frame); a moving spring spans < 0.01 */
+  maxIntraFrameDz: number;
   /** framing: max px of wallpaper exposed on one side of an axis while the
    *  content overflows the canvas on the OTHER side (the window shoved off
    *  one edge with a slab of background on the opposite edge) */
@@ -177,8 +181,20 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
     if (b >= 0 && b !== plan.sourceByFrame[f] && plan.blend[f * 2 + 1]! > 0) blended++;
   }
 
+  let maxIntraFrameDz = 0;
+  for (let f = 0; f < plan.frames; f++) {
+    let lo = Infinity, hi = -Infinity;
+    for (let s = 0; s < SUBFRAMES; s++) {
+      const z = plan.camera[(f * SUBFRAMES + s) * 3]!;
+      lo = Math.min(lo, z);
+      hi = Math.max(hi, z);
+    }
+    maxIntraFrameDz = Math.max(maxIntraFrameDz, hi - lo);
+  }
+
   return {
     maxZAtSceneMarker,
+    maxIntraFrameDz,
     maxZAfterNavGap,
     minWideRestMs: Math.min(...wideRestMs),
     wideRestMs,

@@ -563,12 +563,16 @@ export function buildRenderPlan(
   let nextSnap = 0;
   let w = 0;
   for (let f = 0; f < frames; f++) {
+    // snaps land on FRAME boundaries — the first frame at/after the cut — so
+    // a frame is wholly before or wholly after the jump: a snap inside one
+    // frame's shutter motion-blurred the entire window from z≈1.42 to 1 (a
+    // smeared flash frame at every gapless click-navigation)
+    while (nextSnap < snaps.length && snaps[nextSnap]! <= f * frameMs) {
+      nextSnap++;
+      Object.assign(state, { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 });
+    }
     for (let s = 0; s < STEPS; s++) {
       const t = f * frameMs + (s / STEPS) * frameMs;
-      while (nextSnap < snaps.length && snaps[nextSnap]! <= t) {
-        nextSnap++;
-        Object.assign(state, { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 });
-      }
       const tgt = targetAt(t);
       // critically damped: a = ω²(target − x) − 2ω·v
       state.vz += (OMEGA * OMEGA * (tgt.z - state.z) - 2 * OMEGA * state.vz) * dt;

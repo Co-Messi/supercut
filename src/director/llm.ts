@@ -18,6 +18,10 @@ export interface ChatOptions {
   /** ask the model for a JSON object response */
   json?: boolean;
   maxTokens?: number;
+  /** tokens (prompt + completion, summed over EVERY attempt) this call may
+   *  consume — set by BudgetedLlmClient to the budget left. A client that
+   *  retries or escalates max_tokens must keep each attempt inside it. */
+  spendLimit?: number;
 }
 
 export interface LlmClient {
@@ -98,8 +102,24 @@ export class OpenAICompatibleClient implements LlmClient {
       ],
     });
 
+    // budget: each attempt bills its prompt plus up to max_tokens, so an
+    // attempt is only sent when that worst case fits what the call has left
+    const promptEstimate = estimateTokens(opts);
+    let spent = 0;
     let lastErr = "";
     for (let attempt = 0; attempt < 4; attempt++) {
+      if (opts.spendLimit !== undefined) {
+        const room = opts.spendLimit - spent - promptEstimate;
+        if (room < requested) {
+          throw new TokenBudgetExceededError(
+            `LLM token budget exhausted mid-call: ${spent} tokens spent on ${attempt} attempt(s) and the next ` +
+              `needs ~${promptEstimate + requested} of the ${opts.spendLimit} left (last error: ${lastErr}) — ` +
+              `raise --max-tokens / SUPERCUT_MAX_TOKENS, or set it to 0/off to disable the cap`,
+          );
+        }
+        // an escalated size the budget cannot cover shrinks to what it can
+        maxTokens = Math.min(maxTokens, room);
+      }
       const body = bodyFor(maxTokens);
       let res: Response;
       try {
@@ -142,6 +162,8 @@ export class OpenAICompatibleClient implements LlmClient {
             ? (u?.prompt_tokens ?? 0) + (u?.completion_tokens ?? 0)
             : undefined);
         if (billed !== undefined) this._tokensUsed = (this._tokensUsed ?? 0) + billed;
+        // unreported usage: assume the attempt's worst case
+        spent += billed ?? promptEstimate + maxTokens;
         accepted = Math.max(accepted, maxTokens);
         const choice = data.choices?.[0];
         const msg = choice?.message;
@@ -269,11 +291,13 @@ export class BudgetedLlmClient implements LlmClient {
 
   async chat(opts: ChatOptions): Promise<string> {
     const promptEstimate = estimateTokens(opts);
-    // reserve the call's worst-case completion too: on reasoning models the
-    // completion, not the prompt, dominates the bill — and a truncated
-    // reasoning answer escalates max_tokens up to escalationCeiling(), so
-    // reserve that, not just the first attempt's size
-    const completionReserve = opts.maxTokens ? escalationCeiling(opts.maxTokens) : 0;
+    // reserve the FIRST attempt's worst-case completion too: on reasoning
+    // models the completion, not the prompt, dominates the bill. Retries and
+    // max_tokens escalation (up to escalationCeiling()) are kept inside the
+    // budget by the inner client via spendLimit, attempt by attempt — so a
+    // modest --max-tokens is not refused up front for a 4x escalation it may
+    // never need, and a call can never bill past the cap.
+    const completionReserve = opts.maxTokens ?? 0;
     const worstCase = promptEstimate + completionReserve;
     if (this.budget > 0 && (this.metered >= this.budget || this.metered + worstCase > this.budget)) {
       const sizeNote =
@@ -289,7 +313,10 @@ export class BudgetedLlmClient implements LlmClient {
     const before = this.inner.tokensUsed ?? 0;
     let out: string;
     try {
-      out = await this.inner.chat(opts);
+      const left = this.budget - this.metered;
+      out = await this.inner.chat(
+        this.budget > 0 ? { ...opts, spendLimit: Math.min(opts.spendLimit ?? Infinity, left) } : opts,
+      );
     } catch (err) {
       // a call that fails after the provider billed it (e.g. every attempt came
       // back empty) still spent those tokens

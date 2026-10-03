@@ -1311,14 +1311,59 @@ describe("LLM max_tokens escalation on truncation", () => {
     expect(sentMax).toEqual([8000, 16000, 8000]);
   });
 
-  it("the budget wrapper reserves the escalation ceiling, not just the first attempt", async () => {
+  /** a provider that bills every attempt in full (prompt ~20 + the whole
+   *  max_tokens) and always truncates mid-reasoning: the worst case a budget
+   *  must survive */
+  async function budgetedTruncating(budget: number) {
+    const { OpenAICompatibleClient } = await import("../src/director/llm.js");
+    const realFetch = globalThis.fetch;
+    const sentMax: number[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+      const max = (JSON.parse(init!.body!) as { max_tokens: number }).max_tokens;
+      sentMax.push(max);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "", reasoning_content: "thinking…" }, finish_reason: "length" }],
+          usage: { total_tokens: max + 20 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const inner = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      const llm = new BudgetedLlmClient(inner, budget);
+      const out = await llm.chat({ system: "s", user: [{ type: "text", text: "p" }], maxTokens: 8000 }).catch((e: Error) => e);
+      return { out, sentMax, metered: llm.meteredTokens };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it("retries and escalations inside ONE call never carry spend past the budget", async () => {
+    // 4 attempts at 8k → 16k → 32k → 32k would bill ~88k; the budget is 40k
+    const { out, sentMax, metered } = await budgetedTruncating(40_000);
+    expect(out).toBeInstanceOf(TokenBudgetExceededError);
+    expect(sentMax[0]).toBe(8000);
+    expect(metered).toBeLessThanOrEqual(40_000 * 1.01); // prompt estimate slack only
+  });
+
+  it("a small budget still admits the first attempt; escalation is clamped to the room left", async () => {
+    const { sentMax, metered } = await budgetedTruncating(20_000);
+    expect(sentMax[0]).toBe(8000);
+    expect(sentMax.length).toBeGreaterThanOrEqual(2); // it did get to escalate
+    expect(sentMax[1]).toBeLessThan(16000); // …but only into the room the budget had left
+    expect(metered).toBeLessThanOrEqual(20_000 * 1.01);
+  });
+
+  it("the budget wrapper refuses a call whose FIRST attempt cannot fit", async () => {
     let sent = 0;
     const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };
-    const llm = new BudgetedLlmClient(noUsage, 20_000);
+    const llm = new BudgetedLlmClient(noUsage, 6_000);
     const call = (maxTokens: number) => llm.chat({ system: "s", user: [{ type: "text", text: "p" }], maxTokens });
-    // 8k fits the budget at first glance, but it may escalate to 32k
-    await expect(call(8000)).rejects.toThrow(/32000 completion/);
+    await expect(call(8000)).rejects.toThrow(/8000 completion/);
     expect(sent).toBe(0);
-    await expect(call(4000)).resolves.toBe("ok"); // ceiling 16k fits
+    await expect(call(4000)).resolves.toBe("ok");
   });
 });

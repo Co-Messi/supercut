@@ -5,6 +5,7 @@ import {
   parseRecipe,
   RecipeValidationError,
   totalBudgetMs,
+  estimatedTakeMs,
 } from "../src/schema/index.js";
 
 const validEventLog = {
@@ -166,6 +167,25 @@ describe("recipe schema", () => {
     });
     expect(() => parseRecipe(over)).toThrow(RecipeValidationError);
     expect(() => parseRecipe(over)).toThrow(/hard ceiling/);
+  });
+
+  it("counts the take's fixed capture + render overhead against the 60s ceiling", () => {
+    // 4 scenes of 14.5s actions = 58s of recipe — under 60s on paper, but the
+    // take adds a 1s head pre-roll, ~1.5s per later scene (reload + settle +
+    // pre-roll) and a ~1.7s settled tail: the video would run ~65s
+    const scene = (name: string, ms: number) => ({
+      name,
+      priority: 1,
+      entry: { url: `http://localhost:3000/${name}`, prelude: [] },
+      depends_on: [],
+      actions: [{ kind: "wait", duration_ms: ms }],
+      hold_ms: 0,
+    });
+    const tooLong = makeRecipe({ scenes: ["a", "b", "c", "d"].map((n) => scene(n, 14_500)) });
+    expect(() => parseRecipe(tooLong)).toThrow(/hard ceiling/);
+    // the script stage's own target (≤ 50s over ≤ 4 scenes) still fits
+    const ok = makeRecipe({ scenes: ["a", "b", "c", "d"].map((n) => scene(n, 12_500)) });
+    expect(estimatedTakeMs(parseRecipe(ok))).toBeLessThanOrEqual(MAX_BUDGET_MS);
   });
 
   it("rejects depends_on pointing at a LATER scene (order is immutable)", () => {

@@ -9,7 +9,8 @@ import { z } from "zod";
  *   recipe ──schedule(recipe, beatGrid)──▶ timed recipe ──▶ capture executor
  *
  * Rules enforced at parse time (design doc "Premises" + stage 2):
- *  - total budget ≤ 60s (MAX_BUDGET_MS)
+ *  - estimated video length ≤ 60s (MAX_BUDGET_MS): the scene budgets PLUS
+ *    the take's fixed overhead (estimatedTakeMs)
  *  - every scene declares an entry navigation (URL or action prelude)
  *  - depends_on references must point at existing, EARLIER scenes
  *    (scene order is immutable — reorder is excluded from v1)
@@ -18,6 +19,14 @@ import { z } from "zod";
  */
 
 export const MAX_BUDGET_MS = 60_000;
+/** fixed time a take adds around the recipe's own durations — mirrors the
+ *  capture executor and render plan: the 1s head pre-roll (PRE_ROLL_MS), and
+ *  per later scene the entry reload + 400ms settle + 1s pre-roll on the new
+ *  page (≥ the 1s ENTRY_NAV_ALLOWANCE_MS even without a reload) */
+export const TAKE_HEAD_MS = 1_000;
+export const SCENE_CHANGE_MS = 1_500;
+/** the render's settled ending past the last beat (plan SETTLE_TAIL_MS) */
+export const TAKE_TAIL_MS = 1_700;
 /** below this an action can't even complete its cursor travel */
 export const MIN_ACTION_MS = 200;
 
@@ -113,6 +122,12 @@ export function totalBudgetMs(r: Recipe): number {
   return r.scenes.reduce((sum, s) => sum + sceneDuration(s), 0);
 }
 
+/** the rendered video's expected length: scene budgets plus the take's
+ *  fixed overhead (an action that overruns its slot can still add to it) */
+export function estimatedTakeMs(r: Recipe): number {
+  return totalBudgetMs(r) + TAKE_HEAD_MS + SCENE_CHANGE_MS * Math.max(0, r.scenes.length - 1) + TAKE_TAIL_MS;
+}
+
 /**
  * Parse + enforce cross-field rules. This is the loud-failure gate between
  * the LLM script stage and the deterministic capture stage.
@@ -121,9 +136,11 @@ export function parseRecipe(raw: unknown): Recipe {
   const r = recipe.parse(raw);
 
   const budget = totalBudgetMs(r);
-  if (budget > MAX_BUDGET_MS) {
+  const take = estimatedTakeMs(r);
+  if (take > MAX_BUDGET_MS) {
     throw new RecipeValidationError(
-      `recipe budgets ${budget}ms > hard ceiling ${MAX_BUDGET_MS}ms — cut scenes or shorten actions`,
+      `recipe budgets ${budget}ms (~${take}ms of video with the pre-roll, scene changes and ending) > ` +
+        `hard ceiling ${MAX_BUDGET_MS}ms — cut scenes or shorten actions`,
     );
   }
 

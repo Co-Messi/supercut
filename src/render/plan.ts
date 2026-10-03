@@ -252,6 +252,57 @@ export function defaultLayout(viewport: EventLog["viewport"]): Layout {
   };
 }
 
+/**
+ * The compositor's camera transform: canvas point p → z·p + [offX, offY] for
+ * the spring state (z, focus fx/fy) over a W×H canvas whose content window is
+ * `c`. Returns [z, offX, offY]. The host page embeds THIS function verbatim
+ * (via toString — keep the body flat: no nested functions or outer
+ * constants), so the plan-level framing tests score exactly what is drawn.
+ *
+ * Per axis:
+ *  - the shot wants the focus at the canvas centre (offset size/2 − z·focus);
+ *  - the offset is clamped to the window's legal range: while z·content is
+ *    smaller than the canvas the window stays fully on canvas, and once it is
+ *    larger the window covers the canvas — never wallpaper on one edge while
+ *    the opposite edge overflows (the old "move the focus 30% toward centre"
+ *    form, unclamped, showed up to ~300px of wallpaper on one side);
+ *  - that range is narrowed toward the plain scale-about-centre offset by a
+ *    ramp g = 0 at z=1 → 1 where the content starts to cover the canvas, so a
+ *    wide shot is exactly centred whatever the focus spring is doing, and a
+ *    gentle in-between zoom (z≈1.1 glide) only nudges the window instead of
+ *    jamming it against an edge.
+ */
+export function cameraTransform(
+  z: number,
+  fx: number,
+  fy: number,
+  W: number,
+  H: number,
+  c: { x: number; y: number; w: number; h: number },
+): [number, number, number] {
+  // x axis
+  const tx = W / c.w;
+  const gx = tx > 1 ? Math.min(1, Math.max(0, (z - 1) / (tx - 1))) : 1;
+  const ax = -z * c.x;
+  const bx = W - z * (c.x + c.w);
+  const loX = Math.min(ax, bx);
+  const hiX = Math.max(ax, bx);
+  const restX = (1 - z) * (W / 2);
+  let offX = Math.min(Math.max(W / 2 - z * fx, restX + gx * (loX - restX)), restX + gx * (hiX - restX));
+  offX = Math.min(Math.max(offX, loX), hiX);
+  // y axis
+  const ty = H / c.h;
+  const gy = ty > 1 ? Math.min(1, Math.max(0, (z - 1) / (ty - 1))) : 1;
+  const ay = -z * c.y;
+  const by = H - z * (c.y + c.h);
+  const loY = Math.min(ay, by);
+  const hiY = Math.max(ay, by);
+  const restY = (1 - z) * (H / 2);
+  let offY = Math.min(Math.max(H / 2 - z * fy, restY + gy * (loY - restY)), restY + gy * (hiY - restY));
+  offY = Math.min(Math.max(offY, loY), hiY);
+  return [z, offX, offY];
+}
+
 /** map CSS px (viewport space) → canvas px (content space) */
 function toCanvas(layout: Layout, cssX: number, cssY: number): { x: number; y: number } {
   const s = layout.content.w / layout.viewport.width;

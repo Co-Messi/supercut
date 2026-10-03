@@ -14,6 +14,8 @@
  */
 /** configured encoder bitrate — exported so the orchestrator can verify the
  *  DELIVERED bitrate against it after the mux */
+import { cameraTransform } from "./plan.js";
+
 export const ENCODER_BITRATE = 16_000_000;
 
 /** in-page cap on buffered encoded output: a 60s 1080p60 take at 16 Mbps is
@@ -55,6 +57,7 @@ export const HOST_PAGE = `<!doctype html>
 <script type="module">
 const log = (m) => console.log("[render] " + m);
 ${blurPassCount.toString()}
+${cameraTransform.toString()}
 
 async function main() {
   const TOKEN = new URLSearchParams(location.search).get("t") || "";
@@ -226,7 +229,6 @@ async function main() {
     c.restore();
   }
 
-  const cx = W / 2, cy = H / 2;
   const t0 = performance.now();
 
   for (let f = 0; f < frames; f++) {
@@ -255,7 +257,7 @@ async function main() {
       const z = camera[a] + (camera[b] - camera[a]) * k;
       const fx = camera[a + 1] + (camera[b + 1] - camera[a + 1]) * k;
       const fy = camera[a + 2] + (camera[b + 2] - camera[a + 2]) * k;
-      return [z, fx * (1 - z) + (cx - fx) * (1 - 1 / z), fy * (1 - z) + (cy - fy) * (1 - 1 / z)];
+      return cameraTransform(z, fx, fy, W, H, C);
     };
 
     // adaptive blur: pass count scales with the LARGEST corner displacement
@@ -352,9 +354,7 @@ async function main() {
     //    position + scale from the last subframe's transform.
     {
       const base = (f * SUB + (SUB - 1)) * 3;
-      const z = camera[base], fx = camera[base + 1], fy = camera[base + 2];
-      const offX = fx * (1 - z) + (cx - fx) * (1 - 1 / z);
-      const offY = fy * (1 - z) + (cy - fy) * (1 - 1 / z);
+      const [z, offX, offY] = cameraTransform(camera[base], camera[base + 1], camera[base + 2], W, H, C);
       ctx.save();
       ctx.translate(z * cur[0] + offX, z * cur[1] + offY);
       // damped scale (sqrt z): full proportional growth read as distracting

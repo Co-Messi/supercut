@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { blurPassCount, HOST_PAGE } from "../src/render/host-page.js";
+import { cameraTransform } from "../src/render/plan.js";
 
-/** the host page's camera transform: canvas point p → z·p + off */
+/** a plain scale-about-point camera transform (canvas point p → z·p + off) —
+ *  blurPassCount input fixtures; the real framing lives in cameraTransform */
 const offsets = (z: number, fx: number, fy: number, W = 1920, H = 1080) => {
   const cx = W / 2, cy = H / 2;
   return [z, fx * (1 - z) + (cx - fx) * (1 - 1 / z), fy * (1 - z) + (cy - fy) * (1 - 1 / z)] as const;
@@ -37,5 +39,14 @@ describe("compositor sharpness settings", () => {
     expect(HOST_PAGE).toContain('colorType: "float16"');
     // the page embeds the SAME pass-count function the tests exercise
     expect(HOST_PAGE).toContain("function blurPassCount");
+  });
+
+  it("frames the camera with the plan's cameraTransform — no inline copy of an older formula", () => {
+    expect(HOST_PAGE).toContain("function cameraTransform");
+    expect(HOST_PAGE).toContain("cameraTransform(z, fx, fy, W, H, C)");
+    expect(HOST_PAGE).not.toMatch(/1 - 1 \/ z/);
+    // the embedded source must be self-contained page JS (no TS, no bundler helpers)
+    const src = cameraTransform.toString();
+    expect(src).not.toMatch(/__name|: number|import/);
   });
 });

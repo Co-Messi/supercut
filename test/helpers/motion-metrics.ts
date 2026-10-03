@@ -6,7 +6,7 @@
  * exactly the same thing.
  */
 import type { EventLog } from "../../src/schema/index.js";
-import { SUBFRAMES, type FrameIndexEntry, type RenderPlan } from "../../src/render/plan.js";
+import { cameraTransform, SUBFRAMES, type FrameIndexEntry, type RenderPlan } from "../../src/render/plan.js";
 
 /** a source gap at least this long is a page transition (navigation /
  *  reload), never ordinary capture jitter */
@@ -38,6 +38,59 @@ export interface MotionMetrics {
   finalZ: number;
   /** share of output frames that blend two different source frames */
   blendedShare: number;
+  /** framing: max px of wallpaper exposed on one side of an axis while the
+   *  content overflows the canvas on the OTHER side (the window shoved off
+   *  one edge with a slab of background on the opposite edge) */
+  maxOneSidedWallpaperPx: number;
+  /** framing: max px of wallpaper visible on any edge of an axis while the
+   *  zoomed content is big enough to cover that axis (z·content ≥ canvas) */
+  maxUncoveredWhileCoverablePx: number;
+  /** framing: once the content covers the canvas on an axis, max px the
+   *  mapped focus sits farther from the canvas centre than the closest
+   *  position that keeps the canvas covered (0 = centred as far as the
+   *  window edges allow) */
+  maxFocusCentringErrorPx: number;
+}
+
+export interface FramingMetrics {
+  maxOneSidedWallpaperPx: number;
+  maxUncoveredWhileCoverablePx: number;
+  maxFocusCentringErrorPx: number;
+}
+
+/** score the compositor's camera transform (the SAME function the host page
+ *  embeds) over every subframe of the plan */
+export function framingMetrics(plan: RenderPlan): FramingMetrics {
+  const { canvasW: W, canvasH: H, content: C } = plan.layout;
+  let oneSided = 0;
+  let uncovered = 0;
+  let centring = 0;
+  for (let i = 0; i < plan.camera.length; i += 3) {
+    const z = plan.camera[i]!, fx = plan.camera[i + 1]!, fy = plan.camera[i + 2]!;
+    const [, offX, offY] = cameraTransform(z, fx, fy, W, H, C);
+    const axes: [number, number, number, number, number][] = [
+      // [canvas size, content start, content size, offset, focus]
+      [W, C.x, C.w, offX, fx],
+      [H, C.y, C.h, offY, fy],
+    ];
+    for (const [size, start, len, off, focus] of axes) {
+      const lo = z * start + off; // mapped content start edge
+      const hi = z * (start + len) + off; // mapped content end edge
+      const gapLo = lo, gapHi = size - hi; // > 0 = wallpaper showing on that edge
+      if (gapLo > 0 && gapHi < 0) oneSided = Math.max(oneSided, gapLo);
+      if (gapHi > 0 && gapLo < 0) oneSided = Math.max(oneSided, gapHi);
+      if (z * len >= size + 1e-6) {
+        uncovered = Math.max(uncovered, gapLo, gapHi);
+        // feasible covering offsets: [size − z(start+len), −z·start]; the
+        // focus maps to z·focus + off — its closest feasible spot to centre
+        const a = z * focus + size - z * (start + len);
+        const b = z * focus - z * start;
+        const best = Math.min(Math.max(size / 2, a), b);
+        centring = Math.max(centring, Math.abs(z * focus + off - size / 2) - Math.abs(best - size / 2));
+      }
+    }
+  }
+  return { maxOneSidedWallpaperPx: oneSided, maxUncoveredWhileCoverablePx: uncovered, maxFocusCentringErrorPx: centring };
 }
 
 /** source gaps that are page changes: ≥ 250ms near a scene marker or a
@@ -134,6 +187,7 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
     tailMaxDzPerFrame,
     finalZ: zAtFrame(last),
     blendedShare: blended / plan.frames,
+    ...framingMetrics(plan),
   };
 }
 

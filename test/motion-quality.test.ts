@@ -82,7 +82,29 @@ function demoTake(): { log: EventLog; index: FrameIndexEntry[] } {
   };
 }
 
-type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend";
+/** small targets hugging every edge and corner of the viewport: the punch
+ *  framing must keep the canvas covered instead of shoving the window off
+ *  one edge with a slab of wallpaper on the other */
+function edgeTake(): { log: EventLog; index: FrameIndexEntry[] } {
+  const targets: [number, number][] = [
+    [20, 20], [1800, 20], [20, 1030], [1800, 1030], [940, 20], [940, 1030], [20, 520], [1800, 520], [1500, 300],
+  ];
+  const events: EventLog["events"] = [{ t: 0, type: "scene", name: "edges", priority: 1 }];
+  const path: [number, number, number][] = [[0, 960, 540]];
+  targets.forEach(([x, y], i) => {
+    const t = 1800 + i * 2600;
+    events.push({ t, type: "click", bbox: [x, y, 100, 30], selector: `#t${i}`, point: [x + 50, y + 15] });
+    path.push([t, x + 50, y + 15]);
+  });
+  events.push({ t: 0, type: "cursor_path", points: path });
+  const end = 1800 + targets.length * 2600 + 1000;
+  return {
+    log: { version: 0, t_source_unified: true, viewport, fps: 60, events },
+    index: numberFrames(sourceFrames(0, end, 16.7, 11)),
+  };
+}
+
+type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend" | "framing";
 
 /**
  * Checks that still FAIL on the current code, per scenario. They run as
@@ -94,12 +116,14 @@ const PENDING: Record<string, Check[]> = {
   "synthetic multi-scene take @ ~39fps source": [],
   "synthetic multi-scene take @ ~60fps source": [],
   "real demo take (main @ 013d6b8)": [],
+  "edge and corner targets": [],
 };
 
 const scenarios: [string, () => { log: EventLog; index: FrameIndexEntry[] }][] = [
   ["synthetic multi-scene take @ ~39fps source", () => syntheticTake(25.6)],
   ["synthetic multi-scene take @ ~60fps source", () => syntheticTake(16.7)],
   ["real demo take (main @ 013d6b8)", demoTake],
+  ["edge and corner targets", edgeTake],
 ];
 
 describe.each(scenarios)("motion quality: %s", (name, make) => {
@@ -126,6 +150,13 @@ describe.each(scenarios)("motion quality: %s", (name, make) => {
     const m = score(log, index);
     expect(m.tailMaxDzPerFrame).toBeLessThan(1e-4);
     expect(m.finalZ).toBeLessThan(1.005);
+  });
+
+  check("framing")("zoomed shots keep the window framed: no one-sided wallpaper, covered once z·content ≥ canvas, focus centred as far as the edges allow", () => {
+    const m = score(log, index);
+    expect(m.maxOneSidedWallpaperPx).toBeLessThanOrEqual(0.5);
+    expect(m.maxUncoveredWhileCoverablePx).toBeLessThanOrEqual(0.5);
+    expect(m.maxFocusCentringErrorPx).toBeLessThanOrEqual(1);
   });
 
   check("blend")("< 5% of output frames blend two different source frames", () => {

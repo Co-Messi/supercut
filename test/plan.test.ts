@@ -431,6 +431,29 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
       for (let t = 2000; t <= 5000; t += 100) expect(zAtT(plan, t)).toBeLessThan(1.02);
     });
 
+    it("a stall inside a same-URL scene's opening window is not that scene's reload", () => {
+      // scene 2 enters on the same URL (no reload, no gap at its marker); its
+      // payoff click stalls the page 1.7s later, well inside the window where
+      // a marker's reload gap may start. The executor reloads BEFORE a scene's
+      // first action, so a gap after that action cannot be the reload.
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 4000, type: "scene", name: "s2", priority: 2 },
+          {
+            t: 5600, type: "click", bbox: [920, 500, 90, 40], selector: "#run", point: [965, 520],
+            focus_bbox: [400, 300, 1100, 500], focus_source: "llm",
+          },
+        ],
+        { navigation_logged: true },
+      );
+      const plan = buildRenderPlan(log, idxWithGap(5700, 6300, 9000));
+      expect(zAtT(plan, 5600)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 6400)).toBeGreaterThan(1.35);
+      const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+      for (let f = 1; f < plan.frames; f++) expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(0.05);
+    });
+
     it("a logged navigation that left a gap still cuts", () => {
       const log = makeLog(
         [

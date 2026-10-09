@@ -383,9 +383,15 @@ export function detectBoundaries(log: EventLog, frameIndex: FrameIndexEntry[]): 
   const gaps = sourceGaps(frameIndex);
   const boundaries: Boundary[] = [];
   const claimed = new Set<number>();
+  /** the scene's first action after marker m: the recorder reloads, settles
+   *  and pre-rolls BEFORE it, so a gap starting after it is not the reload */
+  const firstActionAfter = (m: number) =>
+    log.events.find((e) => e.t >= m && e.type !== "scene" && e.type !== "cursor_path")?.t ?? Infinity;
   for (const m of sceneMarkers.slice(1)) {
+    const reloadBy = firstActionAfter(m);
     const gi = gaps.findIndex(
-      (g, i) => !claimed.has(i) && g.tA >= m - MARKER_GAP_BEFORE_MS && g.tA <= m + MARKER_GAP_AFTER_MS,
+      (g, i) =>
+        !claimed.has(i) && g.tA >= m - MARKER_GAP_BEFORE_MS && g.tA <= m + MARKER_GAP_AFTER_MS && g.tA < reloadBy,
     );
     if (gi >= 0) {
       claimed.add(gi);

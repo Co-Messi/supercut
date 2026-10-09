@@ -21,10 +21,12 @@
  * byte-identical across runs; `t` carries only wall-clock jitter of a few ms.
  *
  * Capture path: CDP screencast JPEG (q92) at 2x DPR, frames streamed straight
- * to disk. PNG at 3840x2160 spent so long encoding each frame that the source
- * topped out well under 60fps; JPEG at q92 is visually lossless for UI at
- * this resolution (every output pixel is a ~2x downsample of the source).
+ * to disk. JPEG keeps the encode fast enough for a 60fps source, and q92 is
+ * visually lossless for UI at this resolution (every output pixel is a ~2x
+ * downsample of the source). A frame byte-identical to the previous one is
+ * not written again: its frames-index entry names the earlier file.
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -309,6 +311,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const frameIndex: FrameIndexEntry[] = [];
   let firstFrameStamp = -1;
   let frameCounter = 0;
+  /** the last frame written to disk: an identical next frame reuses its file */
+  let lastFrame: { hash: string; file: string } | undefined;
   // true while an inter-scene navigation is in flight: the page is blank/white
   // mid-reload, and capturing those frames makes the video FLASH at every scene
   // change. Skip them — the renderer holds the last good frame across the gap.
@@ -724,9 +728,18 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           firstFrameStamp = stampMs;
           signalFirstFrame();
         }
-        const file = `frames/${String(frameCounter++).padStart(6, "0")}.jpg`;
         try {
-          await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
+          const bytes = Buffer.from(ev.data, "base64");
+          const hash = createHash("sha1").update(bytes).digest("base64");
+          // the beacon forces a commit every display frame, so most frames of
+          // a still page are byte-identical: write each distinct picture once
+          // and point the repeated index entries at that file
+          let file = lastFrame?.hash === hash ? lastFrame.file : undefined;
+          if (!file) {
+            file = `frames/${String(frameCounter++).padStart(6, "0")}.jpg`;
+            await writeFile(join(outDir, file), bytes);
+            lastFrame = { hash, file };
+          }
           // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
           // the first-processed frame; a negative t_source would sort to
           // entry 0 and fail render-plan validation

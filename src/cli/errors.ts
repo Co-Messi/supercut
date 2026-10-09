@@ -73,15 +73,41 @@ export function describeRecordError(err: unknown): CliError | unknown {
   );
 }
 
-/** What `record` prints and returns once the take is on disk. */
-export function recordOutcome(res: { failedScenes: string[]; aborted: boolean }): { code: number; lines: string[] } {
+const URL_HINT = [
+  "Check that the app URL is right and reachable, and that the port is not used by something else",
+  "(a different app on the same port records the wrong pages).",
+];
+const SELECTOR_HINT = [
+  "Check the selector: it must match an element that is visible when the action runs",
+  "(a control revealed by another action needs that action first, in the same scene).",
+];
+/** an entry page answering with an HTTP error, or no connection at all */
+const URL_FAILURE = /entry page .* returned \d{3}|net::ERR_|ECONNREFUSED/;
+/** a locator that never matched a visible element in time */
+const SELECTOR_FAILURE = /locator\.|waiting for locator|strict mode violation/;
+
+/** What `record` prints and returns once the take is on disk: every failed
+ *  scene with the first line of its reason, then the hint those reasons call
+ *  for (the URL and port for an unreachable or wrong app, the selector for a
+ *  control that never showed up). */
+export function recordOutcome(res: {
+  failedScenes: string[];
+  aborted: boolean;
+  sceneErrors?: Record<string, string>;
+}): { code: number; lines: string[] } {
   if (res.failedScenes.length === 0 && !res.aborted) return { code: 0, lines: [] };
   const lines = [
     `supercut: ${res.failedScenes.length} scene(s) failed: ${res.failedScenes.join(", ") || "(none named)"}` +
       (res.aborted ? " (recording aborted early)" : ""),
-    "The take was still written, but it is partial footage.",
-    "Check that the app URL is right and reachable, and that the port is not used by something else",
-    "(a different app on the same port records the wrong pages).",
   ];
+  const reasons = res.failedScenes.map((name) => res.sceneErrors?.[name]).filter((r): r is string => !!r);
+  for (const name of res.failedScenes) {
+    const reason = res.sceneErrors?.[name]?.split("\n")[0]?.trim();
+    if (reason) lines.push(`  ${name}: ${reason.length > 300 ? `${reason.slice(0, 300)}...` : reason}`);
+  }
+  lines.push("The take was still written, but it is partial footage.");
+  // without reasons (an older caller) the URL and port are the likeliest cause
+  if (reasons.length === 0 || reasons.some((r) => URL_FAILURE.test(r))) lines.push(...URL_HINT);
+  if (reasons.some((r) => SELECTOR_FAILURE.test(r))) lines.push(...SELECTOR_HINT);
   return { code: 1, lines };
 }

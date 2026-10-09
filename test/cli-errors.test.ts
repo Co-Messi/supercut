@@ -66,6 +66,44 @@ describe("record outcome", () => {
     expect(text).toMatch(/take was still written/);
   });
 
+  it("names each failed scene's reason and hints at the selector, not the port, when a selector failed", () => {
+    const { code, lines } = recordOutcome({
+      failedScenes: ["sign-up"],
+      aborted: true,
+      sceneErrors: {
+        "sign-up": "locator.waitFor: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator('#email').first() to be visible",
+      },
+    });
+    expect(code).toBe(1);
+    const text = lines.join("\n");
+    expect(text).toContain("sign-up: locator.waitFor: Timeout 10000ms exceeded.");
+    expect(text).not.toContain("Call log");
+    expect(text).toMatch(/selector/);
+    expect(text).toMatch(/visible/);
+    expect(text).not.toMatch(/port/);
+  });
+
+  it("keeps the URL and port hint when an entry page or the connection failed", () => {
+    for (const reason of [
+      "entry page http://127.0.0.1:4319/x returned 404; is your app running there, and is something else using that port?",
+      "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4319/",
+    ]) {
+      const text = recordOutcome({ failedScenes: ["a"], aborted: false, sceneErrors: { a: reason } }).lines.join("\n");
+      expect(text).toMatch(/app URL/);
+      expect(text).toMatch(/port/);
+    }
+  });
+
+  it("a dependent scene names the scene it depended on and adds no hint of its own", () => {
+    const text = recordOutcome({
+      failedScenes: ["a", "b"],
+      aborted: false,
+      sceneErrors: { a: "locator.click: Timeout 10000ms exceeded.", b: 'depends on failed scene "a"' },
+    }).lines.join("\n");
+    expect(text).toContain('b: depends on failed scene "a"');
+    expect(text).not.toMatch(/port/);
+  });
+
   it("an aborted recording is a failure even with no scene named", () => {
     expect(recordOutcome({ failedScenes: [], aborted: true }).code).toBe(1);
   });

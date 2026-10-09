@@ -42,7 +42,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "supercut": "./dist/cli/index.js"
+    "supercut": "dist/cli/index.js"
   },
   "files": [
     "dist",

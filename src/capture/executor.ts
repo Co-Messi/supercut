@@ -70,6 +70,9 @@ const PRE_ROLL_MS = 1_000;
  *  end of the travel reads as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
+/** events.json `failed_scenes` bounds (event-log schema) */
+const MAX_FAILED_SCENES = 100;
+const MAX_FAILED_SCENE_NAME = 200;
 /** the beat after select-all and after delete when clearing a field: fixed,
  *  so a prefilled field never shifts the seeded rhythm of what follows */
 const CLEAR_BEAT_MS = 120;
@@ -1022,7 +1025,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // `scene` event (scene entries) or a `navigation` event (everything
     // else), so the renderer may read an unexplained frame gap as a stall
     navigation_logged: true,
-    failed_scenes: [...failedScenes],
+    // held to the log schema's bounds (recipe scene names are unbounded), so
+    // a take with failures always parses
+    failed_scenes: failedScenes.slice(0, MAX_FAILED_SCENES).map((n) => n.slice(0, MAX_FAILED_SCENE_NAME)),
     viewport: { width: VIEWPORT.width, height: VIEWPORT.height, dpr: DPR },
     fps: FPS,
     events,

@@ -395,6 +395,93 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
     expect(zAtT(plan, 3300)).toBeGreaterThan(1.3);
   });
 
+  describe("navigation_logged takes: only logged page changes cut", () => {
+    // a click whose app then runs a 600ms main-thread task (chart layout,
+    // results render): rAF stops, so does the screencast. Same page, a long
+    // frame gap, no navigation logged.
+    const stallLog = (extra: Partial<EventLog>) =>
+      makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          {
+            t: 3000, type: "click", bbox: [920, 500, 90, 40], selector: "#run", point: [965, 520],
+            focus_bbox: [400, 300, 1100, 500], focus_source: "llm",
+          },
+        ],
+        extra,
+      );
+    const stallIdx = idxWithGap(3000, 3600, 7000);
+
+    it("a 600ms same-page stall after a focused click keeps the payoff punch", () => {
+      const plan = buildRenderPlan(stallLog({ navigation_logged: true }), stallIdx);
+      // arrived by the click, held through the stall and the payoff dwell
+      expect(zAtT(plan, 3000)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 3300)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 3700)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 5000)).toBeGreaterThan(1.35);
+      // no snap anywhere: the camera track is continuous
+      const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+      for (let f = 1; f < plan.frames; f++) expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(0.05);
+      // the frame before the stall is held until the next one exists
+      const held = plan.sourceByFrame[Math.round(3300 / frameMs)]!;
+      expect(stallIdx[held]!.t_source).toBeLessThanOrEqual(3000);
+    });
+
+    it("the same log without the declaration keeps the legacy gap inference (a cut, no punch)", () => {
+      const plan = buildRenderPlan(stallLog({}), stallIdx);
+      for (let t = 2000; t <= 5000; t += 100) expect(zAtT(plan, t)).toBeLessThan(1.02);
+    });
+
+    it("a logged navigation that left a gap still cuts", () => {
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+          { t: 2450, type: "navigation" },
+          { t: 4400, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
+        ],
+        { navigation_logged: true },
+      );
+      const plan = buildRenderPlan(log, idxWithGap(2500, 2900, 7000));
+      expect(zAtT(plan, 2910)).toBeLessThan(1.02);
+      expect(zAtT(plan, 3300)).toBeLessThan(1.02);
+      expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+    });
+
+    it("a scene reload gap still cuts", () => {
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 1500, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+          { t: 4000, type: "scene", name: "s2", priority: 2 },
+        ],
+        { navigation_logged: true },
+      );
+      const plan = buildRenderPlan(log, idxWithGap(4000, 4400, 7000));
+      expect(zAtT(plan, 4000)).toBeLessThan(1.02);
+      expect(zAtT(plan, 4450)).toBeLessThan(1.02);
+    });
+  });
+
+  it("an SPA route change (kind spa) is a page change: wide at the change, no punch dwelling on the old route", () => {
+    for (const extra of [{}, { navigation_logged: true }]) {
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 2000, type: "click", bbox: [600, 300, 120, 40], selector: "#tab", point: [660, 320] },
+          { t: 2350, type: "navigation", kind: "spa" },
+          { t: 4600, type: "click", bbox: [600, 300, 120, 40], selector: "#b", point: [660, 320] },
+        ],
+        extra,
+      );
+      const plan = buildRenderPlan(log, idxWithGap(99999, 99999, 7500));
+      // the route's first frame and its establishing read are wide
+      for (let t = 2350 + frameMs; t <= 2350 + 800; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
+      // the new route's own beat still punches
+      expect(zAtT(plan, 4600)).toBeGreaterThan(1.3);
+    }
+  });
+
   it("skips a punch that could only land after the click", () => {
     // a click 500ms into a new page: the establishing shot owns the opening,
     // so there is no time to arrive — no late zoom chasing the click

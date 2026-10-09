@@ -381,11 +381,18 @@ export function buildRenderPlan(
   gaps.forEach((g, i) => {
     // a click-triggered navigation: widen while the old page freezes, cut wide
     if (claimed.has(i)) return;
-    if (loggedNav(g) || g.tB - g.tA >= UNATTRIBUTED_GAP_MS) boundaries.push({ out: g.tA, in: g.tB, snap: true });
+    if (loggedNav(g)) boundaries.push({ out: g.tA, in: g.tB, snap: true });
+    // a take that logged every page change: an unexplained gap is a stall on
+    // the same page (a long main-thread task stops rAF and the screencast),
+    // so the frame holds and the camera keeps its shot. Legacy takes still
+    // infer a page change from a long enough gap.
+    else if (!log.navigation_logged && g.tB - g.tA >= UNATTRIBUTED_GAP_MS) boundaries.push({ out: g.tA, in: g.tB, snap: true });
   });
   // an action-triggered navigation the recorder logged: a fast local one keeps
   // frames flowing (no gap to detect), so the logged commit time is the cut.
-  // A slow one also left a gap — that boundary already covers it.
+  // A slow one also left a gap — that boundary already covers it. An SPA
+  // route change (kind "spa") is the same cut: the picture is a different
+  // page, so no punch may keep dwelling on the old one.
   for (const e of log.events) {
     if (e.type !== "navigation") continue;
     if (gaps.some((g) => g.tA >= e.t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= e.t + NAV_EVENT_GAP_AFTER_MS)) continue;

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -15,6 +16,57 @@ interface Check {
   run: () => Promise<{ ok: boolean; detail: string }>;
 }
 
+type Result = { ok: boolean; detail: string };
+
+/** how to install ffmpeg with the platform's usual package manager */
+export function ffmpegInstallHint(platform: NodeJS.Platform): string {
+  switch (platform) {
+    case "darwin":
+      return "install it with `brew install ffmpeg`";
+    case "linux":
+      return "install it with `sudo apt install ffmpeg` (or your distro's package manager)";
+    case "win32":
+      return "install it with `winget install Gyan.FFmpeg` and reopen the terminal";
+    default:
+      return "install ffmpeg with your package manager";
+  }
+}
+
+export function playwrightInstallHint(): string {
+  return "npx playwright install chromium";
+}
+
+export async function ffmpegCheck(deps: {
+  platform: NodeJS.Platform;
+  run: () => Promise<string>;
+}): Promise<Result> {
+  try {
+    const stdout = await deps.run();
+    return { ok: true, detail: stdout.split("\n")[0] ?? "found" };
+  } catch {
+    return { ok: false, detail: `not found: ${ffmpegInstallHint(deps.platform)}` };
+  }
+}
+
+/** `chromium.executablePath()` returns the path Playwright WOULD use whether
+ *  or not a browser was ever downloaded there, so the file itself is checked. */
+export async function chromiumInstalledCheck(deps: {
+  executablePath: () => string;
+  exists: (path: string) => boolean;
+}): Promise<Result> {
+  let path: string;
+  try {
+    path = deps.executablePath();
+  } catch {
+    return { ok: false, detail: "playwright is not installed: run `npm install`" };
+  }
+  if (!path) return { ok: false, detail: `no browser path resolved: run \`${playwrightInstallHint()}\`` };
+  if (!deps.exists(path)) {
+    return { ok: false, detail: `browser missing at ${path}: run \`${playwrightInstallHint()}\`` };
+  }
+  return { ok: true, detail: path };
+}
+
 const checks: Check[] = [
   {
     name: "node >= 20",
@@ -25,41 +77,22 @@ const checks: Check[] = [
   },
   {
     name: "ffmpeg on PATH",
-    run: async () => {
-      try {
-        const { stdout } = await exec("ffmpeg", ["-version"]);
-        return { ok: true, detail: stdout.split("\n")[0] ?? "found" };
-      } catch {
-        return {
-          ok: false,
-          detail: "not found — install via `brew install ffmpeg` (mac) or your package manager",
-        };
-      }
-    },
-  },
-  {
-    name: "ffprobe on PATH",
-    run: async () => {
-      try {
-        const { stdout } = await exec("ffprobe", ["-version"]);
-        return { ok: true, detail: stdout.split("\n")[0] ?? "found" };
-      } catch {
-        return { ok: false, detail: "not found — ships with ffmpeg; reinstall ffmpeg" };
-      }
-    },
+    run: () =>
+      ffmpegCheck({
+        platform: process.platform,
+        run: async () => (await exec("ffmpeg", ["-version"])).stdout,
+      }),
   },
   {
     name: "playwright chromium (capture)",
     run: async () => {
+      let chromium: typeof import("playwright").chromium;
       try {
-        const { chromium } = await import("playwright");
-        const path = chromium.executablePath();
-        return path
-          ? { ok: true, detail: path }
-          : { ok: false, detail: "run `npx playwright install chromium`" };
+        ({ chromium } = await import("playwright"));
       } catch {
-        return { ok: false, detail: "playwright not installed — run `npm install`" };
+        return { ok: false, detail: "playwright is not installed: run `npm install`" };
       }
+      return chromiumInstalledCheck({ executablePath: () => chromium.executablePath(), exists: existsSync });
     },
   },
   {
@@ -67,10 +100,9 @@ const checks: Check[] = [
     // WebCodecs) — a doctor that only checks the shell passes while render
     // cannot launch.
     //
-    // A4: launching is necessary but NOT sufficient — render encodes via the
-    // in-page WebCodecs VideoEncoder, so actually probe H.264 support here
-    // rather than punting it to render time (the old check only launched and
-    // closed, hiding a missing/unsupported codec until 10 min into a run).
+    // Launching is necessary but NOT sufficient: render encodes via the
+    // in-page WebCodecs VideoEncoder, so H.264 support is probed here instead
+    // of surfacing 10 minutes into a run.
     name: "Chromium + WebCodecs H.264",
     run: async () => {
       let server: import("node:http").Server | undefined;
@@ -117,6 +149,10 @@ const checks: Check[] = [
     },
   },
 ];
+
+export function checkNames(): string[] {
+  return checks.map((c) => c.name);
+}
 
 export async function doctor(): Promise<number> {
   let failures = 0;

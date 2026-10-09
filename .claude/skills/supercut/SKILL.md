@@ -25,6 +25,8 @@ The pipeline is: you write `recipe.json`, then `supercut record` films it, then 
 npx @co-messi/supercut doctor
 ```
 
+If npm cannot find `@co-messi/supercut` (it is not published yet), use a source checkout instead: `git clone https://github.com/Co-Messi/supercut`, then `npm ci && npm run build` inside it, and run `node <checkout>/dist/cli/index.js` wherever these steps say `npx @co-messi/supercut`.
+
 It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright's Chromium. Fix whatever it reports, using the exact command it prints: the Chromium command names supercut's own Playwright version (`npx playwright@<version> install chromium`). A bare `npx playwright install chromium` run inside an app that has its own Playwright installs a browser supercut cannot use.
 
 ### 2. Make sure the app is running
@@ -79,8 +81,9 @@ Action: {
 Rules that make a recipe fail validation:
 
 - Unknown fields are rejected (the schema is strict).
-- The estimated video length must stay at or under 60 seconds: the sum of every `duration_ms` and `hold_ms`, plus 1000 ms, plus 1500 ms per scene after the first, plus 1700 ms. A good launch video is 20 to 40 seconds, so aim for 3 to 6 actions in total.
-- Each scene must be independently reachable from its `entry.url`. Do not rely on typed text, filters or other page state left behind by an earlier scene, and give a scene on the same URL as the previous one a different starting point or accept that it may continue from the same page.
+- The estimated video length must stay at or under 60 seconds: the sum of every `duration_ms` and `hold_ms`, plus 1000 ms, plus 2400 ms per scene after the first, plus an ending of 1000 to 4100 ms (the full 4100 ms when the last scene ends on a click or type, or on a hover with `focus_selector`, with no hold after it). `record` checks this before it opens a browser and prints the estimate when it is over. A good launch video is 20 to 40 seconds, so aim for 3 to 6 actions in total.
+- Each scene must be independently reachable from its `entry.url`. Do not rely on typed text, filters or other page state left behind by an earlier scene: a scene reloads its `entry.url` unless the previous scene only hovered or waited on that same page, in which case it continues from there.
+- An action's selector must be visible when the action runs. A control that appears only after another action (a form behind a "Get started" button) needs that action first, in the same scene.
 
 Minimal valid example (this exact JSON is validated by the repo's tests):
 
@@ -109,7 +112,7 @@ Tips for a good take:
 
 - Use `focus_selector` on the action that produces the payoff, so the camera holds on the result and not on the button.
 - Give typing 1500 to 2500 ms and clicks 1000 to 1600 ms. Longer is slower and calmer.
-- Pick `music_track` to match the look: `pulse` for sleek dev tools, `daybreak` for bright consumer apps, `midnight` for dark data products, `momentum` for fast action-heavy apps, `off` for silence.
+- Pick `music_track` to match the look: `pulse` for sleek dev tools, `daybreak` for bright consumer apps, `midnight` for dark data products, `momentum` for fast action-heavy apps, `off` for silence. `render` does not read the recipe, so pass the same name to it with `--music` (step 6).
 - Use selectors that exist exactly once. A selector that matches nothing fails its scene.
 
 ### 5. Confirm with the user, then record
@@ -125,10 +128,10 @@ npx @co-messi/supercut record --recipe recipe.json --out out/take
 ### 6. Render
 
 ```bash
-npx @co-messi/supercut render --take out/take --out out/final.mp4
+npx @co-messi/supercut render --take out/take --out out/final.mp4 --music daybreak
 ```
 
-Optional: `--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper` for the backdrop, and `--music` to override the track.
+Replace `daybreak` with the recipe's `music_track`. Without `--music` the video is silent. Optional: `--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper` for the backdrop.
 
 ### 7. Look at it before you report
 

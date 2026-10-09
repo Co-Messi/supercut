@@ -24,6 +24,19 @@ describe("agent skill and plugin packaging", () => {
     expect(skill).toMatch(/destructive controls/i);
   });
 
+  it("the skill's render command passes the recipe's music track (render never reads the recipe)", () => {
+    const render = [...skill.matchAll(/^npx @co-messi\/supercut render .*$/gm)].map((m) => m[0]);
+    expect(render.length).toBeGreaterThan(0);
+    for (const cmd of render) expect(cmd).toMatch(/--music \S+/);
+  });
+
+  it("the skill's length rule uses the schema's real overheads", async () => {
+    const { SCENE_CHANGE_MS, TAKE_HEAD_MS, TAKE_TAIL_MS } = await import("../src/schema/index.js");
+    const { FOCUS_DWELL_MS, SETTLE_TAIL_MS } = await import("../src/render/plan.js");
+    expect(skill).toContain(`plus ${TAKE_HEAD_MS} ms, plus ${SCENE_CHANGE_MS} ms per scene after the first`);
+    expect(skill).toContain(`${TAKE_TAIL_MS} to ${FOCUS_DWELL_MS + SETTLE_TAIL_MS} ms`);
+  });
+
   it("the skill lists exactly the bundled music tracks", async () => {
     const { MUSIC_TRACKS } = await import("../src/director/analyze.js");
     for (const t of MUSIC_TRACKS) expect(skill).toContain(`"${t}"`);

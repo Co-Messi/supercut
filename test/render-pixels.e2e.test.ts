@@ -65,6 +65,18 @@ function span(file: string, from: number, to: number): FrameIndexEntry[] {
  * adds its own rounding (measured 2 levels) that is not the renderer's.
  */
 const fullRange = (y: number) => ((y - 16) * 255) / 219;
+/**
+ * The decoded level is quantized to luma codes 255/219 full-range levels
+ * apart, and platform encoders convert RGB to luma with different integer
+ * rounding: the same grey 134 page encodes to Y 131 with the macOS encoder
+ * and to Y 130 on the Linux CI runner. An absolute level is only known to
+ * within one code; a level measured against another frame of the same video
+ * shares the encoder's conversion and is exact.
+ */
+const LUMA_CODE = 255 / 219;
+/** the decoded level of a grey encoded with exact rounding */
+const encodedLevel = (grey: number) => fullRange(Math.round(16 + (219 * grey) / 255));
+const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1]!;
 
 /** full-range luma of one canvas row per output frame */
 function rows(mp4: string, y: number): number[][] {
@@ -148,10 +160,19 @@ describe("rendered pixels", () => {
       });
       expect(still.length).toBeGreaterThan(10);
       expect(moving.length).toBeGreaterThan(10);
-      for (const m of still) expect(Math.abs(m - GREY)).toBeLessThanOrEqual(1);
-      // zooming frames sum several passes: float16 keeps them exact, the
-      // 8-bit fallback stays within its cap's rounding
-      for (const m of moving) expect(Math.abs(m - GREY)).toBeLessThanOrEqual(bound);
+      // a still frame is one pass of the source: every still frame decodes to
+      // the same level, within one luma code of the source grey's own code
+      const level = median(still);
+      for (const m of still) expect(Math.abs(m - level), `still frame at ${m.toFixed(2)}, others at ${level.toFixed(2)}`).toBeLessThanOrEqual(0.5);
+      expect(
+        Math.abs(level - encodedLevel(GREY)),
+        `still frames decode to ${level.toFixed(2)} for source ${GREY} (mode ${mode})`,
+      ).toBeLessThanOrEqual(LUMA_CODE + 1e-9);
+      // zooming frames sum several passes: float16 keeps them at the still
+      // level, the 8-bit fallback stays within its cap's rounding of it
+      for (const m of moving) {
+        expect(Math.abs(m - level), `zooming frame at ${m.toFixed(2)}, still at ${level.toFixed(2)} (mode ${mode})`).toBeLessThanOrEqual(bound);
+      }
     }, 120_000);
   }
 

@@ -157,7 +157,11 @@ export function takeTailMs(r: Recipe): number {
   for (let i = steps.length - 1; i >= 0; i--) {
     const a = steps[i]!;
     if (a.kind === "click" || a.kind === "hover" || a.kind === "type") {
-      const dwell = a.focus_selector || a.zoom ? PAYOFF_DWELL_MS : BEAT_DWELL_MS;
+      // a click or type can always end up framing a payoff: without a
+      // focus_selector the recorder frames the region its DOM change touched.
+      // A hover frames one only when the script names it.
+      const payoff = a.kind !== "hover" || a.focus_selector || a.zoom;
+      const dwell = payoff ? PAYOFF_DWELL_MS : BEAT_DWELL_MS;
       tail = Math.max(tail, dwell + ZOOM_OUT_SETTLE_MS - after);
     }
     after += a.duration_ms;

@@ -56,10 +56,16 @@ describe("take overhead model", () => {
   });
 
   it("the tail runs past the final beat's dwell and zoom-out settle", () => {
-    // a plain click at the very end of the take
-    expect(takeTailMs(recipe([click(1000)], 0))).toBe(ZOOM_DWELL_MS + SETTLE_TAIL_MS);
-    // a framed payoff holds longer
+    // a click or type can always become a framed payoff: with no
+    // focus_selector the recorder frames the region its DOM change touched
+    expect(takeTailMs(recipe([click(1000)], 0))).toBe(FOCUS_DWELL_MS + SETTLE_TAIL_MS);
     expect(takeTailMs(recipe([click(1000, true)], 0))).toBe(FOCUS_DWELL_MS + SETTLE_TAIL_MS);
+    // a hover frames a payoff only when the script names one
+    const hover = (focus: boolean): Step => ({
+      kind: "hover", selector: "#h", duration_ms: 1000, ...(focus ? { focus_selector: "#result" } : {}),
+    });
+    expect(takeTailMs(recipe([hover(false)], 0))).toBe(ZOOM_DWELL_MS + SETTLE_TAIL_MS);
+    expect(takeTailMs(recipe([hover(true)], 0))).toBe(FOCUS_DWELL_MS + SETTLE_TAIL_MS);
     // the scene's final hold and any later non-beat step already cover part of it
     expect(takeTailMs(recipe([click(1000, true)], 2000))).toBe(FOCUS_DWELL_MS + SETTLE_TAIL_MS - 2000);
     expect(takeTailMs(recipe([click(1000, true), wait(3000)], 2000))).toBe(TAIL_MS);
@@ -68,9 +74,9 @@ describe("take overhead model", () => {
   });
 
   it("the latest-ending beat sets the tail, not just the last one", () => {
-    // focus click, then a short plain hover: the focus payoff (dwell 2400)
+    // a click, then a short plain hover: the click's payoff (dwell 2400)
     // outlasts the hover's (dwell 1200) by more than the hover's slot
-    const r = recipe([click(1000, true), { kind: "hover", selector: "#y", duration_ms: 300 }], 0);
+    const r = recipe([click(1000), { kind: "hover", selector: "#y", duration_ms: 300 }], 0);
     expect(takeTailMs(r)).toBe(FOCUS_DWELL_MS + SETTLE_TAIL_MS - 300);
   });
 

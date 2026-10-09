@@ -51,6 +51,14 @@ function outDir(tag: string): string {
 type IndexEntry = { file: string; t_source: number };
 const readIndex = (dir: string) => JSON.parse(readFileSync(join(dir, "frames-index.json"), "utf8")) as IndexEntry[];
 
+const click = (selector: string, duration_ms = 1000) => ({ kind: "click", selector, duration_ms });
+
+async function navigationsOf(scenes: Scene[], captureFrames = false) {
+  const res = await record({ recipe: recipeOf(scenes), outDir: outDir("nav"), seed: 3, captureFrames, allowPrivateNetwork: true });
+  expect(res.failedScenes).toEqual([]);
+  return { res, navs: res.eventLog.events.filter((e) => e.type === "navigation") };
+}
+
 describe("frames on disk", () => {
   it("writes each distinct frame once: identical consecutive frames share one file", async () => {
     const out = outDir("dedupe");
@@ -73,6 +81,74 @@ describe("frames on disk", () => {
       const a = readFileSync(join(out, "frames", onDisk[i - 1]!));
       const b = readFileSync(join(out, "frames", onDisk[i]!));
       expect(a.equals(b)).toBe(false);
+    }
+  }, 60_000);
+});
+
+describe("page changes", () => {
+  it("logs nothing for a 204, a download, a same-path pushState or a hash jump", async () => {
+    // a navigation that never commits must not leave a pending state that
+    // turns the next same-document URL change into a logged page change
+    const { navs } = await navigationsOf([{
+      name: "no-change", url: `${app.url}/spa`,
+      actions: [click("#no-content"), click("#push-same"), click("#download"), click("#push-same"), click("#hash")],
+    }]);
+    expect(navs).toEqual([]);
+  }, 60_000);
+
+  it("logs an SPA route change as kind spa, once per path change", async () => {
+    const { navs } = await navigationsOf([{
+      name: "routes", url: `${app.url}/spa`,
+      // /spa → /spa/reports, a query-only change, then /spa/a and /spa/b 100ms apart
+      actions: [click("#push-new"), click("#push-same"), click("#push-twice")],
+    }]);
+    expect(navs.map((e) => e.kind)).toEqual(["spa", "spa"]);
+  }, 60_000);
+
+  it("logs one document change for a server redirect and one for a page that replaces itself", async () => {
+    const { navs, res } = await navigationsOf([
+      { name: "server-redirect", url: `${app.url}/spa`, actions: [click("#server-redirect", 1500)] },
+      { name: "js-redirect", url: `${app.url}/spa`, actions: [click("#js-redirect", 1500)] },
+    ]);
+    expect(navs.map((e) => e.kind)).toEqual(["document", "document"]);
+    const scene2 = res.eventLog.events.filter((e) => e.type === "scene")[1]!;
+    expect(navs[0]!.t).toBeLessThan(scene2.t);
+    expect(navs[1]!.t).toBeGreaterThan(scene2.t);
+  }, 60_000);
+
+  it("logs a mid-scene goto as a page change; a scene entry is its scene marker", async () => {
+    const { navs, res } = await navigationsOf([
+      {
+        name: "goto", url: `${app.url}/spa`,
+        actions: [{ kind: "wait", duration_ms: 400 }, { kind: "goto", url: `${app.url}/form`, duration_ms: 1200 }],
+      },
+      { name: "entry", url: `${app.url}/spa`, actions: [{ kind: "wait", duration_ms: 400 }] },
+    ]);
+    expect(navs.map((e) => e.kind)).toEqual(["document"]);
+    const scene2 = res.eventLog.events.filter((e) => e.type === "scene")[1]!;
+    expect(navs[0]!.t).toBeLessThan(scene2.t);
+  }, 60_000);
+
+  it("stamps a page change at the first frame that shows it, not at commit", async () => {
+    // /slow-paint commits on its first bytes but paints 700ms later: until
+    // then the screencast still shows the old page
+    const { navs, res } = await navigationsOf(
+      [{ name: "slow", url: `${app.url}/slow-from`, actions: [click("#go", 2500)], hold_ms: 400 }],
+      true,
+    );
+    expect(navs).toHaveLength(1);
+    const nav = navs[0]!;
+    expect(nav.t - nav.observed_t!).toBeGreaterThanOrEqual(300);
+    const idx = readIndex(res.outDir);
+    const at = idx.findIndex((e) => e.t_source >= nav.t);
+    expect(at).toBeGreaterThan(0);
+    expect(idx[at]!.t_source).toBe(nav.t);
+    // the frame at the stamp is new; every frame between commit and stamp is
+    // the picture the page showed before the commit
+    const before = idx.filter((e) => e.t_source < nav.observed_t!).at(-1)!;
+    expect(idx[at]!.file).not.toBe(before.file);
+    for (const e of idx.filter((x) => x.t_source >= nav.observed_t! && x.t_source < nav.t)) {
+      expect(e.file).toBe(before.file);
     }
   }, 60_000);
 });

@@ -33,7 +33,13 @@ import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
-import { installRequestGate, settleGatedRedirect, type GatedContext } from "../security/browser-gate.js";
+import { NavigationLog } from "./navigation.js";
+import {
+  GATED_REDIRECT_HEADER,
+  installRequestGate,
+  settleGatedRedirect,
+  type GatedContext,
+} from "../security/browser-gate.js";
 import {
   assertSafeNavigationUrl,
   createRequestGate,
@@ -233,6 +239,26 @@ function sameUrl(a: string, b: string): boolean {
   }
 }
 
+function stripFragment(u: string): string {
+  try {
+    const url = new URL(u);
+    url.hash = "";
+    return url.href;
+  } catch {
+    return u;
+  }
+}
+
+/** origin + path: what an SPA route change changes (query and hash do not) */
+function pathOf(u: string): string {
+  try {
+    const url = new URL(u);
+    return url.origin + url.pathname;
+  } catch {
+    return u;
+  }
+}
+
 // Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
 // from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
 // 10s budget blew on a page whose `load` only fired at ~12s, even though the DOM
@@ -351,22 +377,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     }
   }
 
-  /** true while the recipe itself navigates (entry / goto): those page changes
-   *  are scene structure, not action results, and are not logged */
-  let recipeNavInFlight = false;
   /** capture timeline started (events may be stamped) */
   let capturing = false;
-  /** an action-triggered main-frame navigation request is in flight */
-  let actionNavPending = false;
-  async function recipeNavigation<T>(go: () => Promise<T>): Promise<T> {
-    recipeNavInFlight = true;
-    try {
-      return await go();
-    } finally {
-      recipeNavInFlight = false;
-      actionNavPending = false;
-    }
-  }
 
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
@@ -380,6 +392,22 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
    *  of a few ms must never produce an out-of-order timeline */
   let lastStampT = 0;
   const stamp = (t: number): number => (lastStampT = Math.max(lastStampT, t));
+
+  /** guard ON: URLs (fragment stripped) the request gate answered with its
+   *  redirect stub; the stub and the document replacing it are one change */
+  const gatedStubs = new Set<string>();
+  /**
+   * Every page change while filming is logged: a scene entry as its `scene`
+   * event (its whole window, settle included, is suppressed below), anything
+   * else (a clicked link, a submit, a goto, a page redirecting itself, an
+   * SPA route change) as a `navigation` event.
+   */
+  const navLog = new NavigationLog({
+    events,
+    stamp,
+    raiseFloor: (t) => { lastStampT = Math.max(lastStampT, t); },
+    isGatedStub: (url) => gatedStubs.has(stripFragment(url)),
+  });
 
   async function moveCursor(points: CursorPoint[], baseT: number): Promise<void> {
     const t0 = Date.now();
@@ -538,7 +566,9 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
-        const response = await recipeNavigation(() => gotoReady(page, a.url!));
+        // a mid-scene goto is filmed (no frame suppression), so its commit is
+        // logged as a navigation like any other page change
+        const response = await gotoReady(page, a.url);
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
@@ -689,19 +719,34 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);
 
-    // log page changes an ACTION caused (a clicked link, a form submit): a
-    // cross-document navigation request from the main frame that the recipe
-    // did not issue itself, stamped when the new document commits
-    page.on("request", (req) => {
-      if (capturing && !recipeNavInFlight && req.isNavigationRequest() && req.frame() === page.mainFrame()) {
-        actionNavPending = true;
-      }
+    // page changes come from the browser's own commit events, which say
+    // whether a new document committed (Page.frameNavigated) or the URL
+    // changed within the document (Page.navigatedWithinDocument). A request
+    // that never commits (204, download, abort) produces neither, so it can
+    // leave nothing behind. A scene entry is suppressed for its whole window:
+    // its `scene` event is the page change.
+    if (!allowPrivateNetwork) {
+      page.on("response", (res) => {
+        if (res.headers()[GATED_REDIRECT_HEADER] !== undefined) gatedStubs.add(stripFragment(res.url()));
+      });
+    }
+    await cdp.send("Page.enable");
+    let mainFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
+    let mainUrl = "";
+    const logging = () => capturing && !isNavigating;
+    cdp.on("Page.frameNavigated", ({ frame }) => {
+      if (frame.parentId) return;
+      mainFrameId = frame.id;
+      mainUrl = frame.url;
+      if (logging()) navLog.commit("document", observedNow(), frame.url);
     });
-    page.on("framenavigated", (frame) => {
-      if (frame !== page.mainFrame() || !actionNavPending || recipeNavInFlight) return;
-      actionNavPending = false;
-      const now = observedNow();
-      events.push({ t: stamp(now), observed_t: now, type: "navigation" });
+    cdp.on("Page.navigatedWithinDocument", ({ frameId, url }) => {
+      if (frameId !== mainFrameId) return;
+      const from = mainUrl;
+      mainUrl = url;
+      // a hash jump or a query-only pushState (a filter, a tab) is the same
+      // page; only a new path is a route change
+      if (logging() && pathOf(from) !== pathOf(url)) navLog.commit("spa", observedNow(), url);
     });
 
     if (captureFrames) {
@@ -744,6 +789,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           // the first-processed frame; a negative t_source would sort to
           // entry 0 and fail render-plan validation
           frameIndex.push({ file, t_source: Math.max(0, stampMs - firstFrameStamp) });
+          if (wallStart > 0) navLog.frame(stampMs - wallStart, hash);
         } catch {
           writeErrors++;
         } finally {
@@ -832,12 +878,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           if (!alreadyThere) {
             // suppress capture across the reload so the blank page never lands in
             // the footage (the scene-change flash); resume once it has painted.
+            // The same window suppresses navigation logging: every commit in it
+            // is this scene's entry, which its `scene` event already marks.
             // MUST reset in finally: if gotoReady/assert throws, leaving this true
             // would make the screencast handler drop EVERY subsequent frame and
             // freeze the rest of the video on the previous scene.
             isNavigating = true;
             try {
-              const response = await recipeNavigation(() => gotoReady(page, scene.entry.url));
+              const response = await gotoReady(page, scene.entry.url);
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
               await sleep(SETTLE_MS);
             } finally {

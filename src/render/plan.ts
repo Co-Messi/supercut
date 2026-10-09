@@ -436,10 +436,13 @@ export function boundaryBetween(boundaries: Boundary[], a: number, b: number): b
 }
 
 /** the latest end a shot starting at `start` may have: its zoom-out must be
- *  complete by the next page change */
+ *  complete by every later page change. Boundaries are sorted by `in`, but a
+ *  same-URL scene's `out` sits ZOOM_OUT_MS before its marker, so a later
+ *  boundary can demand the earlier zoom-out: take the minimum `out`. */
 export function endLimit(boundaries: Boundary[], start: number): number {
-  for (const x of boundaries) if (x.in > start) return x.out;
-  return Infinity;
+  let limit = Infinity;
+  for (const x of boundaries) if (x.in > start) limit = Math.min(limit, x.out);
+  return limit;
 }
 
 /** why a beat got no punch-in (render-report.json) */

@@ -86,6 +86,19 @@ describe("phase 1: page boundaries", () => {
     expect(endLimit(bs, 1500)).toBe(2200);
     expect(endLimit(bs, 3500)).toBe(Infinity);
   });
+
+  it("endLimit honours the earliest required zoom-out, not the earliest new page", () => {
+    // a gapless navigation at 1500 and a same-URL scene marker at 2000 whose
+    // zoom-out must be complete by 1200: sorted by `in`, the navigation comes
+    // first, but a shot starting at 1000 must still be wide by 1200
+    const bs: Boundary[] = [
+      { out: 1500, in: 1500, snap: true, source: "navigation", at: 1500 },
+      { out: 1200, in: 2000, snap: false, source: "scene-same-url", at: 2000 },
+    ];
+    expect(endLimit(bs, 1000)).toBe(1200);
+    expect(endLimit(bs, 1600)).toBe(1200);
+    expect(endLimit(bs, 2000)).toBe(Infinity);
+  });
 });
 
 describe("phase 2: beats and punches", () => {

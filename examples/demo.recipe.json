@@ -1,12 +1,12 @@
 {
   "version": 0,
-  "app_url": "http://127.0.0.1:4173",
+  "app_url": "http://127.0.0.1:4319",
   "music_track": "daybreak",
   "scenes": [
     {
       "name": "the-pitch-and-signup",
       "priority": 1,
-      "entry": { "url": "http://127.0.0.1:4173/", "prelude": [] },
+      "entry": { "url": "http://127.0.0.1:4319/", "prelude": [] },
       "depends_on": [],
       "actions": [
         { "kind": "click", "selector": "#cta", "duration_ms": 1400 },
@@ -18,7 +18,7 @@
     {
       "name": "the-live-product",
       "priority": 2,
-      "entry": { "url": "http://127.0.0.1:4173/dash/", "prelude": [] },
+      "entry": { "url": "http://127.0.0.1:4319/dash/", "prelude": [] },
       "depends_on": [],
       "actions": [
         { "kind": "hover", "selector": "#task-ship", "focus_selector": "#tasks", "duration_ms": 1600 }

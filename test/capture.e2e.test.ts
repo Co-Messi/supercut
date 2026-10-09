@@ -328,11 +328,19 @@ describe("page changes", () => {
     expect(at).toBeGreaterThan(0);
     expect(idx[at]!.t_source).toBe(nav.t);
     // the frame at the stamp is new; every frame between commit and stamp is
-    // the picture the page showed before the commit
+    // the picture the page showed before the commit. Pictures are compared by
+    // their bytes: a file name only says the frame differed from the one
+    // written just before it, so the same picture can sit in two files
+    const picture = (file: string) => readFileSync(join(res.outDir, file)).toString("base64");
     const before = idx.filter((e) => e.t_source < nav.observed_t!).at(-1)!;
-    expect(idx[at]!.file).not.toBe(before.file);
+    const around = idx
+      .filter((e) => e.t_source >= nav.observed_t! - 300 && e.t_source <= nav.t + 100)
+      .map((e) => `${e.t_source.toFixed(1)} ${e.file}`)
+      .join(", ");
+    const why = `commit ${nav.observed_t!.toFixed(1)}, stamp ${nav.t.toFixed(1)}; frames ${around}`;
+    expect(picture(idx[at]!.file), why).not.toBe(picture(before.file));
     for (const e of idx.filter((x) => x.t_source >= nav.observed_t! && x.t_source < nav.t)) {
-      expect(e.file).toBe(before.file);
+      expect(picture(e.file) === picture(before.file), `${e.t_source.toFixed(1)} ${e.file}: ${why}`).toBe(true);
     }
   }, 60_000);
 });

@@ -3,14 +3,15 @@
  *
  *   takeDir (frames/ + events.json + frames-index.json)
  *      │
- *      ├─ buildRenderPlan (pure TS — plan.ts)
+ *      ├─ gates: partial take, capture health, clock skew
+ *      ├─ planTake (pure TS — plan.ts) → render-report.json beside the output
  *      ├─ localhost server: host page + take files, receives encoded stream
  *      ├─ full Chromium (channel "chromium"): draws plan, encodes H.264 annexb
  *      └─ ffmpeg as MUXER ONLY (-c copy) → final .mp4
  */
 import { execFile } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
@@ -18,10 +19,20 @@ import { pipeline } from "node:stream/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { chromium } from "playwright";
-import { parseEventLog, type EventLog } from "../schema/index.js";
-import { buildRenderPlan, FADE_IN_MS, FADE_OUT_MS, type FrameIndexEntry } from "./plan.js";
+import { chromium, type Browser } from "playwright";
+import { MAX_BUDGET_MS, parseEventLog, type EventLog } from "../schema/index.js";
+import { FADE_IN_MS, FADE_OUT_MS, planTake, type FrameIndexEntry } from "./plan.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
+import {
+  accumulatorLine,
+  bitrateLine,
+  buildRenderReport,
+  overLimitWarning,
+  parseAccumulatorLine,
+  planSummaryLine,
+  type AccumulatorInfo,
+  type RenderReport,
+} from "./report.js";
 
 const exec = promisify(execFile);
 
@@ -45,17 +56,34 @@ export interface RenderOptions {
   /** ms; when unset, sized from the plan's frame count (≥5 min floor) so a
    *  long take's legitimately slow encode isn't killed by a flat ceiling */
   timeoutMs?: number;
+  /** starts the render browser; defaults to full Chromium. A seam for tests
+   *  and embedders (a custom executable, a remote browser). */
+  launchBrowser?: () => Promise<Browser>;
+  /** render a take whose events.json lists failed scenes (partial footage).
+   *  Off by default; SUPERCUT_ALLOW_PARTIAL=1 opts in from the CLI. */
+  allowPartial?: boolean;
+  /** "8bit" forces the motion-blur accumulator's 8-bit fallback (diagnostics
+   *  and tests); "auto" (the default) uses float16 where the browser has it */
+  accumulator?: "auto" | "8bit";
 }
 
 export interface RenderResult {
   outFile: string;
   frames: number;
+  /** output length in ms (frames at the plan fps) */
+  durationMs: number;
   encodedBytes: number;
   wallMs: number;
   /** measured bits/second of the encoded stream (encodedBytes over plan duration) */
   deliveredBitrate: number;
   /** resolved audio track muxed under the video, or null for a silent cut */
   music: string | null;
+  /** the motion-blur accumulator the host page used */
+  accumulator: AccumulatorInfo | null;
+  /** render-report.json beside the output */
+  reportFile: string;
+  /** "framed 5 of 6 beats; 1 page change (1 scene-reload)" */
+  summary: string;
 }
 
 /**
@@ -131,6 +159,25 @@ export function frameMimeType(name: string): string {
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".webp")) return "image/webp";
   return "application/octet-stream";
+}
+
+/** the one command that fixes a missing render browser */
+const CHROMIUM_INSTALL_HINT = "run: npx playwright install chromium";
+
+/**
+ * A browser launch failure as a one-line, actionable error. Playwright's own
+ * message for a missing executable is a multi-line banner; its first line
+ * names the cause, the hint names the fix. Other launch failures (sandbox,
+ * permissions) keep their cause and get the hint as a possibility only.
+ */
+export function launchFailure(err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  const first = msg.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "unknown error";
+  const missing = /executable doesn't exist|no such file|ENOENT|playwright install/i.test(msg);
+  const hint = missing
+    ? `Chromium for rendering is not installed; ${CHROMIUM_INSTALL_HINT}`
+    : `if Chromium for rendering is not installed, ${CHROMIUM_INSTALL_HINT}`;
+  return new Error(`render: could not launch Chromium (${first}). ${hint}`);
 }
 
 /** gentle loudness normalization + edge fades (skipped on clips too short to
@@ -241,13 +288,12 @@ export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]
   let maxEventT = 0;
   for (const e of log.events) {
     maxEventT = Math.max(maxEventT, e.t);
-    // (review) a cursor_path container is stamped t=0 while its POINTS carry
-    // the real timeline — and buildRenderPlan extends the output to the final
-    // point. Judging duration off container `t` alone let a take whose only
-    // late timestamps are cursor points read as "under two seconds", skip the
-    // ratio gate, and render exactly the held-stills slideshow this gate
-    // exists to refuse. Points are schema-validated monotonic, so the last
-    // one is the segment's max.
+    // a cursor_path container is stamped t=0 while its POINTS carry the real
+    // timeline, and buildRenderPlan extends the output to the final point.
+    // Judged off container `t` alone, a take whose only late timestamps are
+    // cursor points would read as "under two seconds", skip the ratio gate
+    // and render the held-stills slideshow this gate exists to refuse.
+    // Points are schema-validated monotonic, so the last is the maximum.
     if (e.type === "cursor_path" && e.points.length > 0) {
       maxEventT = Math.max(maxEventT, e.points[e.points.length - 1]![0]);
     }
@@ -303,11 +349,25 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
   const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
 
+  // Partial-take gate: the recorder lists the scenes it failed to perform.
+  // Rendering such a take silently ships a video missing those beats.
+  if (log.failed_scenes && log.failed_scenes.length > 0) {
+    const names = log.failed_scenes.map((n) => JSON.stringify(n)).join(", ");
+    const what = `the take is partial: scene(s) ${names} failed during capture, so the video would skip them`;
+    if (opts.allowPartial || process.env.SUPERCUT_ALLOW_PARTIAL === "1") {
+      console.error(`[render] WARNING: ${what} (continuing: SUPERCUT_ALLOW_PARTIAL=1)`);
+    } else {
+      throw new Error(
+        `render: ${what}. Re-record the take, or set SUPERCUT_ALLOW_PARTIAL=1 to render the scenes that were filmed.`,
+      );
+    }
+  }
+
   // Capture-health gate: refuse a take whose footage can't carry its own
   // timeline. Printed regardless of outcome so the one diagnostic that reveals
   // a starved capture — average source fps — is always on the record.
+  const health = assessCaptureHealth(log, frameIndex);
   {
-    const health = assessCaptureHealth(log, frameIndex);
     console.error(
       `[render] capture health: ${health.frames} frames over ${(health.durationMs / 1000).toFixed(1)}s ` +
         `(avg ${health.avgSourceFps.toFixed(1)} fps source)`,
@@ -328,11 +388,12 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   // --music: resolved + validated here, before the plan and the browser — a
   // missing track must fail in milliseconds, not after a full encode
   const musicPath = resolveMusicTrack(opts.music);
-  const plan = buildRenderPlan(log, frameIndex, {
+  const { plan, diagnostics } = planTake(log, frameIndex, {
     background: bgIsImage
       ? { kind: "image", base: "#101010", blobs: [], light: true, vignette: 0.16 }
       : bgSpec,
   });
+  const durationMs = (plan.frames * 1000) / plan.fps;
 
   const planJson = JSON.stringify(plan);
 
@@ -358,12 +419,38 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     }
   }
 
+  // The take passed every gate: say what the plan does with it, and put the
+  // decisions on disk before the encode so a failed render still leaves them.
+  // The 60s limit is checked on the MEASURED video. It is a warning, never a
+  // trim: cutting the tail would end mid zoom-out or cut a payoff's dwell.
+  console.error(planSummaryLine(diagnostics));
+  const overLimit = overLimitWarning(durationMs, MAX_BUDGET_MS);
+  if (overLimit) console.error(overLimit);
+  const reportFile = join(dirname(outFile), "render-report.json");
+  const report: RenderReport = buildRenderReport({
+    takeDir,
+    outFile,
+    diagnostics,
+    frames: plan.frames,
+    fps: plan.fps,
+    limitMs: MAX_BUDGET_MS,
+    source: { frames: frameIndex.length, avgFps: health.avgSourceFps, failedScenes: log.failed_scenes ?? [] },
+  });
+  const writeReport = (patch: Partial<RenderReport>): void => {
+    Object.assign(report, patch);
+    try {
+      writeFileSync(reportFile, JSON.stringify(report, null, 2) + "\n");
+    } catch (err) {
+      // the report is diagnostics: never let it fail (or mask) a render
+      console.error(`[render] could not write ${reportFile}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  writeReport({});
+
   const token = randomBytes(16).toString("hex");
-  // B2 (review): write the raw annexb H.264 to a temp path OUTSIDE the take dir.
-  // Writing into takeDir mutated a read-only input and left a stale/partial
-  // `encoded.h264` behind on failure. The temp file is unlinked in `finally`
-  // below so it is removed on BOTH success and failure; the take dir stays
-  // read-only.
+  // the raw annexb H.264 goes to a temp path OUTSIDE the take dir: the take
+  // is a read-only input, and a partial stream must never be left beside it.
+  // The finally below unlinks it on success and on failure.
   const rawPath = join(tmpdir(), `supercut-${token}.h264`);
   let encodedBytes = 0;
   let resultReady = false;
@@ -391,10 +478,9 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       return false;
     };
     if (url === "/" || url === "/host.html") {
-      // B1 (review): the host page is token-gated like every other route. Our
-      // own browser navigates to `/?t=${token}` (below), so the token is present
-      // on the legitimate request; serving HOST_PAGE unauthenticated let any
-      // local process pull the render harness page during a run.
+      // the host page is token-gated like every other route: our own browser
+      // navigates to `/?t=${token}`, and no other local process may pull the
+      // render harness page during a run
       if (!requireToken()) return;
       res.writeHead(200, { "content-type": "text/html" });
       res.end(HOST_PAGE);
@@ -423,10 +509,9 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       // only OUR page may deliver the result (token minted per render),
       // and a runaway encoder can't OOM Node (size cap)
       if (!requireToken()) return;
-      // B3 (review): coarse OOM backstop — a runaway/looping encoder can't grow
-      // the result stream past this and exhaust Node's memory while we buffer it
-      // to disk. Pairs with the in-page MAX_ENCODED_BYTES cap and the lowered
-      // default bitrate.
+      // coarse OOM backstop: a runaway or looping encoder can't grow the
+      // result stream past this while it streams to disk. Pairs with the
+      // in-page MAX_ENCODED_BYTES cap and the ENCODER_BITRATE ceiling.
       const MAX_RESULT_BYTES = 1.5e9;
       let received = 0;
       const sizeLimiter = new Transform({
@@ -462,28 +547,39 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const port = (server.address() as { port: number }).port;
 
   // Full Chromium: the stripped headless shell has no WebCodecs.
-  const browser = await chromium.launch({ headless: true, channel: "chromium" });
-  // (review) the watchdog timeout and the fatal-poll loop below are REFERENCED
-  // timers: left running after the encode settles, they keep the event loop
-  // alive. The CLI exits via process.exitCode (never process.exit(), which can
-  // truncate piped stdout), so a surviving multi-minute watchdog made a
-  // successful `supercut render` print its result and then appear to hang
-  // until the timer fired. Track both here and stop them in the finally that
-  // already owns teardown, so every exit path — success, timeout, in-page
-  // FATAL, result-stream failure — leaves no timer behind.
+  const launch = opts.launchBrowser ?? (() => chromium.launch({ headless: true, channel: "chromium" }));
+  let browser: Browser | undefined;
+  // The CLI exits via process.exitCode (never process.exit(), which can
+  // truncate piped stdout), so anything still holding the event loop after
+  // the render settles keeps the process alive: the listening server, the
+  // watchdog timeout and the fatal-poll loop below. The inner finally owns
+  // all three, and everything from the browser launch on runs inside it, so
+  // every exit path (launch failure, success, timeout, in-page FATAL,
+  // result-stream failure) releases them.
   let watchdog: NodeJS.Timeout | undefined;
   let raceSettled = false;
-  // B2 (review): outer try wraps the encode + mux so the temp raw file is
-  // unlinked on EVERY exit path — render timeout, in-page FATAL, "no encoded
-  // output", or an ffmpeg mux failure all flow through the finally below.
+  let accumulator: AccumulatorInfo | null = null;
+  // the outer try wraps the encode + mux so the temp raw file is unlinked on
+  // every exit path, including an ffmpeg mux failure
   try {
     try {
+      try {
+        browser = await launch();
+      } catch (err) {
+        throw launchFailure(err);
+      }
       const page = await browser.newPage();
       let fatal: string | null = null;
       page.on("console", (msg) => {
         const text = msg.text();
         if (text.startsWith("[render]")) {
-          if (text.includes("FATAL")) fatal = text;
+          const acc = parseAccumulatorLine(text);
+          if (acc) {
+            // the 8-bit fallback changes the picture: it belongs in the CLI
+            // log, not only in the headless page's console
+            accumulator = acc;
+            console.error(accumulatorLine(acc));
+          } else if (text.includes("FATAL")) fatal = text;
           else if (process.env.SUPERCUT_VERBOSE) console.log(text);
         }
       });
@@ -496,7 +592,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
       page.on("pageerror", (err) => {
         if (!fatal) fatal = `[render] FATAL: uncaught in-page error: ${err.message}`;
       });
-      await page.goto(`http://127.0.0.1:${port}/?t=${token}`);
+      await page.goto(`http://127.0.0.1:${port}/?t=${token}${opts.accumulator === "8bit" ? "&accum=8bit" : ""}`);
 
       await Promise.race([
         resultReceived,
@@ -518,14 +614,14 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         })(),
       ]);
     } finally {
-      // stop the watchdog + poll loop FIRST (see the declaration above): the
-      // race has settled, and any timer that survives this block outlives the
-      // render and blocks natural process exit.
+      // stop the watchdog + poll loop first: any timer that survives this
+      // block outlives the render and blocks natural process exit
       raceSettled = true;
       clearTimeout(watchdog);
-      // guard close: if browser.close() throws, server.close() must still run,
-      // else the loopback render server leaks the port until process exit.
-      await browser.close().catch(() => {});
+      // a failing browser.close() must not skip server.close(), or the
+      // loopback render server holds its port until process exit
+      await browser?.close().catch(() => {});
+      server.closeAllConnections();
       await new Promise<void>((r) => server.close(() => r()));
     }
 
@@ -561,34 +657,44 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     await exec("ffmpeg", muxArgs, { timeout: MUX_TIMEOUT_MS, maxBuffer: MUX_MAX_BUFFER });
     if (musicPath) console.error(`[render] music: ${musicPath}`);
 
-    // trust, then verify: the encoder is ASKED for CBR at ENCODER_BITRATE, but
-    // WebCodecs implementations may deliver far less. Healthy encoders undershoot
-    // on low-motion screen content (static frames simply need few bits), so only
-    // severe starvation — the regime where text goes mushy — earns a warning.
+    // the encoder is asked for ENCODER_BITRATE, which WebCodecs treats as a
+    // ceiling: screen content that barely changes (a static page, a held
+    // shot) needs few bits and legitimately encodes far below it. Without a
+    // content measure the delivered rate cannot tell starvation from a calm
+    // video, so it is reported as information, never as a warning.
     const durationS = plan.frames / plan.fps;
     const deliveredBitrate = Math.round((encodedBytes * 8) / durationS);
-    console.error(
-      `[render] delivered bitrate ${(deliveredBitrate / 1e6).toFixed(2)} Mbps ` +
-        `(configured ${(ENCODER_BITRATE / 1e6).toFixed(0)} Mbps CBR, ${durationS.toFixed(1)}s)`,
-    );
-    if (deliveredBitrate < ENCODER_BITRATE * 0.25) {
-      console.error(
-        `[render] WARNING: delivered bitrate is below 25% of the configured target — ` +
-          `the encoder is starving the stream; text/detail quality may suffer`,
-      );
-    }
+    console.error(bitrateLine(deliveredBitrate, ENCODER_BITRATE, durationS));
+
+    writeReport({
+      status: "rendered",
+      accumulator,
+      encode: {
+        bytes: encodedBytes,
+        deliveredMbps: Math.round(deliveredBitrate / 1e4) / 100,
+        ceilingMbps: ENCODER_BITRATE / 1e6,
+      },
+    });
+    console.error(`[render] report: ${reportFile}`);
 
     return {
       outFile,
       frames: plan.frames,
+      durationMs,
       encodedBytes,
       wallMs: Date.now() - t0,
       deliveredBitrate,
       music: musicPath,
+      accumulator,
+      reportFile,
+      summary: report.summary,
     };
+  } catch (err) {
+    writeReport({ status: "failed", error: err instanceof Error ? err.message : String(err), accumulator });
+    throw err;
   } finally {
-    // B2 (review): always remove the temp raw stream — success or failure.
-    // Guarded so cleanup never masks the real error (e.g. file already gone).
+    // always remove the temp raw stream, on success or failure; guarded so
+    // cleanup never masks the real error (the file may never have been written)
     try {
       unlinkSync(rawPath);
     } catch {
@@ -597,5 +703,6 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   }
 }
 
-export { buildRenderPlan, defaultLayout, SUBFRAMES } from "./plan.js";
-export type { RenderPlan, Layout, FrameIndexEntry } from "./plan.js";
+export { buildRenderPlan, defaultLayout, planTake, SUBFRAMES } from "./plan.js";
+export type { RenderPlan, Layout, FrameIndexEntry, PlanDiagnostics } from "./plan.js";
+export type { AccumulatorInfo, RenderReport } from "./report.js";

@@ -6,17 +6,19 @@
  *   - the camera is wide (z ≤ 1.05) at every scene marker and at the first
  *     frame of a new page after a navigation gap — never a zoomed stale page
  *   - each scene opens with ≥ 700ms of continuous wide rest (z ≤ 1.02)
- *   - a punch-in reaches ≥ 90% of its zoom by the click (or is skipped)
+ *   - a punch-in reaches ≥ 90% of its zoom by its click, type or hover (or
+ *     is skipped), and never starts rising only after the event
+ *   - the on-screen pan stays under 48px per frame outside cuts
  *   - the take ends at rest: |Δz| < 1e-4 per frame over the final 300ms
- *   - < 5% of output frames blend two different source frames (every
- *     adjacent pair differs in these fixtures, so any blend is a ghost)
+ *
+ * Plan-level only: pixels are checked by test/render-pixels.e2e.test.ts.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildRenderPlan, type FrameIndexEntry } from "../src/render/plan.js";
 import { parseEventLog, type EventLog } from "../src/schema/index.js";
-import { motionMetrics, numberFrames, sourceFrames, type MotionMetrics } from "./helpers/motion-metrics.js";
+import { motionMetrics, navGaps, numberFrames, sourceFrames, type MotionMetrics } from "./helpers/motion-metrics.js";
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
 
@@ -72,14 +74,46 @@ function syntheticTake(intervalMs: number): { log: EventLog; index: FrameIndexEn
   return { log, index };
 }
 
-/** the real demo-recipe take recorded on main @ 013d6b8 (events + frame
- *  index only — the frames themselves are not needed to score the plan) */
-function demoTake(): { log: EventLog; index: FrameIndexEntry[] } {
-  const dir = join(import.meta.dirname, "fixtures", "takes", "demo-main");
+/** a recorded take's events + frame index (the frames themselves are not
+ *  needed to score the plan) */
+function recordedTake(name: string): { log: EventLog; index: FrameIndexEntry[] } {
+  const dir = join(import.meta.dirname, "fixtures", "takes", name);
   return {
     log: parseEventLog(JSON.parse(readFileSync(join(dir, "events.json"), "utf8"))),
     index: JSON.parse(readFileSync(join(dir, "frames-index.json"), "utf8")) as FrameIndexEntry[],
   };
+}
+
+/** a heavy app on a navigation-logged take: the click that runs the query
+ *  blocks the main thread for 600ms (no frames: the screencast follows rAF),
+ *  then a nav link navigates and its load leaves a 400ms gap. Only the
+ *  logged navigation is a page change; the stall must keep the payoff punch. */
+function stallTake(): { log: EventLog; index: FrameIndexEntry[] } {
+  const index = numberFrames([
+    ...sourceFrames(0, 3000, 16.7, 21),
+    ...sourceFrames(3600, 6400, 16.7, 22),
+    ...sourceFrames(6800, 10000, 16.7, 23),
+  ]);
+  const log: EventLog = {
+    version: 0,
+    t_source_unified: true,
+    navigation_logged: true,
+    viewport,
+    fps: 60,
+    events: [
+      { t: 0, type: "scene", name: "s1", priority: 1 },
+      { t: 1600, type: "hover", bbox: [880, 500, 120, 40], selector: "#run" },
+      {
+        t: 3000, type: "click", bbox: [880, 500, 120, 40], selector: "#run", point: [940, 520],
+        focus_bbox: [400, 300, 1100, 500], focus_source: "llm",
+      },
+      { t: 6200, type: "click", bbox: [1600, 40, 120, 30], selector: "#nav", point: [1660, 55] },
+      { t: 6350, type: "navigation" },
+      { t: 8400, type: "click", bbox: [300, 700, 150, 40], selector: "#c", point: [375, 720] },
+      { t: 0, type: "cursor_path", points: [[0, 960, 980], [1600, 940, 520], [6200, 1660, 55], [8400, 375, 720]] },
+    ],
+  };
+  return { log, index };
 }
 
 /** small targets hugging every edge and corner of the viewport: the punch
@@ -122,72 +156,96 @@ function heldPunchNavTake(): { log: EventLog; index: FrameIndexEntry[] } {
   };
 }
 
-type Check = "marker" | "navGap" | "wideRest" | "arrival" | "tail" | "blend" | "framing" | "snapBlur" | "lateRise";
-
-/**
- * Checks that still FAIL on the current code, per scenario. They run as
- * `it.fails` (green while the regression exists, red the moment it is fixed
- * without updating this table) — each fix commit removes its entries, so the
- * table shrinking to empty IS the before/after record.
- */
-const PENDING: Record<string, Check[]> = {
-  "synthetic multi-scene take @ ~39fps source": [],
-  "synthetic multi-scene take @ ~60fps source": [],
-  "real demo take (main @ 013d6b8)": [],
-  "edge and corner targets": [],
-  "punch held into a gapless click-navigation": [],
-};
-
 const scenarios: [string, () => { log: EventLog; index: FrameIndexEntry[] }][] = [
   ["synthetic multi-scene take @ ~39fps source", () => syntheticTake(25.6)],
   ["synthetic multi-scene take @ ~60fps source", () => syntheticTake(16.7)],
-  ["real demo take (main @ 013d6b8)", demoTake],
+  // PNG frames, ~53fps, no pre-roll: the pre-JPEG recorder (main @ 013d6b8)
+  ["recorded demo take, PNG capture path", () => recordedTake("demo-main")],
+  // the bundled demo recipe recorded through the JPEG capture path on a 120Hz
+  // display (1027 frames over 10.7s, a 425ms scene-entry reload gap, the
+  // 1s pre-roll); t_source rounded to the microsecond to keep it small
+  ["recorded demo take, JPEG capture path", () => recordedTake("demo-jpeg")],
   ["edge and corner targets", edgeTake],
   ["punch held into a gapless click-navigation", heldPunchNavTake],
+  ["same-page stall after a focused click (navigation-logged take)", stallTake],
 ];
 
-describe.each(scenarios)("motion quality: %s", (name, make) => {
+describe.each(scenarios)("motion quality: %s", (_name, make) => {
   const { log, index } = make();
-  const check = (c: Check) => (PENDING[name]?.includes(c) ? it.fails : it);
+  let memo: MotionMetrics | undefined;
+  const m = () => (memo ??= score(log, index));
 
-  check("marker")("camera is wide at every scene marker", () => {
-    expect(score(log, index).maxZAtSceneMarker).toBeLessThanOrEqual(1.05);
+  it("camera is wide at every scene marker", () => {
+    expect(m().maxZAtSceneMarker).toBeLessThanOrEqual(1.05);
   });
 
-  check("navGap")("camera is wide on the first frame of a new page after a navigation gap", () => {
-    expect(score(log, index).maxZAfterNavGap).toBeLessThanOrEqual(1.05);
+  it("camera is wide on the first frame of a new page after a navigation gap", () => {
+    expect(m().maxZAfterNavGap).toBeLessThanOrEqual(1.05);
   });
 
-  check("wideRest")("every scene opens with ≥ 700ms of continuous wide rest", () => {
-    expect(score(log, index).minWideRestMs).toBeGreaterThanOrEqual(700);
+  it("every scene opens with ≥ 700ms of continuous wide rest", () => {
+    expect(m().minWideRestMs).toBeGreaterThanOrEqual(700);
   });
 
-  check("arrival")("every punch-in reaches ≥ 90% of its zoom by the click (or is skipped)", () => {
-    expect(score(log, index).minClickArrival).toBeGreaterThanOrEqual(0.9);
+  it("every punch-in reaches ≥ 90% of its zoom by its click, type or hover (or is skipped)", () => {
+    expect(m().minClickArrival).toBeGreaterThanOrEqual(0.9);
+    expect(m().minTypeArrival).toBeGreaterThanOrEqual(0.9);
+    expect(m().minHoverArrival).toBeGreaterThanOrEqual(0.9);
   });
 
-  check("lateRise")("no punch starts at or after its click (the camera never chases the action)", () => {
-    expect(score(log, index).maxLateRise).toBeLessThan(0.035);
+  it("no punch starts at or after its event (the camera never chases the action)", () => {
+    expect(m().maxLateRise).toBeLessThan(0.035);
   });
 
-  check("tail")("the take ends at rest: |Δz| < 1e-4 per frame over the final 300ms", () => {
-    const m = score(log, index);
-    expect(m.tailMaxDzPerFrame).toBeLessThan(1e-4);
-    expect(m.finalZ).toBeLessThan(1.005);
+  it("the camera never whip-pans: under 48px of on-screen pan per frame outside cuts", () => {
+    // ordinary beats peak at 10 to 15px; the widest move the planner makes
+    // (a punch across the page from the far corner, edge scenario) peaks near
+    // 40px. A stiffer spring, or a snap leaking into the pan, breaks this.
+    expect(m().maxPanPxPerFrame).toBeLessThan(48);
   });
 
-  check("framing")("zoomed shots keep the window framed: no one-sided wallpaper, covered once z·content ≥ canvas, focus centred as far as the edges allow", () => {
-    const m = score(log, index);
-    expect(m.maxOneSidedWallpaperPx).toBeLessThanOrEqual(0.5);
-    expect(m.maxUncoveredWhileCoverablePx).toBeLessThanOrEqual(0.5);
-    expect(m.maxFocusCentringErrorPx).toBeLessThanOrEqual(1);
+  it("the take ends at rest: |Δz| < 1e-4 per frame over the final 300ms", () => {
+    expect(m().tailMaxDzPerFrame).toBeLessThan(1e-4);
+    expect(m().finalZ).toBeLessThan(1.005);
   });
 
-  check("snapBlur")("a camera snap at a page cut never motion-blurs one frame across the jump", () => {
-    expect(score(log, index).maxIntraFrameDz).toBeLessThan(0.02);
+  it("zoomed shots keep the window framed: no one-sided wallpaper, covered once z·content ≥ canvas, focus centred as far as the edges allow", () => {
+    expect(m().maxOneSidedWallpaperPx).toBeLessThanOrEqual(0.5);
+    expect(m().maxUncoveredWhileCoverablePx).toBeLessThanOrEqual(0.5);
+    expect(m().maxFocusCentringErrorPx).toBeLessThanOrEqual(1);
   });
 
-  check("blend")("< 5% of output frames blend two different source frames", () => {
-    expect(score(log, index).blendedShare).toBeLessThan(0.05);
+  it("a camera snap at a page cut never motion-blurs one frame across the jump", () => {
+    expect(m().maxIntraFrameDz).toBeLessThan(0.02);
+  });
+});
+
+describe("the stall scenario frames its payoff", () => {
+  it("the focused click's punch survives the 600ms stall", () => {
+    const { log, index } = stallTake();
+    const metrics = score(log, index);
+    // the hover arrives, then the payoff click: both punched and arrived
+    expect(metrics.hoverArrival).toHaveLength(1);
+    expect(metrics.hoverArrival[0]).not.toBeNull();
+    expect(metrics.clickArrival[0]).not.toBeNull();
+    expect(metrics.clickArrival[0]!).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("the grader agrees: on a navigation-logged take the stall is not a page change", () => {
+    const { log, index } = stallTake();
+    expect(navGaps(index, log).map((g) => Math.round(g.tA / 100) * 100)).toEqual([6400]);
+    // the same frames on a legacy take: the long stall reads as a page change
+    expect(navGaps(index, { ...log, navigation_logged: undefined }).length).toBe(2);
+  });
+
+  it("the grader anchors gaps only to scene markers after the first (as the planner does)", () => {
+    // a 300ms hiccup 1s into the take: the opening marker is the take head,
+    // not a page change, so this gap is no navigation
+    const idx = numberFrames([...sourceFrames(0, 1000, 16.7, 31), ...sourceFrames(1300, 5000, 16.7, 32)]);
+    const log: EventLog = {
+      version: 0, t_source_unified: true, viewport, fps: 60,
+      events: [{ t: 500, type: "scene", name: "s1", priority: 1 }],
+    };
+    expect(navGaps(idx, log)).toEqual([]);
   });
 });

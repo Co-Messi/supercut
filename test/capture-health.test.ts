@@ -6,12 +6,12 @@ import { assessCaptureHealth, renderTake } from "../src/render/index.js";
 import type { EventLog } from "../src/schema/index.js";
 
 /**
- * H1: the deterministic capture-health gate. A capture that starved (repaint
+ * The deterministic capture-health gate. A capture that starved (repaint
  * beacon dead, page never committing frames) produces a clean event timeline
- * over almost no footage; rendering it yields a slideshow that used to ship
- * with a green run. The gate must refuse it — and must NOT fire on healthy or
- * merely-throttled captures, because a gate that fires on everything is as
- * broken as one that fires on nothing.
+ * over almost no footage; rendering it yields a slideshow with a green run.
+ * The gate must refuse it — and must NOT fire on healthy or merely-throttled
+ * captures, because a gate that fires on everything is as broken as one that
+ * fires on nothing.
  */
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
@@ -53,7 +53,7 @@ describe("assessCaptureHealth", () => {
     expect(assessCaptureHealth(log, idx).action).toBe("ok");
   });
 
-  it("catches a single-frame take with a long event timeline (spanMs=0 was the old blind spot)", () => {
+  it("catches a single-frame take with a long event timeline (a zero frame span)", () => {
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 30_000, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },
@@ -102,7 +102,7 @@ describe("assessCaptureHealth", () => {
     expect(assessCaptureHealth(log, idx).action).toBe("ok");
   });
 
-  it("refuses a front-loaded take: 8s of healthy frames, then 32s of nothing (M-new-3)", () => {
+  it("refuses a front-loaded take: 8s of healthy frames, then 32s of nothing", () => {
     // 480 frames = exactly 0.2 × 2400, so the ratio gate alone passes it;
     // the video would be 32 seconds of a still with a gliding camera
     const log = makeLog([
@@ -128,7 +128,7 @@ describe("assessCaptureHealth", () => {
     expect(assessCaptureHealth(log, [...before, ...after]).action).toBe("ok");
   });
 
-  it("refuses a frames index with a NaN or missing t_source instead of reading it as healthy (M-new-3)", () => {
+  it("refuses a frames index with a NaN or missing t_source instead of reading it as healthy", () => {
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 9_000, type: "click", bbox: [10, 10, 50, 20], selector: "#x", point: [20, 20] },

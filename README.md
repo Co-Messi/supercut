@@ -99,7 +99,7 @@ Each stage hands off a plain JSON artifact, so you can stop at any point, hand-e
 | supercut | Yes | No | `generate`: yes. Agent skill path: no | Yes (MIT) |
 | Screen Studio | Yes (screen recording) | Yes | No | No |
 | openscreen | Yes (screen recording) | Yes | No | Yes (MIT) |
-| agentic-product-demo | No (rebuilds the UI as code in Remotion) | No (your coding agent writes it) | No separate key (runs inside your coding agent) | Yes |
+| agentic-product-demo | No (rebuilds the UI as code in Remotion) | No (your coding agent writes it) | No separate key (runs inside your coding agent) | Kit is MIT; depends on Remotion, which needs a paid license for companies over 3 people |
 
 Based on each project's public description at the time of writing. Check them before you decide, they change.
 

@@ -445,6 +445,20 @@ export function endLimit(boundaries: Boundary[], start: number): number {
   return limit;
 }
 
+/** a focus_bbox narrower or shorter than this (CSS px) names no result
+ *  region: fit-zooming it would punch the maximum zoom into a sliver */
+export const MIN_FOCUS_SIDE_PX = 8;
+
+/** the result region a beat frames, or undefined when it has none or the one
+ *  it names is degenerate (zero-area or a sliver). The punch and the take
+ *  duration both read the dwell from this, so they always agree. */
+export function effectiveFocus(e: { focus_bbox?: [number, number, number, number] | undefined }): [number, number, number, number] | undefined {
+  const box = e.focus_bbox;
+  if (!box) return undefined;
+  const [, , w, h] = box;
+  return w >= MIN_FOCUS_SIDE_PX && h >= MIN_FOCUS_SIDE_PX ? box : undefined;
+}
+
 /** why a beat got no punch-in (render-report.json) */
 export type SkipReason =
   /** the framed region is so large that fitting it needs no zoom */
@@ -492,7 +506,7 @@ export function planPunches(
     if (e.type !== "click" && e.type !== "hover" && e.type !== "type") continue;
     // prefer the result region (focus_bbox) when the action named one: the
     // camera holds on the payoff (graph/results), not the input that made it
-    const focusBox = e.focus_bbox;
+    const focusBox = effectiveFocus(e);
     const [bx, by, bw, bh] = focusBox ?? e.bbox;
     const beat: BeatDecision = { t: e.t, type: e.type, selector: e.selector, target: focusBox ? "result" : "interaction", framed: false };
     beats.push(beat);
@@ -616,7 +630,7 @@ export function takeDurationMs(log: EventLog, frameIndex: FrameIndexEntry[], seg
     // focused beat
     let dwell = 0;
     if (e.type === "click" || e.type === "hover" || e.type === "type") {
-      dwell = e.focus_bbox ? FOCUS_DWELL_MS : ZOOM_DWELL_MS;
+      dwell = effectiveFocus(e) ? FOCUS_DWELL_MS : ZOOM_DWELL_MS;
     }
     lastT = Math.max(lastT, e.t + dwell);
     if (e.type === "cursor_path") {

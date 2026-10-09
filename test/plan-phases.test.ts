@@ -132,6 +132,34 @@ describe("phase 2: beats and punches", () => {
   });
 });
 
+describe("degenerate focus boxes", () => {
+  // a zero-area or sliver focus_bbox (a bad QC/LLM zoom patch) fit-zooms to
+  // the maximum punch into one corner. It names no result region: the beat
+  // frames its control instead, with the plain dwell.
+  for (const box of [
+    [0, 0, 0.001, 0.001],
+    [1800, 1000, 4, 300],
+    [10, 10, 600, 2],
+  ] as [number, number, number, number][]) {
+    it(`ignores focus_bbox ${JSON.stringify(box)}`, () => {
+      const log = makeLog([scene(0, "a"), click(3000, { focus_bbox: box })]);
+      const plain = makeLog([scene(0, "a"), click(3000)]);
+      const { beats, segments } = planPunches(log, layout, []);
+      const ref = planPunches(plain, layout, []);
+      expect(beats[0]).toMatchObject({ target: "interaction", framed: true, end: 3000 + 1200 });
+      expect(segments).toEqual(ref.segments);
+      // the take is not stretched for a 2400ms payoff that is never framed
+      expect(takeDurationMs(log, frames(100, 20), segments)).toBe(takeDurationMs(plain, frames(100, 20), ref.segments));
+      expect(takeDurationMs(log, frames(100, 20), [])).toBe(3000 + 1200 + 1000);
+    });
+  }
+
+  it("keeps a small but real result region", () => {
+    const log = makeLog([scene(0, "a"), click(3000, { focus_bbox: [900, 500, 40, 24] })]);
+    expect(planPunches(log, layout, []).beats[0]).toMatchObject({ target: "result", end: 3000 + 2400 });
+  });
+});
+
 describe("phase 3: bridging", () => {
   it("never bridges across a page change", () => {
     const segs: CameraSegment[] = [

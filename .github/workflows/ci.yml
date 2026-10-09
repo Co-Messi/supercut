@@ -59,3 +59,35 @@ jobs:
       # list) so a new e2e file cannot be silently skipped here — the same
       # rule the unit job above already follows in the other direction
       - run: npm test -- --run e2e.test
+
+  # what users actually get: pack the tarball, install it into an empty
+  # project, and run it. Catches a missing bin, a missing dependency, or
+  # bundled assets that do not resolve from an installed copy.
+  packed-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: pack and install into a temp project
+        run: |
+          set -euo pipefail
+          TARBALL="$(npm pack --silent | tail -n 1)"
+          SMOKE="$(mktemp -d)"
+          cp "$TARBALL" "$SMOKE/"
+          cd "$SMOKE"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "./$TARBALL"
+          npx supercut --help
+          node --input-type=module -e '
+            import { resolveBackgroundSpec, resolveMusicTrack } from "@co-messi/supercut";
+            const bg = resolveBackgroundSpec("cobalt");
+            if (!bg.isImage) throw new Error("bundled background cobalt did not resolve: " + JSON.stringify(bg));
+            const track = resolveMusicTrack("pulse");
+            if (!track) throw new Error("bundled music track pulse did not resolve");
+            console.log("assets ok:", bg.spec, track);
+          '

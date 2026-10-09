@@ -1,24 +1,32 @@
 ---
-name: Demo request
-about: Request or submit a product demo made with supercut
-title: "demo: "
+name: Film my app
+about: Ask for a supercut launch video of your app
+title: "film: "
 labels: demo
 ---
 
-## Product URL
+This issue is public. Do not paste secrets, private URLs or customer data.
 
-## Best 3-4 moments to show
+## App URL
+
+A publicly reachable staging or demo URL, or a public repo that can be run locally.
+
+## What it does
+
+One or two sentences.
+
+## The 2 to 4 moments that matter
 
 1.
 2.
 3.
 4.
 
-## Target audience
+## Anything to avoid
 
-## Preferred style
+Pages, buttons or data that must not be clicked or shown.
 
-- Fast launch trailer
-- Calm product walkthrough
-- Developer-tool demo
-- Other:
+## Permission to share
+
+- [ ] I am allowed to film this app.
+- [ ] You may publish the resulting video (for example in the supercut README or social posts).

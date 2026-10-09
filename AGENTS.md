@@ -58,7 +58,7 @@ frames/*             the frames (JPEG or PNG)
 - Private and localhost targets are allowed by default; `--block-private-network` engages the SSRF guard. Do not weaken the guard when it is on.
 - Destructive controls are excluded from filming by default (`--allow-destructive` opts in).
 - Recipes are capped at 60 seconds of estimated video.
-- The LLM budget is a hard ceiling for the whole run. Every attempt, including retries and timeouts, is metered at its worst case.
+- The LLM budget is a hard ceiling for the whole run. Every billed attempt, including retries and timeouts, is metered: at the provider's reported usage when it gives one, otherwise (and always for a timed-out attempt) at its worst case, prompt estimate plus `max_tokens`.
 - Defaults fail loudly on unsafe or ambiguous config rather than guessing.
 - Page-derived text sent to a model is wrapped in the per-run untrusted markers.
 

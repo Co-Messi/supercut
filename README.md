@@ -205,8 +205,9 @@ take directory ──▶ render ──▶ final.mp4
 
 Schemas reject unsupported URL schemes, malformed events, non-monotonic timelines, oversized logs, and impossible camera boxes.
 
-Event timestamps share the frame `t_source` clock, declared by `t_source_unified: true` in `events.json` (the built-in recorder always writes it). Identical runs produce structurally and geometrically identical `events.json` with timestamps agreeing within about 150ms (not byte-identical). Two render-time gates protect the output:
+Event timestamps share the frame `t_source` clock, declared by `t_source_unified: true` in `events.json` (the built-in recorder always writes it). Identical runs produce structurally and geometrically identical `events.json` with timestamps agreeing within about 150ms (not byte-identical). Three render-time gates protect the output:
 
+- **Partial take**: the recorder lists scenes it could not perform in `failed_scenes`, and `record` exits nonzero. `render` refuses such a take, because the video would silently skip those scenes; `SUPERCUT_ALLOW_PARTIAL=1` renders the scenes that were filmed.
 - **Skew**: on a unified-clock take, events leading the footage by more than 250ms fail the render (`SUPERCUT_ALLOW_SKEW=1` forces it). Logs without the marker are treated as legacy recorders and only warn.
 - **Capture health**: a take whose frame count falls far below its duration times fps is refused, because that footage renders as stills with a camera gliding over them. Average source fps is printed on every `record`, `generate` and `render` run. To render a genuinely sparse take, set `SUPERCUT_ALLOW_SPARSE=1`.
 

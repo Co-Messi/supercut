@@ -58,6 +58,21 @@ describe("agent skill and plugin packaging", () => {
   });
 });
 
+describe("README event-log contract", () => {
+  it("documents every optional take-level declaration of the event-log schema", async () => {
+    const { eventLog } = await import("../src/schema/event-log.js");
+    const readme = read("README.md");
+    const section = readme.slice(readme.indexOf("## Event-log contract"), readme.indexOf("## Contributing"));
+    const optional = Object.entries(eventLog.shape)
+      .filter(([, schema]) => schema.isOptional())
+      .map(([key]) => key);
+    expect(optional).toEqual(expect.arrayContaining(["t_source_unified", "navigation_logged", "failed_scenes"]));
+    for (const key of optional) expect(section, `README event-log contract omits ${key}`).toMatch(new RegExp("`" + key + "[`:]"));
+    // the navigation events a recorder declaring navigation_logged must write
+    expect(section).toContain('`kind: "spa"`');
+  });
+});
+
 describe("prose style", () => {
   it.each(["README.md", "SECURITY.md", "CHANGELOG.md", "AGENTS.md", ".claude/skills/supercut/SKILL.md"])(
     "%s has no em or en dashes",

@@ -205,7 +205,15 @@ take directory ──▶ render ──▶ final.mp4
 
 Schemas reject unsupported URL schemes, malformed events, non-monotonic timelines, oversized logs, and impossible camera boxes.
 
-Event timestamps share the frame `t_source` clock, declared by `t_source_unified: true` in `events.json` (the built-in recorder always writes it). Identical runs produce structurally and geometrically identical `events.json` with timestamps agreeing within about 150ms (not byte-identical). Three render-time gates protect the output:
+Besides its events, `events.json` carries three optional declarations about the take. The built-in recorder always writes all three; a third-party recorder should write each one it can honour:
+
+| field | meaning | when it is absent |
+| --- | --- | --- |
+| `t_source_unified: true` | event `t` is on the same clock as frame `t_source` | a legacy take: event and frame skew only warns |
+| `navigation_logged: true` | every page change while filming is logged: a later scene's entry as its `scene` event, anything else (a clicked link, a submit, a `goto`, a page redirecting itself) as a `navigation` event, and a same-document route change that changes the URL path as a `navigation` event with `kind: "spa"`. The renderer then reads an unexplained frame gap as a stall on the same page and keeps the camera | page changes are inferred from long frame gaps, so a long main-thread stall can read as a page change |
+| `failed_scenes: [names]` | scenes the recorder could not perform | the take is assumed complete, so partial footage cannot be refused |
+
+Identical runs produce structurally and geometrically identical `events.json` with timestamps agreeing within about 150ms (not byte-identical). Three render-time gates protect the output:
 
 - **Partial take**: the recorder lists scenes it could not perform in `failed_scenes`, and `record` exits nonzero. `render` refuses such a take, because the video would silently skip those scenes; `SUPERCUT_ALLOW_PARTIAL=1` renders the scenes that were filmed.
 - **Skew**: on a unified-clock take, events leading the footage by more than 250ms fail the render (`SUPERCUT_ALLOW_SKEW=1` forces it). Logs without the marker are treated as legacy recorders and only warn.

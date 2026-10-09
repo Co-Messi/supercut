@@ -104,6 +104,31 @@ describe("NavigationLog: a page change is stamped where the picture changes", ()
     expect(h.floor()).toBeGreaterThanOrEqual(1100);
   });
 
+  it("a gate stub that paints nothing: the cut is the target's first frame", () => {
+    const { events, log } = harness({ stubs: ["http://app/redirect"] });
+    log.frame(990, "old");
+    log.commit("document", 1000, "http://app/redirect");
+    log.frame(1010, "old");
+    log.commit("document", 1040, "http://app/form");
+    log.frame(1050, "old");
+    log.frame(1300, "form");
+    expect(navs(events)).toHaveLength(1);
+    expect(navs(events)[0]!.t).toBe(1300);
+  });
+
+  it("a gate stub that paints a blank frame: the cut is that frame, the first picture change", () => {
+    // the camera resets wide where the picture first changes, so the blank
+    // stub frame is shown wide rather than zoomed in before a later cut
+    const { events, log } = harness({ stubs: ["http://app/redirect"] });
+    log.frame(990, "old");
+    log.commit("document", 1000, "http://app/redirect");
+    log.frame(1020, "blank");
+    log.commit("document", 1040, "http://app/form");
+    log.frame(1300, "form");
+    expect(navs(events)).toHaveLength(1);
+    expect(navs(events)[0]!.t).toBe(1020);
+  });
+
   it("raises the floor so the next stamp cannot land before the moved event", () => {
     const h = harness();
     h.log.frame(990, "old");

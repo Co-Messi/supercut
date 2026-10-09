@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { record } from "../src/capture/index.js";
-import { parseRecipe, type Recipe } from "../src/schema/index.js";
+import { parseEventLog, parseRecipe, type Recipe } from "../src/schema/index.js";
 import { startCaptureApp, type CaptureApp } from "./fixtures/capture-app/server.js";
 
 /**
@@ -113,6 +113,43 @@ describe("scene entry", () => {
     expect(logs.filter((l) => l.ev === "focus").map((l) => l.value)).toEqual(["", ""]);
     expect(logs.find((l) => l.ev === "submit")?.value).toBe("auth");
   }, 60_000);
+
+  it("fails a scene whose entry page answers an HTTP error, says why, and records it in events.json", async () => {
+    const out = outDir("entry404");
+    const res = await record({
+      recipe: recipeOf([
+        { name: "ok", url: `${app.url}/form`, actions: [{ kind: "wait", duration_ms: 300 }] },
+        { name: "missing", url: `${app.url}/missing`, actions: [{ kind: "wait", duration_ms: 300 }] },
+        { name: "ok-again", url: `${app.url}/form`, actions: [{ kind: "wait", duration_ms: 300 }] },
+      ]),
+      outDir: out, seed: 1, captureFrames: false, allowPrivateNetwork: true,
+    });
+    expect(res.aborted).toBe(false);
+    expect(res.failedScenes).toEqual(["missing"]);
+    expect(res.sceneErrors["missing"]).toBe(
+      `entry page ${app.url}/missing returned 404; is your app running there, and is something else using that port?`,
+    );
+    const log = parseEventLog(JSON.parse(readFileSync(join(out, "events.json"), "utf8")));
+    expect(log.failed_scenes).toEqual(["missing"]);
+    expect(log.navigation_logged).toBe(true);
+  }, 60_000);
+
+  it("aborts without filming when the first scene's entry page answers an HTTP error", async () => {
+    const out = outDir("first404");
+    const res = await record({
+      recipe: recipeOf([
+        { name: "first", url: `${app.url}/missing`, actions: [{ kind: "wait", duration_ms: 300 }] },
+        { name: "second", url: `${app.url}/form`, actions: [{ kind: "wait", duration_ms: 300 }] },
+      ]),
+      outDir: out, seed: 1, allowPrivateNetwork: true,
+    });
+    expect(res.aborted).toBe(true);
+    expect(res.failedScenes).toEqual(["first"]);
+    expect(res.sceneErrors["first"]).toMatch(/^entry page .*\/missing returned 404; is your app running there/);
+    expect(res.frameCount).toBe(0);
+    const log = parseEventLog(JSON.parse(readFileSync(join(out, "events.json"), "utf8")));
+    expect(log.failed_scenes).toEqual(["first"]);
+  }, 60_000);
 });
 
 type Keys = { down: string[]; press: string[]; up: string[]; input: [string, string | null][] };
@@ -213,6 +250,10 @@ describe("page changes", () => {
     expect(navs.map((e) => e.kind)).toEqual(["document"]);
     const scene2 = res.eventLog.events.filter((e) => e.type === "scene")[1]!;
     expect(navs[0]!.t).toBeLessThan(scene2.t);
+    // the take declares that every page change is in its log
+    const log = parseEventLog(JSON.parse(readFileSync(join(res.outDir, "events.json"), "utf8")));
+    expect(log.navigation_logged).toBe(true);
+    expect(log.failed_scenes).toEqual([]);
   }, 60_000);
 
   it("stamps a page change at the first frame that shows it, not at commit", async () => {

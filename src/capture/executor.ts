@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium, type CDPSession, type Page } from "playwright";
+import { chromium, type CDPSession, type Page, type Response } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { NavigationLog } from "./navigation.js";
@@ -214,6 +214,9 @@ export interface RecordResult {
    *  healthy beacon-era capture; near zero when the screencast starved. */
   avgSourceFps: number;
   failedScenes: string[];
+  /** why each failed scene failed, by scene name (a dependency cascade
+   *  names the scene it depended on) */
+  sceneErrors: Record<string, string>;
   aborted: boolean;
   outDir: string;
 }
@@ -231,6 +234,14 @@ function ceilToFrame(ms: number): number {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** a scene entry answered with an HTTP error is not the app: most often the
+ *  app is not running at that URL, or another server holds the port */
+function entryPageError(url: string, response: Response | null): string | undefined {
+  const status = response?.status() ?? 0;
+  if (status < 400) return undefined;
+  return `entry page ${url} returned ${status}; is your app running there, and is something else using that port?`;
+}
 
 /** same document URL (normalized; a differing fragment still counts as a
  *  different entry, so the recipe's explicit navigation is honoured) */
@@ -392,7 +403,23 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   let wallStart = 0;
   const cursor = { x: VIEWPORT.width / 2, y: VIEWPORT.height - 100 }; // parked off-content
   const failedScenes: string[] = [];
+  const sceneErrors: Record<string, string> = {};
   let aborted = false;
+
+  /** record a failed scene and say why; true when the take stops (the
+   *  opening scene failed, or more than half the scenes are lost) */
+  function failScene(name: string, reason: string, opening: boolean): boolean {
+    failedScenes.push(name);
+    sceneErrors[name] = reason;
+    const lost = `${failedScenes.length}/${recipe.scenes.length} scenes lost`;
+    if (opening || failedScenes.length > recipe.scenes.length / 2) {
+      aborted = true;
+      console.error(`abort: scene "${name}" failed (${reason}); ${lost}`);
+      return true;
+    }
+    console.error(`scene "${name}" failed (${reason}); continuing, ${lost}`);
+    return false;
+  }
 
   const observedNow = () => Date.now() - wallStart;
   /** monotonic stamp: event `t` rides the observed clock; sleep/rounding jitter
@@ -848,9 +875,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork });
     const firstResponse = await gotoReady(page, firstScene.entry.url);
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
-    await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
+    // an error page is not worth filming: the opening scene fails and the
+    // take ends before the screencast starts
+    const firstEntryError = entryPageError(firstScene.entry.url, firstResponse);
+    if (firstEntryError) failScene(firstScene.name, firstEntryError, true);
+    else await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
-    if (captureFrames) {
+    if (captureFrames && !aborted) {
       await cdp.send("Page.startScreencast", {
         format: "jpeg",
         quality: JPEG_QUALITY,
@@ -872,27 +903,21 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         ? firstFrameStamp
         : Date.now();
 
-    capturing = true;
+    capturing = !aborted;
     // pre-roll: the opening page at rest before anything moves
-    {
+    if (capturing) {
       const wait = PRE_ROLL_MS - observedNow();
       if (wait > 0) await sleep(wait);
       clock = stamp(Math.max(PRE_ROLL_MS, ceilToFrame(observedNow())));
     }
 
-    for (let i = 0; i < recipe.scenes.length; i++) {
+    for (let i = 0; i < recipe.scenes.length && !aborted; i++) {
       const scene: Scene = recipe.scenes[i]!;
 
       // dependency cascade: parent failed → this scene dies with it
-      if (scene.depends_on.some((d) => failedScenes.includes(d))) {
-        failedScenes.push(scene.name);
-        if (failedScenes.length > recipe.scenes.length / 2) {
-          aborted = true;
-          console.error(
-            `abort: ${failedScenes.length}/${recipe.scenes.length} scenes lost (cascade from "${scene.depends_on.join(",")}")`,
-          );
-          break;
-        }
+      const failedParent = scene.depends_on.find((d) => failedScenes.includes(d));
+      if (failedParent !== undefined) {
+        if (failScene(scene.name, `depends on failed scene "${failedParent}"`, false)) break;
         continue;
       }
 
@@ -922,6 +947,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             try {
               const response = await gotoReady(page, scene.entry.url);
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
+              const entryError = entryPageError(scene.entry.url, response);
+              if (entryError) throw new Error(entryError);
               await sleep(SETTLE_MS);
               pageDirty = false;
             } finally {
@@ -949,15 +976,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           await assertPagePolicy();
         }
       } catch (err) {
-        failedScenes.push(scene.name);
         pageDirty = true;
-        const failedWithDeps = failedScenes.length;
-        if (i === 0 || failedWithDeps > recipe.scenes.length / 2) {
-          aborted = true;
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`abort: scene "${scene.name}" failed (${msg}); ${failedWithDeps}/${recipe.scenes.length} scenes lost`);
-          break;
-        }
+        if (failScene(scene.name, err instanceof Error ? err.message : String(err), i === 0)) break;
       }
     }
   } finally {
@@ -984,6 +1004,11 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // The render stage keys its skew/health gates off this marker — never off
     // the capture's frame rate — so a starved take can't pass as "legacy".
     t_source_unified: true,
+    // navigation declaration (schema): every page change while filming is a
+    // `scene` event (scene entries) or a `navigation` event (everything
+    // else), so the renderer may read an unexplained frame gap as a stall
+    navigation_logged: true,
+    failed_scenes: [...failedScenes],
     viewport: { width: VIEWPORT.width, height: VIEWPORT.height, dpr: DPR },
     fps: FPS,
     events,
@@ -1006,5 +1031,5 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const spanMs = Math.max(lastFrameT, maxEventT);
   const avgSourceFps = spanMs > 0 ? (frameIndex.length / spanMs) * 1000 : 0;
 
-  return { eventLog, frameCount: frameIndex.length, avgSourceFps, failedScenes, aborted, outDir };
+  return { eventLog, frameCount: frameIndex.length, avgSourceFps, failedScenes, sceneErrors, aborted, outDir };
 }

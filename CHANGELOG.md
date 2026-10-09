@@ -30,7 +30,7 @@ First public release of `@co-messi/supercut`.
 
 - `supercut record` exits nonzero when any scene failed (the take is still written) and says to check the app URL and that the port is not used by something else. An app that is not listening gives a short message instead of a Playwright call log.
 - `supercut doctor` no longer passes when the Chromium binary is missing from disk. The unused ffprobe check is removed.
-- The Chromium install command in `doctor` and `render` errors names supercut's own Playwright version (`npx playwright@<version> install chromium`). A bare `npx playwright install chromium` run inside an app with its own `@playwright/test` installed that app's browser revision, which supercut cannot find.
+- The Chromium install command in `doctor` and `render` errors runs supercut's own copy of Playwright (`node "<its path>/cli.js" install chromium`). `npx playwright install chromium`, even with a version pinned, run inside an app with its own `@playwright/test` ran that app's Playwright and installed its browser revision, which supercut cannot find.
 - The LLM budget no longer leaks across calls: a provider that reports no usage is metered at prompt estimate plus `max_tokens`, timed-out and aborted attempts are charged at their worst case, and a 400 at an escalated size that does not blame the output size fails at once instead of wasting attempts.
 
 ### Security

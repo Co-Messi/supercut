@@ -41,6 +41,6 @@ describe("render when Chromium cannot launch", () => {
     const sandbox = launchFailure(new Error("browserType.launch: Target page, context or browser has been closed"));
     expect(sandbox.message).toContain("Target page, context or browser has been closed");
     expect(sandbox.message).toContain(`if Chromium for rendering is not installed, run: ${install}`);
-    expect(install).toMatch(/^npx playwright@\d+\.\d+\.\d+ install chromium$/);
+    expect(install).toMatch(/^node ".*cli\.js" install chromium$/);
   });
 });

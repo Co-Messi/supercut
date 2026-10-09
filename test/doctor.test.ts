@@ -1,6 +1,9 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { installCommandFor } from "../src/capture/browser-install.js";
+import { installCommandFor, playwrightCli } from "../src/capture/browser-install.js";
 import {
   checkNames,
   chromiumInstalledCheck,
@@ -20,14 +23,24 @@ describe("doctor install hints", () => {
     expect(ffmpegInstallHint("freebsd")).toMatch(/ffmpeg/);
   });
 
-  it("uses one playwright install command everywhere, pinned to supercut's own Playwright", () => {
-    // browsers live in a folder per Playwright revision: a bare `npx playwright`
-    // run inside an app that has its own @playwright/test installs that app's
-    // revision, which supercut's Playwright cannot find
-    const { version } = createRequire(import.meta.url)("playwright/package.json") as { version: string };
-    expect(playwrightInstallHint()).toBe(`npx playwright@${version} install chromium`);
-    expect(installCommandFor("1.60.0")).toBe("npx playwright@1.60.0 install chromium");
+  it("uses one playwright install command everywhere: supercut's own Playwright CLI", () => {
+    // browsers live in a folder per Playwright revision. Inside an app with
+    // its own @playwright/test, every `npx playwright` form (even
+    // `npx playwright@<version>`, when the app's tree holds a matching
+    // playwright) runs the app's bin and installs the app's revision
+    const require = createRequire(import.meta.url);
+    const cli = join(dirname(require.resolve("playwright/package.json")), "cli.js");
+    expect(existsSync(cli)).toBe(true);
+    expect(playwrightInstallHint()).toBe(`node "${cli}" install chromium`);
+    expect(installCommandFor("/x y/cli.js")).toBe('node "/x y/cli.js" install chromium');
     expect(installCommandFor(undefined)).toBe("npx playwright install chromium");
+  });
+
+  it("the command runs the Playwright that supercut resolves", () => {
+    const require = createRequire(import.meta.url);
+    const { version } = require("playwright/package.json") as { version: string };
+    const out = execFileSync(process.execPath, [playwrightCli()!, "--version"], { encoding: "utf8" });
+    expect(out.trim()).toBe(`Version ${version}`);
   });
 });
 

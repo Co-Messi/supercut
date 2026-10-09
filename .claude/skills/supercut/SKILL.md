@@ -27,7 +27,7 @@ npx @co-messi/supercut doctor
 
 If npm cannot find `@co-messi/supercut` (it is not published yet), use a source checkout instead: `git clone https://github.com/Co-Messi/supercut`, then `npm ci && npm run build` inside it, and run `node <checkout>/dist/cli/index.js` wherever these steps say `npx @co-messi/supercut`.
 
-It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright's Chromium. Fix whatever it reports, using the exact command it prints: the Chromium command names supercut's own Playwright version (`npx playwright@<version> install chromium`). A bare `npx playwright install chromium` run inside an app that has its own Playwright installs a browser supercut cannot use.
+It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright's Chromium. Fix whatever it reports, using the exact command it prints: the Chromium command runs supercut's own copy of Playwright (`node "<its path>/cli.js" install chromium`). Do not substitute `npx playwright install chromium`: inside an app that has its own Playwright it installs that app's browser version, which supercut cannot use.
 
 ### 2. Make sure the app is running
 

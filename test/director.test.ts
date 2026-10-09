@@ -857,6 +857,17 @@ describe("prompt-injection hardening (H6)", () => {
     expect(text.text.indexOf("Get started free")).toBeLessThan(end);
   });
 
+  it("the script prompt lists exactly the bundled music tracks plus off", async () => {
+    const { MUSIC_TRACKS } = await import("../src/director/analyze.js");
+    const stub = new StubLlm([validRecipeJson("#cta")]);
+    await writeRecipe(stub, analysis, digests, "http://127.0.0.1:9999");
+    const sys = stub.prompts[0]!.system;
+    const line = sys.split("\n").find((l) => l.includes('"music_track": one of'))!;
+    expect(line).toBeDefined();
+    const listed = [...line.matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
+    expect(listed).toEqual([...MUSIC_TRACKS, "off"]);
+  });
+
   it("formatRecipePreview prints every action including the full typed text and submit", async () => {
     const { formatRecipePreview } = await import("../src/director/generate.js");
     const recipe = JSON.parse(validRecipeJson("#cta")) as Recipe;
@@ -1248,7 +1259,7 @@ describe("LLM completion accounting (M-new-6)", () => {
       });
       const llm = new BudgetedLlm(inner, 1_000_000);
       await expect(llm.chat({ system: "s", user: [{ type: "text", text: "t" }] })).rejects.toThrow(/empty response/);
-      expect(llm.meteredTokens).toBe(400);
+      expect(llm.meteredTokens).toBe(200); // the empty answer and its one retry
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1282,18 +1293,16 @@ describe("LLM max_tokens escalation on truncation", () => {
     }
   }
 
-  it("doubles max_tokens after a reasoning model runs out of tokens (8k → 16k → 32k)", async () => {
-    const { out, sentMax } = await run(
-      [{ finish: "length" }, { finish: "length" }, { content: '{"ok":true}' }],
-      8000,
-    );
+  it("doubles max_tokens once after a reasoning model runs out of tokens (8k to 16k)", async () => {
+    const { out, sentMax } = await run([{ finish: "length" }, { content: '{"ok":true}' }], 8000);
     expect(out).toBe('{"ok":true}');
-    expect(sentMax).toEqual([8000, 16000, 32000]);
+    expect(sentMax).toEqual([8000, 16000]);
   });
 
-  it("never escalates past the ceiling (4x the requested max_tokens)", async () => {
-    const { sentMax } = await run([{ finish: "length" }], 8000);
-    expect(sentMax).toEqual([8000, 16000, 32000, 32000]);
+  it("never escalates past the ceiling and gives up after one empty retry", async () => {
+    const { out, sentMax } = await run([{ finish: "length" }], 8000);
+    expect(out).toBeInstanceOf(Error);
+    expect(sentMax).toEqual([8000, 16000]);
     expect(Math.max(...sentMax)).toBe(escalationCeiling(8000));
   });
 
@@ -1342,11 +1351,11 @@ describe("LLM max_tokens escalation on truncation", () => {
   }
 
   it("retries and escalations inside ONE call never carry spend past the budget", async () => {
-    // 4 attempts at 8k → 16k → 32k → 32k would bill ~88k; the budget is 40k
-    const { out, sentMax, metered } = await budgetedTruncating(40_000);
+    // 8k then 16k would bill ~24k; the budget is 12k
+    const { out, sentMax, metered } = await budgetedTruncating(12_000);
     expect(out).toBeInstanceOf(TokenBudgetExceededError);
     expect(sentMax[0]).toBe(8000);
-    expect(metered).toBeLessThanOrEqual(40_000 * 1.01); // prompt estimate slack only
+    expect(metered).toBeLessThanOrEqual(12_000 * 1.01); // prompt estimate slack only
   });
 
   it("a small budget still admits the first attempt; escalation is clamped to the room left", async () => {

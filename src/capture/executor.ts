@@ -8,6 +8,7 @@
  *              │     cursor path → CDP mouse events           │──▶ frames/*.jpg
  *              │     perform (click/type/scroll/hover/wait)   │    + frame index
  *              │     log event {t scheduled, observed_t}      │──▶ events.json
+ *              │   page changes → navigation events          │
  *              │   on action timeout → scene failed, continue │
  *              └─────────────────────────────────────────────┘
  *
@@ -66,7 +67,7 @@ const SETTLE_MS = 400;
 const PRE_ROLL_MS = 1_000;
 /** the pointer comes to rest on a target before pressing, and a press is
  *  held like a finger does — a zero-length press/release pair right at the
- *  end of the travel read as robotic */
+ *  end of the travel reads as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
 /** the beat after select-all and after delete when clearing a field: fixed,
@@ -274,13 +275,13 @@ function pathOf(u: string): string {
   }
 }
 
-// Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
-// from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
-// 10s budget blew on a page whose `load` only fired at ~12s, even though the DOM
-// was interactive almost immediately. So: resolve on "domcontentloaded" (DOM parsed
-// + scripts available), then give the full `load` a best-effort grace window but
-// never fail on it. SETTLE_MS after this lets first paints land. Returns the nav
-// response so callers can re-check the final URL against the SSRF policy.
+// Navigate robustly: resolve on "domcontentloaded" (DOM parsed, scripts
+// available), not "load". An app that pulls a heavy bundle from a CDN or holds
+// a connection open can fire `load` well past the action budget while its DOM
+// has long been interactive, so `load` gets a best-effort grace window and
+// never fails the navigation. SETTLE_MS after this lets first paints land.
+// Returns the nav response so callers can re-check the final URL against the
+// SSRF policy and read its HTTP status.
 async function gotoReady(page: Page, url: string) {
   // guard ON: a redirected navigation first lands on the gate's stub, which
   // replaces itself with the target — wait for the real document
@@ -475,7 +476,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // boundingBox returns document coordinates for below/above-fold elements
     // (e.g. y=6549 or y=-3883), the cursor + camera then aim off-frame and the
     // shot is pure background. Scrolling is also how a single-viewport recording
-    // reveals different parts of a long page. (Found on the first live run.)
+    // reveals different parts of a long page.
     const pre = await loc.boundingBox();
     const alreadyInView =
       !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
@@ -969,8 +970,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             }
           }
           // Timestamp canon: when nav finishes early, dwell out the unused
-          // allowance in WALL time so pixels and schedule stay in lockstep —
-          // advancing only the clock made the footage run ~1s ahead of every
+          // allowance in WALL time so pixels and schedule stay in lockstep;
+          // advancing only the clock would put the footage ~1s ahead of every
           // logged event after a fast local navigation. The new page (its
           // first captured frame is at navEnd) also gets its pre-roll.
           const navEnd = observedNow();

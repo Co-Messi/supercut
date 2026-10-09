@@ -123,7 +123,7 @@ afterAll(async () => {
 });
 
 describe("record E2E on fixture app", () => {
-  it("render fails fast on an in-page FATAL (missing frames) instead of waiting out the timeout (M9)", async () => {
+  it("render fails fast on an in-page FATAL (missing frames) instead of waiting out the timeout", async () => {
     // a take whose index points at frame files that don't exist: the host page
     // dies on the first fetch, and the crash/console hooks must surface it in
     // seconds — the raw temp stream must also be cleaned up on that path
@@ -156,7 +156,7 @@ describe("record E2E on fixture app", () => {
     expect(Date.now() - t0).toBeLessThan(60_000); // fail-fast, not timeout-wait
   }, 90_000);
 
-  it("render surfaces an ffmpeg mux failure (undecodable music) as a real error (M5)", async () => {
+  it("render surfaces an ffmpeg mux failure (undecodable music) as a real error", async () => {
     // a tiny but VALID take: two real 1x1 PNGs, short timeline (below the
     // health gate's judgeable floor). The encode succeeds; the mux is handed a
     // "music" file that exists but is not audio, so ffmpeg exits non-zero at
@@ -200,7 +200,7 @@ describe("record E2E on fixture app", () => {
     ).rejects.toThrow(/ffmpeg/i);
   }, 120_000);
 
-  it("refuses a private-network recipe when the guard is engaged (H5)", async () => {
+  it("refuses a private-network recipe when the guard is engaged", async () => {
     const out = mkdtempSync(join(tmpdir(), "supercut-guard-"));
     dirs.push(out);
     await expect(
@@ -256,7 +256,7 @@ describe("record E2E on fixture app", () => {
     expect(types).toContain("hover");
     expect(types).toContain("cursor_path");
 
-    // timing canon (PR #1 review): scene 2 may not start before scene 1's
+    // timing canon: scene 2 may not start before scene 1's
     // full budget (actions 4600 + hold 400), and its first action must sit
     // at least the nav allowance after the scene marker
     const sceneEvents = log.events.filter((e) => e.type === "scene");
@@ -276,8 +276,8 @@ describe("record E2E on fixture app", () => {
     // capture fluency: the repaint beacon must defeat change-driven screencast
     // starvation — sustained frame flow, and no stall outside the one deliberate
     // frame-suppression window around the scene-2 navigation. Bounds leave
-    // headroom for machine-load jitter (starvation was 1.8-19 fps avg, p95 gap
-    // 430ms, max 4.1s). The fps floor is 30, not ~60: CI runners composite via
+    // headroom for machine-load jitter (a starved capture runs 1.8-19 fps avg,
+    // p95 gap 430ms, max 4.1s). The fps floor is 30, not ~60: CI runners composite via
     // SwiftShader on 2 cores and sustain ~47 fps where local hardware does 80+.
     const spanMs = idx[idx.length - 1]!.t_source - idx[0]!.t_source;
     const avgFps = ((idx.length - 1) / spanMs) * 1000;
@@ -410,10 +410,9 @@ describe("record E2E on fixture app", () => {
   }, 120_000);
 
   it("partial failure does NOT abort and feeds a cut to QC (defends the failedScenes branch)", async () => {
-    // PR #2 review: a Codex comment claimed deterministicChecks' failedScenes
-    // branch is dead because record always aborts. It does NOT — one non-first
-    // scene failing under the 50% threshold keeps the take alive. Prove it:
-    // 1 of 3 scenes fails (no dependents) → not aborted → QC cuts just it.
+    // deterministicChecks' failedScenes branch is live: one non-first scene
+    // failing under the 50% threshold keeps the take alive. 1 of 3 scenes
+    // fails (no dependents) → not aborted → QC cuts just it.
     const recipe = parseRecipe({
       version: 0,
       app_url: app.url,
@@ -563,9 +562,10 @@ describe("record E2E on fixture app", () => {
     expect(() => parseEventLog(JSON.parse(readFileSync(join(out, "events.json"), "utf8")))).not.toThrow();
   }, 120_000);
 
-  it("does not reload when the next scene enters on the page already showing", async () => {
-    // a second scene whose entry URL is the page the first scene left us on:
-    // re-navigating froze the footage for a redundant reload
+  it("does not reload when the next scene enters on the page a hover-only scene left showing", async () => {
+    // a second scene whose entry URL is the page the first scene left us on,
+    // with no state changed: a reload would only freeze the footage (a scene
+    // after a click or type does reload; see capture.e2e.test.ts)
     const recipe = parseRecipe({
       version: 0,
       app_url: app.url,
@@ -598,10 +598,10 @@ describe("record E2E on fixture app", () => {
   }, 120_000);
 
   it("holds ~60fps source on a hovered dashboard whose timer re-sets identical text", async () => {
-    // Found on the demo app: once /dash's counters clamp, its 50ms interval
-    // keeps re-setting identical textContent; with a hovered (transformed) row
-    // a 1px repaint beacon stopped registering and the source fell to exactly
-    // the interval rate (20fps) for the rest of the scene.
+    // once /dash's counters clamp, its 50ms interval keeps re-setting
+    // identical textContent; with a hovered (transformed) row, a beacon whose
+    // damage does not register leaves the source at exactly the interval
+    // rate (20fps) for the rest of the scene.
     const recipe = parseRecipe({
       version: 0,
       app_url: app.url,
@@ -624,7 +624,7 @@ describe("record E2E on fixture app", () => {
     // the last 1.5s of the hold: counters long clamped, row hovered
     const tail = idx.filter((e) => e.t_source >= end - 1500);
     // floor well under a healthy capture (CI's software compositor sustains
-    // ~47fps) but far above the 20fps the corner beacon fell to
+    // ~47fps) but far above the 20fps a non-registering beacon gives
     expect(tail.length / 1.5).toBeGreaterThanOrEqual(35);
   }, 120_000);
 
@@ -650,9 +650,9 @@ describe("record E2E on fixture app", () => {
 
     const scroll = res.eventLog.events.find((e) => e.type === "scroll");
     expect(scroll).toBeDefined();
-    // total distance semantics unchanged: 600px of content travel
+    // a scroll moves 600px of content
     expect(scroll!.to[1] - scroll!.from[1]).toBe(600);
-    // the eased wheel stream spans the WHOLE slot (old code finished in half)
+    // the eased wheel stream spans the WHOLE slot
     expect(scroll!.observed_t! - scroll!.t).toBeGreaterThanOrEqual(1600 * 0.9);
   }, 120_000);
 

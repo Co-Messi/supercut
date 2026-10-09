@@ -25,7 +25,7 @@ const SYSTEM = `You write filming scripts ("recipes") for supercut, which record
 {
   "version": 0,
   "app_url": string,
-  "music_track": one of "pulse" | "daybreak" | "midnight" | "momentum" | "off",
+  "music_track": one of ${[...MUSIC_TRACKS, "off"].map((t) => `"${t}"`).join(" | ")},
   "scenes": [{
     "name": kebab-case string,
     "priority": 1..N (1 = most important, cut last),

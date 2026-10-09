@@ -85,6 +85,43 @@ describe("frames on disk", () => {
   }, 60_000);
 });
 
+describe("repaint beacon", () => {
+  it("adds no DOM node and makes no DOM mutations in the filmed page", async () => {
+    const from = app.logs.length;
+    const res = await record({
+      recipe: recipeOf([{ name: "still", url: `${app.url}/still`, actions: [{ kind: "wait", duration_ms: 1500 }] }]),
+      outDir: outDir("beacon-dom"), seed: 1, allowPrivateNetwork: true,
+    });
+    expect(res.failedScenes).toEqual([]);
+    expect(res.avgSourceFps).toBeGreaterThanOrEqual(30);
+    const reports = app.logs.slice(from).filter((l) => l.ev === "still");
+    expect(reports.length).toBeGreaterThanOrEqual(2);
+    const last = reports.at(-1)!;
+    // an app's MutationObserver, session replay or idle detector sees nothing
+    expect(last.mutations).toBe(0);
+    // and structural selectors see only the page's own nodes (head + body;
+    // h1, p, script)
+    expect(last.rootChildren).toBe(2);
+    expect(last.bodyChildren).toBe(3);
+  }, 60_000);
+
+  it("keeps frames flowing while the page's main thread is blocked", async () => {
+    // /stall's click runs an 800ms long task; a beacon driven from the main
+    // thread stops with it, one animated on the compositor does not
+    const res = await record({
+      recipe: recipeOf([{ name: "stall", url: `${app.url}/stall`, actions: [click("#run", 2000)], hold_ms: 300 }]),
+      outDir: outDir("beacon-stall"), seed: 1, allowPrivateNetwork: true,
+    });
+    expect(res.failedScenes).toEqual([]);
+    const c = res.eventLog.events.find((e) => e.type === "click")!;
+    const idx = readIndex(res.outDir).filter((e) => e.t_source >= c.observed_t! && e.t_source <= c.observed_t! + 1200);
+    let maxGap = 0;
+    for (let i = 1; i < idx.length; i++) maxGap = Math.max(maxGap, idx[i]!.t_source - idx[i - 1]!.t_source);
+    expect(idx.length).toBeGreaterThan(30);
+    expect(maxGap).toBeLessThan(250);
+  }, 60_000);
+});
+
 /** /log bodies posted during `run`, after in-flight posts have landed */
 async function logsDuring<T>(run: () => Promise<T>): Promise<{ result: T; logs: Record<string, unknown>[] }> {
   const from = app.logs.length;

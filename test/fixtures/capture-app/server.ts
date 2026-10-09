@@ -91,8 +91,12 @@ const STILL = `<!doctype html><html><head><meta charset="utf-8"><title>Still</ti
   <p id="p">A static page. Its frames must not change while it is filmed.</p>
   <script>
     let mutations = 0;
-    new MutationObserver((records) => { mutations += records.length; })
-      .observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    // from DOMContentLoaded: the parser's own insertions are not mutations
+    // anyone filmed the page for
+    addEventListener("DOMContentLoaded", () => {
+      new MutationObserver((records) => { mutations += records.length; })
+        .observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    });
     setInterval(() => send({
       ev: "still", mutations, rootChildren: document.documentElement.children.length,
       bodyChildren: document.body.children.length,

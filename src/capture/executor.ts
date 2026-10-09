@@ -75,45 +75,47 @@ const CLEAR_BEAT_MS = 120;
 
 /**
  * CDP screencast is change-driven: a static page produces NO compositor
- * commits, so capture collapses to a few fps and the renderer stretches one
- * frame across seconds. This rAF beacon — a 1×1px fixed corner element on its
- * own compositor layer, toggling between two sub-perceptual opacities — forces
- * one commit per display frame. It covers the WHOLE viewport at 1-2e-4
- * opacity: a 1px corner beacon stopped registering damage in some page states
- * (a hovered, transformed row plus a timer re-setting identical text dropped
- * the source to the timer's 20Hz), while full-viewport damage always
- * captures. 2e-4 alpha moves no 8-bit channel by even half a level, so the
- * frames are pixel-identical to the page; pointer-events:none + fixed
- * positioning means it can never interfere with hit-testing or layout.
- * Injected as an init script so it survives full navigations; the rAF loop
- * itself survives SPA route changes.
+ * frames, so capture collapses to a few fps and the renderer stretches one
+ * frame across seconds. The repaint beacon forces one frame per display
+ * refresh: a full-viewport layer whose opacity animates between 1e-4 and
+ * 2e-4, an amount that moves no 8-bit channel by even half a level, so every
+ * frame is pixel-identical to the page. It covers the whole viewport because
+ * full-viewport damage registers in every page state (a small corner layer
+ * stopped registering under a hovered, transformed row).
+ *
+ * It is a CSS animation on `:root::after`, in a constructed stylesheet
+ * adopted by the document:
+ *  - no DOM node and no DOM mutation, so the app's MutationObservers,
+ *    session-replay tools, idle detectors and structural selectors see an
+ *    untouched page;
+ *  - an opacity animation runs on the compositor thread, so frames keep
+ *    flowing while the page's main thread is busy in a long task;
+ *  - pointer-events:none and fixed positioning keep it out of hit-testing
+ *    and layout.
+ * Its declarations are !important (except opacity, which the animation
+ * drives) and outrank a page's `*::after` reset by specificity. Injected as an
+ * init script so every document gets it; re-adopted if the page replaces
+ * document.adoptedStyleSheets.
  */
-const REPAINT_BEACON_ID = "__supercut_repaint_beacon__";
+const REPAINT_BEACON_CSS =
+  "@keyframes __supercut_repaint_beacon{from{opacity:0.0001}to{opacity:0.0002}}" +
+  ":root::after{content:''!important;display:block!important;position:fixed!important;" +
+  "inset:0!important;width:100vw!important;height:100vh!important;pointer-events:none!important;" +
+  "z-index:2147483647!important;background:#000!important;opacity:0.0001;" +
+  "will-change:opacity!important;contain:strict!important;" +
+  "animation:__supercut_repaint_beacon 1s linear infinite alternate!important}";
 const REPAINT_BEACON_SCRIPT = `(() => {
   if (window.__supercutBeacon) return;
   window.__supercutBeacon = true;
-  let el = null;
-  let flip = false;
-  const tick = () => {
-    if (!el || !el.isConnected) {
-      const root = document.body || document.documentElement;
-      if (root) {
-        el = document.createElement("div");
-        el.id = ${JSON.stringify(REPAINT_BEACON_ID)};
-        el.setAttribute("aria-hidden", "true");
-        el.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;" +
-          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.0001;" +
-          "will-change:opacity;contain:strict";
-        root.appendChild(el);
-      }
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(${JSON.stringify(REPAINT_BEACON_CSS)});
+  const adopt = () => {
+    if (!document.adoptedStyleSheets.includes(sheet)) {
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
     }
-    if (el) {
-      flip = !flip;
-      el.style.opacity = flip ? "0.0002" : "0.0001";
-    }
-    requestAnimationFrame(tick);
   };
-  requestAnimationFrame(tick);
+  adopt();
+  setInterval(adopt, 1000);
 })();`;
 
 /** how long after a click/type the page gets to reveal its result before the
@@ -129,11 +131,10 @@ const MUTATION_MIN_CHURN_AREA_PX = 1024;
  * Changed-region tracker: records elements mutated/added after an action so
  * the capture stage can frame the RESULT by default, even when the script
  * named no focus_selector. Injected as an init script (survives navigations);
- * armed per action from Node. The repaint beacon excludes itself by id.
+ * armed per action from Node.
  */
 const MUTATION_OBSERVER_SCRIPT = `(() => {
   if (window.__supercutMutations) return;
-  const beaconId = ${JSON.stringify(REPAINT_BEACON_ID)};
   let tracked = null;
   const observer = new MutationObserver((records) => {
     if (!tracked) return;
@@ -164,7 +165,7 @@ const MUTATION_OBSERVER_SCRIPT = `(() => {
       const vw = window.innerWidth, vh = window.innerHeight;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       const consider = (el, churnOnly) => {
-        if (!el.isConnected || el.id === beaconId) return;
+        if (!el.isConnected) return;
         // visibility is evaluated NOW, at collection end — a transient overlay
         // (toast/popup already removed or mid fade-out, including via an
         // ancestor's opacity/display) must never become the framed result

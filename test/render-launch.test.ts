@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { chromiumInstallCommand } from "../src/capture/browser-install.js";
 import { launchFailure } from "../src/render/index.js";
+
+const install = chromiumInstallCommand();
 
 /**
  * A render whose Chromium cannot launch must fail fast with an actionable
@@ -26,17 +29,18 @@ describe("render when Chromium cannot launch", () => {
     const line = child.stdout.trim().split("\n").pop() ?? "";
     const outcome = JSON.parse(line) as { ok: boolean; message?: string };
     expect(outcome.ok).toBe(false);
-    expect(outcome.message).toContain("Chromium for rendering is not installed; run: npx playwright install chromium");
+    expect(outcome.message).toContain(`Chromium for rendering is not installed; run: ${install}`);
   }, 40_000);
 
   it("keeps the cause of other launch failures and offers the install hint only as a possibility", () => {
     const missing = launchFailure(new Error("browserType.launch: Executable doesn't exist at /x/chrome\n╔═══ banner ═══╗"));
     expect(missing.message).toBe(
       "render: could not launch Chromium (browserType.launch: Executable doesn't exist at /x/chrome). " +
-        "Chromium for rendering is not installed; run: npx playwright install chromium",
+        `Chromium for rendering is not installed; run: ${install}`,
     );
     const sandbox = launchFailure(new Error("browserType.launch: Target page, context or browser has been closed"));
     expect(sandbox.message).toContain("Target page, context or browser has been closed");
-    expect(sandbox.message).toContain("if Chromium for rendering is not installed, run: npx playwright install chromium");
+    expect(sandbox.message).toContain(`if Chromium for rendering is not installed, run: ${install}`);
+    expect(install).toMatch(/^npx playwright@\d+\.\d+\.\d+ install chromium$/);
   });
 });

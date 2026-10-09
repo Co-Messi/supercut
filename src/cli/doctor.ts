@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
+import { chromiumInstallCommand } from "../capture/browser-install.js";
 
 const exec = promisify(execFile);
 
@@ -32,8 +33,9 @@ export function ffmpegInstallHint(platform: NodeJS.Platform): string {
   }
 }
 
+/** pinned to supercut's own Playwright (see capture/browser-install.ts) */
 export function playwrightInstallHint(): string {
-  return "npx playwright install chromium";
+  return chromiumInstallCommand();
 }
 
 export async function ffmpegCheck(deps: {
@@ -139,7 +141,7 @@ const checks: Check[] = [
       } catch (err) {
         return {
           ok: false,
-          detail: `FAIL — ${err instanceof Error ? err.message : String(err)} (run \`npx playwright install chromium\`)`,
+          detail: `FAIL — ${err instanceof Error ? err.message : String(err)} (run \`${playwrightInstallHint()}\`)`,
         };
       } finally {
         // always release the browser + server, even if import/launch threw mid-way

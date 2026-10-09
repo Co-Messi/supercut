@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { MAX_BUDGET_MS, parseEventLog, type EventLog } from "../schema/index.js";
 import { FADE_IN_MS, FADE_OUT_MS, planTake, type FrameIndexEntry } from "./plan.js";
+import { chromiumInstallCommand } from "../capture/browser-install.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 import {
   accumulatorLine,
@@ -161,8 +162,9 @@ export function frameMimeType(name: string): string {
   return "application/octet-stream";
 }
 
-/** the one command that fixes a missing render browser */
-const CHROMIUM_INSTALL_HINT = "run: npx playwright install chromium";
+/** the one command that fixes a missing render browser, pinned to the
+ *  Playwright that will look for it */
+const CHROMIUM_INSTALL_HINT = `run: ${chromiumInstallCommand()}`;
 
 /**
  * A browser launch failure as a one-line, actionable error. Playwright's own

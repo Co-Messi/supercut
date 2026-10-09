@@ -1,4 +1,6 @@
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
+import { installCommandFor } from "../src/capture/browser-install.js";
 import {
   checkNames,
   chromiumInstalledCheck,
@@ -18,8 +20,14 @@ describe("doctor install hints", () => {
     expect(ffmpegInstallHint("freebsd")).toMatch(/ffmpeg/);
   });
 
-  it("uses one playwright install command everywhere", () => {
-    expect(playwrightInstallHint()).toBe("npx playwright install chromium");
+  it("uses one playwright install command everywhere, pinned to supercut's own Playwright", () => {
+    // browsers live in a folder per Playwright revision: a bare `npx playwright`
+    // run inside an app that has its own @playwright/test installs that app's
+    // revision, which supercut's Playwright cannot find
+    const { version } = createRequire(import.meta.url)("playwright/package.json") as { version: string };
+    expect(playwrightInstallHint()).toBe(`npx playwright@${version} install chromium`);
+    expect(installCommandFor("1.60.0")).toBe("npx playwright@1.60.0 install chromium");
+    expect(installCommandFor(undefined)).toBe("npx playwright install chromium");
   });
 });
 
@@ -30,7 +38,7 @@ describe("doctor chromium check", () => {
       exists: () => false,
     });
     expect(res.ok).toBe(false);
-    expect(res.detail).toMatch(/npx playwright install chromium/);
+    expect(res.detail).toContain(playwrightInstallHint());
     expect(res.detail).toContain("/nonexistent/chromium/chrome");
   });
 

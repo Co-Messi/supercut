@@ -30,6 +30,7 @@ First public release of `@co-messi/supercut`.
 
 - `supercut record` exits nonzero when any scene failed (the take is still written) and says to check the app URL and that the port is not used by something else. An app that is not listening gives a short message instead of a Playwright call log.
 - `supercut doctor` no longer passes when the Chromium binary is missing from disk. The unused ffprobe check is removed.
+- The Chromium install command in `doctor` and `render` errors names supercut's own Playwright version (`npx playwright@<version> install chromium`). A bare `npx playwright install chromium` run inside an app with its own `@playwright/test` installed that app's browser revision, which supercut cannot find.
 - The LLM budget no longer leaks across calls: a provider that reports no usage is metered at prompt estimate plus `max_tokens`, timed-out and aborted attempts are charged at their worst case, and a 400 at an escalated size that does not blame the output size fails at once instead of wasting attempts.
 
 ### Security
@@ -49,7 +50,7 @@ First public release of `@co-messi/supercut`.
 
 ### Render
 
-- A failed Chromium launch no longer hangs `render`; it closes the local server and says `npx playwright install chromium`.
+- A failed Chromium launch no longer hangs `render`; it closes the local server and prints the install command.
 - A take with failed scenes is refused unless `SUPERCUT_ALLOW_PARTIAL=1`. `generate` renders a take that lost a few scenes and says which ones and why.
 - On takes that declare `navigation_logged`, an unexplained frame gap is a stall on the same page: the frame holds and the payoff zoom survives. Older takes keep the gap inference.
 - An SPA route change cuts like a page load, except one within 400ms of a beat whose named result region (`focus_selector`, or a QC zoom) was read on the new route: that beat keeps its punch, so a list item opening its detail route still frames the detail.

@@ -25,7 +25,7 @@ The pipeline is: you write `recipe.json`, then `supercut record` films it, then 
 npx @co-messi/supercut doctor
 ```
 
-It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright Chromium (`npx playwright install chromium`). Fix whatever it reports before continuing.
+It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright's Chromium. Fix whatever it reports, using the exact command it prints: the Chromium command names supercut's own Playwright version (`npx playwright@<version> install chromium`). A bare `npx playwright install chromium` run inside an app that has its own Playwright installs a browser supercut cannot use.
 
 ### 2. Make sure the app is running
 

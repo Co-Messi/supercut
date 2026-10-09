@@ -28,7 +28,7 @@
 npx @co-messi/supercut generate --url http://localhost:3000
 ```
 
-`generate` needs an LLM key in a `.env` (see [LLM provider setup](#llm-provider-setup)), plus Chromium and ffmpeg: `npx playwright install chromium`, and an `ffmpeg` on your PATH. `npx @co-messi/supercut doctor` checks both.
+`generate` needs an LLM key in a `.env` (see [LLM provider setup](#llm-provider-setup)), plus Playwright's Chromium and an `ffmpeg` on your PATH. `npx @co-messi/supercut doctor` checks both and prints the exact install command for anything missing. The Chromium command names the Playwright version supercut uses (`npx playwright@<version> install chromium`), because a bare `npx playwright install chromium` run inside an app with its own Playwright installs a browser supercut cannot use.
 
 From source:
 

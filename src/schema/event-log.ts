@@ -75,6 +75,10 @@ export const sceneEvent = z.object({
 export const navigationEvent = z.object({
   ...baseEvent,
   type: z.literal("navigation"),
+  /** "document": a new document committed (link, submit, reload). "spa": a
+   *  same-document route change (pushState / hash) that changed the URL path.
+   *  Absent means "document" (older recorders logged only those). */
+  kind: z.enum(["document", "spa"]).optional(),
 }).strict();
 
 export const cursorPathEvent = z.object({
@@ -102,6 +106,16 @@ export const eventLog = z.object({
    *  non-fatal. Declared here so the render stage identifies old takes by what
    *  they ARE, never by inferring it from how the capture turned out. */
   t_source_unified: z.boolean().optional(),
+  /** Navigation declaration: true when the recorder logged EVERY page change,
+   *  action navigations as `navigation` events and scene entries as `scene`
+   *  events. The renderer then treats an unexplained frame gap as a stall on
+   *  the same page (hold the frame, keep the camera) instead of guessing it was
+   *  a page change. Logs without it are legacy takes, where page changes are
+   *  still inferred from long frame gaps. */
+  navigation_logged: z.boolean().optional(),
+  /** Scenes the recorder failed to perform. A take with failed scenes is
+   *  partial footage; the render stage refuses it unless explicitly allowed. */
+  failed_scenes: z.array(z.string().max(200)).max(100).optional(),
   viewport: z.object({
     width: z.number().int().positive(),
     height: z.number().int().positive(),

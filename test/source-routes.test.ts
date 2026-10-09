@@ -85,7 +85,7 @@ describe("extractAppRoutes", () => {
   });
 });
 
-describe("walk budget (M11)", () => {
+describe("walk budget", () => {
   it("stops enumerating at maxFiles instead of walking a monorepo unbounded", () => {
     // the fixture tree holds well over 3 files; a budget of 3 must bound the
     // enumeration (and therefore the routes derived from it)

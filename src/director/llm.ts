@@ -22,6 +22,16 @@ export interface ChatOptions {
    *  consume — set by BudgetedLlmClient to the budget left. A client that
    *  retries or escalates max_tokens must keep each attempt inside it. */
   spendLimit?: number;
+  /** filled in by the client as it goes: the worst-case tokens every attempt
+   *  of this call may have billed (usage when reported, prompt estimate plus
+   *  max_tokens otherwise, including attempts that timed out). BudgetedLlmClient
+   *  reads it after the call, success or failure. */
+  spendMeter?: SpendMeter;
+}
+
+/** per-call spend accumulator shared between BudgetedLlmClient and the inner client */
+export interface SpendMeter {
+  spent: number;
 }
 
 export interface LlmClient {
@@ -34,14 +44,47 @@ export interface LlmClient {
 }
 
 /** a reasoning model can spend its whole max_tokens thinking and return an
- *  empty answer (finish_reason "length"). Each such attempt doubles
- *  max_tokens, up to this multiple of the requested size (8k → 16k → 32k). */
-const ESCALATION_FACTOR = 4;
+ *  empty answer (finish_reason "length"). One retry doubles max_tokens. */
+const ESCALATION_FACTOR = 2;
 
-/** the largest max_tokens a call requesting `maxTokens` may be escalated to —
- *  what a budget must reserve for that call's completion */
+/** An empty answer is retried at most this many times: reasoning length varies
+ *  run to run, but a second empty answer means the model needs a bigger
+ *  budget than this call can afford, not a third roll of the dice. */
+const MAX_EMPTY_RETRIES = 1;
+
+/** A timed-out attempt is retried at most this many times: the provider is
+ *  too slow for this request, and each attempt can bill in full. */
+const MAX_TIMEOUT_RETRIES = 1;
+
+/** Slowest generation speed an attempt's timeout is sized for. A timeout
+ *  below max_tokens / this rate would abort a healthy completion. */
+const MIN_TOKENS_PER_SECOND = 30;
+const BASE_ATTEMPT_TIMEOUT_MS = 240_000;
+const MAX_ATTEMPT_TIMEOUT_MS = 600_000;
+
+/** wall-clock limit for one attempt asking for `maxTokens` completion tokens */
+export function attemptTimeoutMs(maxTokens: number): number {
+  const needed = Math.ceil((maxTokens / MIN_TOKENS_PER_SECOND) * 1000);
+  return Math.min(MAX_ATTEMPT_TIMEOUT_MS, Math.max(BASE_ATTEMPT_TIMEOUT_MS, needed));
+}
+
+/** the largest max_tokens a call requesting `maxTokens` may be escalated to:
+ *  twice the request, but never more than the longest attempt timeout can
+ *  deliver at the slowest assumed speed. It is also what a budget must reserve
+ *  for that call's completion. */
 export function escalationCeiling(maxTokens: number): number {
-  return maxTokens * ESCALATION_FACTOR;
+  const deliverable = (MAX_ATTEMPT_TIMEOUT_MS / 1000) * MIN_TOKENS_PER_SECOND;
+  return Math.max(maxTokens, Math.min(maxTokens * ESCALATION_FACTOR, deliverable));
+}
+
+/** a 400 that blames the requested output size (as opposed to a malformed
+ *  request, which no change of size can fix) */
+const OUTPUT_SIZE_COMPLAINT = /max[_ -]?(completion[_ -]?)?tokens|too (big|large|many|long)|exceed|maximum|context|limit/i;
+
+function isTimeoutOrAbort(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  const causeName = (err as { cause?: { name?: string } } | null)?.cause?.name;
+  return [name, causeName].some((n) => n === "TimeoutError" || n === "AbortError");
 }
 
 export interface OpenAICompatibleConfig {
@@ -51,6 +94,8 @@ export interface OpenAICompatibleConfig {
   providerLabel: string;
   /** whether this provider/model accepts image parts */
   vision: boolean;
+  /** base delay between retries, multiplied by the attempt number (default 1500) */
+  retryBaseMs?: number;
 }
 
 export class OpenAICompatibleClient implements LlmClient {
@@ -58,6 +103,7 @@ export class OpenAICompatibleClient implements LlmClient {
   private readonly model: string;
   private readonly baseUrl: string;
   private readonly vision: boolean;
+  private readonly retryBaseMs: number;
   readonly label: string;
   /** best-effort token accounting: sum of provider-reported usage across calls.
    *  Stays undefined until the FIRST response that carries a usage block, so a
@@ -73,6 +119,7 @@ export class OpenAICompatibleClient implements LlmClient {
     this.model = cfg.model;
     this.baseUrl = cfg.baseUrl.replace(/\/$/, "");
     this.vision = cfg.vision;
+    this.retryBaseMs = cfg.retryBaseMs ?? 1500;
     this.label = `${cfg.providerLabel}:${this.model}`;
   }
 
@@ -92,6 +139,8 @@ export class OpenAICompatibleClient implements LlmClient {
     /** the largest max_tokens this provider has accepted in this call */
     let accepted = requested;
     let escalationRefused = false;
+    let emptyRetries = 0;
+    let timeoutRetries = 0;
     const bodyFor = (max: number) => ({
       model: this.model,
       max_tokens: max,
@@ -103,9 +152,16 @@ export class OpenAICompatibleClient implements LlmClient {
     });
 
     // budget: each attempt bills its prompt plus up to max_tokens, so an
-    // attempt is only sent when that worst case fits what the call has left
+    // attempt is only sent when that worst case fits what the call has left.
+    // `spent` is the worst case billed so far, mirrored into opts.spendMeter
+    // so the caller sees it even when this call throws.
     const promptEstimate = estimateTokens(opts);
     let spent = 0;
+    const charge = (n: number) => {
+      spent += n;
+      if (opts.spendMeter) opts.spendMeter.spent += n;
+    };
+    const backoff = (attempt: number) => new Promise((r) => setTimeout(r, this.retryBaseMs * (attempt + 1)));
     let lastErr = "";
     for (let attempt = 0; attempt < 4; attempt++) {
       if (opts.spendLimit !== undefined) {
@@ -121,6 +177,7 @@ export class OpenAICompatibleClient implements LlmClient {
         maxTokens = Math.min(maxTokens, room);
       }
       const body = bodyFor(maxTokens);
+      const worstCase = promptEstimate + maxTokens;
       let res: Response;
       try {
         res = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -131,12 +188,24 @@ export class OpenAICompatibleClient implements LlmClient {
             "x-title": "supercut",
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(240_000),
+          signal: AbortSignal.timeout(attemptTimeoutMs(maxTokens)),
         });
       } catch (err) {
         const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
         lastErr = `network: ${cause?.code ?? ""} ${cause?.message ?? (err instanceof Error ? err.message : String(err))}`.trim();
-        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        if (isTimeoutOrAbort(err)) {
+          // the provider may have kept generating until we hung up, and bills
+          // for it: charge the attempt's worst case. A slow provider will not
+          // get faster at a larger size, so go back to the size that was
+          // accepted and allow only one more try.
+          charge(worstCase);
+          lastErr = `timed out after ${Math.round(attemptTimeoutMs(maxTokens) / 1000)}s at max_tokens ${maxTokens}`;
+          maxTokens = accepted;
+          escalationRefused = true;
+          if (++timeoutRetries > MAX_TIMEOUT_RETRIES) break;
+        }
+        // any other failure to connect never reached the provider: unbilled
+        await backoff(attempt);
         continue;
       }
       if (res.ok) {
@@ -147,11 +216,13 @@ export class OpenAICompatibleClient implements LlmClient {
         let data: Completion;
         try {
           // a long non-streamed completion can lose its connection mid-body
-          // ("terminated"); that is as transient as a failed connect
+          // ("terminated"); that is as transient as a failed connect, but the
+          // provider has already generated (and billed) the completion
           data = (await res.json()) as Completion;
         } catch (err) {
+          charge(worstCase);
           lastErr = `response body: ${err instanceof Error ? err.message : String(err)}`;
-          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+          await backoff(attempt);
           continue;
         }
         // best-effort cost telemetry: prefer total_tokens, else sum prompt+completion
@@ -163,7 +234,7 @@ export class OpenAICompatibleClient implements LlmClient {
             : undefined);
         if (billed !== undefined) this._tokensUsed = (this._tokensUsed ?? 0) + billed;
         // unreported usage: assume the attempt's worst case
-        spent += billed ?? promptEstimate + maxTokens;
+        charge(billed ?? worstCase);
         accepted = Math.max(accepted, maxTokens);
         const choice = data.choices?.[0];
         const msg = choice?.message;
@@ -172,26 +243,28 @@ export class OpenAICompatibleClient implements LlmClient {
         // a draft JSON inside that reasoning must never be accepted as output.
         const text = msg?.content;
         if (text) return text;
-        // reasoning length varies run to run, so an empty answer is retried
-        // rather than failing the whole run on one unlucky sample
         lastErr =
           `empty response` +
           (msg?.reasoning_content ? " — only reasoning, no answer (likely hit max_tokens mid-reasoning)" : "") +
           ` at max_tokens ${maxTokens}`;
+        // reasoning length varies run to run, so one empty answer is retried
+        // rather than failing the whole run on one unlucky sample; a second
+        // one is final
+        if (++emptyRetries > MAX_EMPTY_RETRIES) break;
         // truncated mid-reasoning: the same budget would most likely truncate
-        // again — give the next attempt twice the room (bounded by the
-        // ceiling the budget wrapper reserved for this call)
+        // again, so the retry gets more room (bounded by the ceiling the
+        // budget wrapper reserved for this call)
         if (choice?.finish_reason === "length" && !escalationRefused) {
-          maxTokens = Math.min(ceiling, maxTokens * 2);
+          maxTokens = Math.min(ceiling, maxTokens * ESCALATION_FACTOR);
         }
         continue;
       }
-      // A2: drain the body, but the raw provider response can echo prompt text
-      // or account metadata. Only surface it when SUPERCUT_VERBOSE is set;
-      // otherwise keep status + provider label (+ auth hint) and omit the body.
+      // the raw provider response can echo prompt text or account metadata.
+      // It is read to classify the error, but only surfaced when
+      // SUPERCUT_VERBOSE is set; otherwise keep status + provider label.
       const snippet = (await res.text()).slice(0, 300);
       const detail = process.env.SUPERCUT_VERBOSE ? ` ${snippet}` : "";
-      if (res.status === 400 && maxTokens > accepted) {
+      if (res.status === 400 && maxTokens > accepted && OUTPUT_SIZE_COMPLAINT.test(snippet)) {
         // the provider caps output below the escalated size: go back to the
         // largest size it accepted and stop escalating (retry, don't fail)
         lastErr = `400 at escalated max_tokens ${maxTokens}:${detail}`;
@@ -203,12 +276,14 @@ export class OpenAICompatibleClient implements LlmClient {
         throw new Error(`LLM auth failed (${res.status}, ${this.label}) — check your API key.${detail}`);
       }
       if (res.status !== 429 && res.status < 500) {
+        // includes a 400 that does not blame the output size: retrying a
+        // malformed request at any size only burns attempts
         throw new Error(`LLM request rejected (${res.status}, ${this.label}):${detail}`);
       }
       lastErr = `${res.status}:${detail}`;
-      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      await backoff(attempt);
     }
-    throw new Error(`LLM unavailable after 4 attempts (${this.label}): ${lastErr}`);
+    throw new Error(`LLM unavailable (${this.label}): ${lastErr}`);
   }
 }
 
@@ -252,10 +327,9 @@ export function estimateTokens(opts: ChatOptions): number {
  * estimated prompt size would carry the total past it — so a misbehaving
  * model/retry loop is bounded instead of burning unbounded spend.
  * Metering prefers provider-reported usage; a provider that reports none is
- * metered by the local estimate instead of being unmeterable (the advertised
- * --max-tokens default used to be inert exactly for custom endpoints, the
- * case most likely to omit usage). budget <= 0 disables the cap
- * (accounting still runs).
+ * metered at its worst case (prompt estimate plus max_tokens) so the cap holds
+ * for custom endpoints, the case most likely to omit usage. budget <= 0
+ * disables the cap (accounting still runs).
  */
 export class BudgetedLlmClient implements LlmClient {
   readonly label: string;
@@ -311,28 +385,33 @@ export class BudgetedLlmClient implements LlmClient {
       );
     }
     const before = this.inner.tokensUsed ?? 0;
+    const meter: SpendMeter = { spent: 0 };
+    const record = (delta: number) => {
+      this.metered += delta;
+      this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + delta);
+    };
+    // what the inner client says this call may have billed, worst case
+    // included (timed-out attempts, usage-less providers); a client that
+    // does not fill the meter falls back to its reported usage delta
+    const spentBy = () => (meter.spent > 0 ? meter.spent : (this.inner.tokensUsed ?? 0) - before);
     let out: string;
     try {
       const left = this.budget - this.metered;
-      out = await this.inner.chat(
-        this.budget > 0 ? { ...opts, spendLimit: Math.min(opts.spendLimit ?? Infinity, left) } : opts,
-      );
+      out = await this.inner.chat({
+        ...opts,
+        spendMeter: meter,
+        ...(this.budget > 0 ? { spendLimit: Math.min(opts.spendLimit ?? Infinity, left) } : {}),
+      });
     } catch (err) {
-      // a call that fails after the provider billed it (e.g. every attempt came
-      // back empty) still spent those tokens
-      const billed = (this.inner.tokensUsed ?? 0) - before;
-      if (billed > 0) {
-        this.metered += billed;
-        this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + billed);
-      }
+      // a call that fails after the provider billed it (every attempt empty,
+      // a timeout) still spent those tokens
+      const billed = spentBy();
+      if (billed > 0) record(billed);
       throw err;
     }
-    const providerDelta = (this.inner.tokensUsed ?? 0) - before;
-    // prefer the provider's number for this call; fall back to the local
-    // estimate (prompt + completion) so a usage-less provider is still metered
-    const delta = providerDelta > 0 ? providerDelta : promptEstimate + Math.ceil(out.length / CHARS_PER_TOKEN);
-    this.metered += delta;
-    this.spentByStage.set(this.stage, (this.spentByStage.get(this.stage) ?? 0) + delta);
+    // a client that reports nothing at all is metered by the local estimate
+    const reported = spentBy();
+    record(reported > 0 ? reported : promptEstimate + Math.ceil(out.length / CHARS_PER_TOKEN));
     return out;
   }
 }
@@ -373,8 +452,8 @@ export const UNTRUSTED_RULES =
  *  Any literal marker that appears anyway is scrubbed to a FIXPOINT as belt
  *  and braces — a single pass is NOT enough, because removing a marker nested
  *  inside its own text closes the surrounding halves back into a valid marker
- *  (`<<<END UNTRUSTED PAGE ` + END + `CONTENT>>>` reassembled a fresh END
- *  under the old fixed markers; found in review). */
+ *  (`<<<END UNTRUSTED PAGE ` + END + `CONTENT>>>` reassembles a fresh END
+ *  if the nested marker is removed in one pass). */
 export function wrapUntrusted(text: string): string {
   let scrubbed = text;
   while (scrubbed.includes(UNTRUSTED_BEGIN) || scrubbed.includes(UNTRUSTED_END)) {

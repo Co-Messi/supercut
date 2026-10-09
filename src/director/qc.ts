@@ -141,11 +141,11 @@ export async function visionQc(
     const firstInteraction = log.events.find(
       (e) => (e.type === "click" || e.type === "hover" || e.type === "type") && e.t >= s.t && e.t < end,
     );
-    // B6 (review): one frame per scene let LATE errors (a result that errors out
-    // after the click, a modal that pops during the hold) pass QC. Sample up to
-    // 3 frames per scene — the key moment (after the payoff), a mid frame, and
-    // the scene's final hold frame — so a late blank/error is caught. Capped at
-    // 3 to bound vision token cost.
+    // One frame per scene would let LATE errors (a result that errors out after
+    // the click, a modal that pops during the hold) pass QC. Sample up to 3
+    // frames per scene: the key moment (after the payoff), a mid frame, and the
+    // scene's final hold frame, so a late blank/error is caught. Capped at 3 to
+    // bound vision token cost.
     const keyT = (firstInteraction?.t ?? s.t) + 800;
     // the last frame we can attribute to this scene; for the final scene `end`
     // is Infinity, so fall back to the take's last captured frame time.

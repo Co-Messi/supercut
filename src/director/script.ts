@@ -25,7 +25,7 @@ const SYSTEM = `You write filming scripts ("recipes") for supercut, which record
 {
   "version": 0,
   "app_url": string,
-  "music_track": one of "pulse" | "daybreak" | "midnight" | "momentum" | "off",
+  "music_track": one of ${[...MUSIC_TRACKS, "off"].map((t) => `"${t}"`).join(" | ")},
   "scenes": [{
     "name": kebab-case string,
     "priority": 1..N (1 = most important, cut last),
@@ -75,8 +75,8 @@ export async function writeRecipe(
   // page is not modeled — selectors validate against entry.url only.)
   const pageUrls = new Set<string>(digests.map((d) => d.url));
   // selector → isHidden, per page. The hidden flag lets us VALIDATE the
-  // reveal-order rule (B5 review) instead of only asking the model to honor it
-  // in the prompt: a hidden selector must be unlocked by a prior action.
+  // reveal-order rule instead of only asking the model to honor it in the
+  // prompt: a hidden selector must be unlocked by a prior action.
   const byPage = new Map<string, Map<string, boolean>>();
   for (const d of digests) {
     byPage.set(d.url, new Map(d.inventory.map((i) => [i.selector, i.hidden === true])));
@@ -108,11 +108,11 @@ export async function writeRecipe(
     })
     .join("\n\n");
 
-  // (review) EVERYTHING page-derived sits inside ONE untrusted region — not
+  // EVERYTHING page-derived sits inside ONE untrusted region, not
   // just the raw inventory. product_summary, money-moment titles/whys, page
   // URLs, and selectors are analyze-stage OUTPUT generated from the same
   // attacker-controlled page text and checked only for length and schema; a
-  // page that induces analyze to copy an instruction into a title used to see
+  // page that induces analyze to copy an instruction into a title must not see
   // that instruction re-enter this prompt OUTSIDE the markers, laundered into
   // apparently trusted text. The imperative scaffolding (one scene per beat,
   // music rule) stays outside and refers to the marked region structurally.

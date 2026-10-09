@@ -1,0 +1,14 @@
+{
+  "name": "supercut",
+  "description": "Let your coding agent direct a cinematic launch video of your running web app. No LLM API key needed.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Brayden Siew",
+    "url": "https://github.com/Co-Messi"
+  },
+  "homepage": "https://github.com/Co-Messi/supercut",
+  "repository": "https://github.com/Co-Messi/supercut",
+  "license": "MIT",
+  "keywords": ["launch-video", "demo-video", "playwright", "product-demo", "video"],
+  "skills": "./.claude/skills/"
+}

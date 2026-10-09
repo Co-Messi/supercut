@@ -8,6 +8,7 @@
  *              │     cursor path → CDP mouse events           │──▶ frames/*.jpg
  *              │     perform (click/type/scroll/hover/wait)   │    + frame index
  *              │     log event {t scheduled, observed_t}      │──▶ events.json
+ *              │   page changes → navigation events          │
  *              │   on action timeout → scene failed, continue │
  *              └─────────────────────────────────────────────┘
  *
@@ -21,17 +22,25 @@
  * byte-identical across runs; `t` carries only wall-clock jitter of a few ms.
  *
  * Capture path: CDP screencast JPEG (q92) at 2x DPR, frames streamed straight
- * to disk. PNG at 3840x2160 spent so long encoding each frame that the source
- * topped out well under 60fps; JPEG at q92 is visually lossless for UI at
- * this resolution (every output pixel is a ~2x downsample of the source).
+ * to disk. JPEG keeps the encode fast enough for a 60fps source, and q92 is
+ * visually lossless for UI at this resolution (every output pixel is a ~2x
+ * downsample of the source). A frame byte-identical to the previous one is
+ * not written again: its frames-index entry names the earlier file.
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium, type CDPSession, type Page } from "playwright";
+import { chromium, type CDPSession, type Page, type Response } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
-import { cursorPath, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
-import { installRequestGate, settleGatedRedirect, type GatedContext } from "../security/browser-gate.js";
+import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
+import { NavigationLog } from "./navigation.js";
+import {
+  GATED_REDIRECT_HEADER,
+  installRequestGate,
+  settleGatedRedirect,
+  type GatedContext,
+} from "../security/browser-gate.js";
 import {
   assertSafeNavigationUrl,
   createRequestGate,
@@ -51,58 +60,66 @@ const JPEG_QUALITY = 92;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
 /** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
  *  a settle pause before the schedule continues */
-const SETTLE_MS = 400;
+export const SETTLE_MS = 400;
 /** every page opens at rest for at least this long before its first action:
  *  the render's establishing shot reads the page wide, and the first punch-in
  *  has time to arrive BEFORE the first click instead of chasing it */
-const PRE_ROLL_MS = 1_000;
+export const PRE_ROLL_MS = 1_000;
 /** the pointer comes to rest on a target before pressing, and a press is
  *  held like a finger does — a zero-length press/release pair right at the
- *  end of the travel read as robotic */
+ *  end of the travel reads as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
+/** events.json `failed_scenes` bounds (event-log schema) */
+const MAX_FAILED_SCENES = 100;
+const MAX_FAILED_SCENE_NAME = 200;
+/** the beat after select-all and after delete when clearing a field: fixed,
+ *  so a prefilled field never shifts the seeded rhythm of what follows */
+const CLEAR_BEAT_MS = 120;
 
 /**
  * CDP screencast is change-driven: a static page produces NO compositor
- * commits, so capture collapses to a few fps and the renderer stretches one
- * frame across seconds. This rAF beacon — a 1×1px fixed corner element on its
- * own compositor layer, toggling between two sub-perceptual opacities — forces
- * one commit per display frame. It covers the WHOLE viewport at 1-2e-4
- * opacity: a 1px corner beacon stopped registering damage in some page states
- * (a hovered, transformed row plus a timer re-setting identical text dropped
- * the source to the timer's 20Hz), while full-viewport damage always
- * captures. 2e-4 alpha moves no 8-bit channel by even half a level, so the
- * frames are pixel-identical to the page; pointer-events:none + fixed
- * positioning means it can never interfere with hit-testing or layout.
- * Injected as an init script so it survives full navigations; the rAF loop
- * itself survives SPA route changes.
+ * frames, so capture collapses to a few fps and the renderer stretches one
+ * frame across seconds. The repaint beacon forces one frame per display
+ * refresh: a full-viewport layer whose opacity animates between 1e-4 and
+ * 2e-4, an amount that moves no 8-bit channel by even half a level, so every
+ * frame is pixel-identical to the page. It covers the whole viewport because
+ * full-viewport damage registers in every page state (a small corner layer
+ * stopped registering under a hovered, transformed row).
+ *
+ * It is a CSS animation on `:root::after`, in a constructed stylesheet
+ * adopted by the document:
+ *  - no DOM node and no DOM mutation, so the app's MutationObservers,
+ *    session-replay tools, idle detectors and structural selectors see an
+ *    untouched page;
+ *  - an opacity animation runs on the compositor thread, so frames keep
+ *    flowing while the page's main thread is busy in a long task;
+ *  - pointer-events:none and fixed positioning keep it out of hit-testing
+ *    and layout.
+ * Its declarations are !important (except opacity, which the animation
+ * drives) and outrank a page's `*::after` reset by specificity. Injected as an
+ * init script so every document gets it; re-adopted if the page replaces
+ * document.adoptedStyleSheets.
  */
-const REPAINT_BEACON_ID = "__supercut_repaint_beacon__";
+const REPAINT_BEACON_CSS =
+  "@keyframes __supercut_repaint_beacon{from{opacity:0.0001}to{opacity:0.0002}}" +
+  ":root::after{content:''!important;display:block!important;position:fixed!important;" +
+  "inset:0!important;width:100vw!important;height:100vh!important;pointer-events:none!important;" +
+  "z-index:2147483647!important;background:#000!important;opacity:0.0001;" +
+  "will-change:opacity!important;contain:strict!important;" +
+  "animation:__supercut_repaint_beacon 1s linear infinite alternate!important}";
 const REPAINT_BEACON_SCRIPT = `(() => {
   if (window.__supercutBeacon) return;
   window.__supercutBeacon = true;
-  let el = null;
-  let flip = false;
-  const tick = () => {
-    if (!el || !el.isConnected) {
-      const root = document.body || document.documentElement;
-      if (root) {
-        el = document.createElement("div");
-        el.id = ${JSON.stringify(REPAINT_BEACON_ID)};
-        el.setAttribute("aria-hidden", "true");
-        el.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;" +
-          "pointer-events:none;z-index:2147483647;background:#000;opacity:0.0001;" +
-          "will-change:opacity;contain:strict";
-        root.appendChild(el);
-      }
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(${JSON.stringify(REPAINT_BEACON_CSS)});
+  const adopt = () => {
+    if (!document.adoptedStyleSheets.includes(sheet)) {
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
     }
-    if (el) {
-      flip = !flip;
-      el.style.opacity = flip ? "0.0002" : "0.0001";
-    }
-    requestAnimationFrame(tick);
   };
-  requestAnimationFrame(tick);
+  adopt();
+  setInterval(adopt, 1000);
 })();`;
 
 /** how long after a click/type the page gets to reveal its result before the
@@ -118,11 +135,10 @@ const MUTATION_MIN_CHURN_AREA_PX = 1024;
  * Changed-region tracker: records elements mutated/added after an action so
  * the capture stage can frame the RESULT by default, even when the script
  * named no focus_selector. Injected as an init script (survives navigations);
- * armed per action from Node. The repaint beacon excludes itself by id.
+ * armed per action from Node.
  */
 const MUTATION_OBSERVER_SCRIPT = `(() => {
   if (window.__supercutMutations) return;
-  const beaconId = ${JSON.stringify(REPAINT_BEACON_ID)};
   let tracked = null;
   const observer = new MutationObserver((records) => {
     if (!tracked) return;
@@ -153,7 +169,7 @@ const MUTATION_OBSERVER_SCRIPT = `(() => {
       const vw = window.innerWidth, vh = window.innerHeight;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       const consider = (el, churnOnly) => {
-        if (!el.isConnected || el.id === beaconId) return;
+        if (!el.isConnected) return;
         // visibility is evaluated NOW, at collection end — a transient overlay
         // (toast/popup already removed or mid fade-out, including via an
         // ancestor's opacity/display) must never become the framed result
@@ -203,6 +219,9 @@ export interface RecordResult {
    *  healthy beacon-era capture; near zero when the screencast starved. */
   avgSourceFps: number;
   failedScenes: string[];
+  /** why each failed scene failed, by scene name (a dependency cascade
+   *  names the scene it depended on) */
+  sceneErrors: Record<string, string>;
   aborted: boolean;
   outDir: string;
 }
@@ -221,6 +240,14 @@ function ceilToFrame(ms: number): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** a scene entry answered with an HTTP error is not the app: most often the
+ *  app is not running at that URL, or another server holds the port */
+function entryPageError(url: string, response: Response | null): string | undefined {
+  const status = response?.status() ?? 0;
+  if (status < 400) return undefined;
+  return `entry page ${url} returned ${status}; is your app running there, and is something else using that port?`;
+}
+
 /** same document URL (normalized; a differing fragment still counts as a
  *  different entry, so the recipe's explicit navigation is honoured) */
 function sameUrl(a: string, b: string): boolean {
@@ -231,13 +258,33 @@ function sameUrl(a: string, b: string): boolean {
   }
 }
 
-// Navigate robustly. Waiting for "load" hangs on apps that pull heavy subresources
-// from a CDN (e.g. the Pandora demo's d3 bundle) or hold an open connection — the
-// 10s budget blew on a page whose `load` only fired at ~12s, even though the DOM
-// was interactive almost immediately. So: resolve on "domcontentloaded" (DOM parsed
-// + scripts available), then give the full `load` a best-effort grace window but
-// never fail on it. SETTLE_MS after this lets first paints land. Returns the nav
-// response so callers can re-check the final URL against the SSRF policy.
+function stripFragment(u: string): string {
+  try {
+    const url = new URL(u);
+    url.hash = "";
+    return url.href;
+  } catch {
+    return u;
+  }
+}
+
+/** origin + path: what an SPA route change changes (query and hash do not) */
+function pathOf(u: string): string {
+  try {
+    const url = new URL(u);
+    return url.origin + url.pathname;
+  } catch {
+    return u;
+  }
+}
+
+// Navigate robustly: resolve on "domcontentloaded" (DOM parsed, scripts
+// available), not "load". An app that pulls a heavy bundle from a CDN or holds
+// a connection open can fire `load` well past the action budget while its DOM
+// has long been interactive, so `load` gets a best-effort grace window and
+// never fails the navigation. SETTLE_MS after this lets first paints land.
+// Returns the nav response so callers can re-check the final URL against the
+// SSRF policy and read its HTTP status.
 async function gotoReady(page: Page, url: string) {
   // guard ON: a redirected navigation first lands on the gate's stub, which
   // replaces itself with the target — wait for the real document
@@ -266,8 +313,20 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const captureFrames = opts.captureFrames ?? true;
   const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   const rng = makeRng(opts.seed ?? 1);
+  /** a caller who left the option unset gets the guard by default; its
+   *  refusal names the option that films a local app */
+  const explainDefault = (err: unknown): never => {
+    if (opts.allowPrivateNetwork === undefined && err instanceof Error && /private.network/i.test(err.message)) {
+      throw new Error(
+        `${err.message}. record() refuses private hosts unless allowPrivateNetwork: true is passed ` +
+          "(the CLI passes it unless --block-private-network is set)",
+        { cause: err },
+      );
+    }
+    throw err;
+  };
 
-  await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork);
+  await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork).catch(explainDefault);
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
@@ -294,7 +353,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       const host = new URL(u).hostname;
       if (seenHosts.has(host)) continue;
       seenHosts.add(host);
-      const pinned = await resolveAndPinHost(u, { allowPrivateNetwork });
+      const pinned = await resolveAndPinHost(u, { allowPrivateNetwork }).catch(explainDefault);
       if (pinned) rules.push(pinned.hostResolverRule);
     }
     if (rules.length > 0) launchArgs.push(`--host-resolver-rules=${rules.join(",")}`);
@@ -309,6 +368,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const frameIndex: FrameIndexEntry[] = [];
   let firstFrameStamp = -1;
   let frameCounter = 0;
+  /** the last frame written to disk: an identical next frame reuses its file */
+  let lastFrame: { hash: string; file: string } | undefined;
   // true while an inter-scene navigation is in flight: the page is blank/white
   // mid-reload, and capturing those frames makes the video FLASH at every scene
   // change. Skip them — the renderer holds the last good frame across the gap.
@@ -347,35 +408,57 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     }
   }
 
-  /** true while the recipe itself navigates (entry / goto): those page changes
-   *  are scene structure, not action results, and are not logged */
-  let recipeNavInFlight = false;
   /** capture timeline started (events may be stamped) */
   let capturing = false;
-  /** an action-triggered main-frame navigation request is in flight */
-  let actionNavPending = false;
-  async function recipeNavigation<T>(go: () => Promise<T>): Promise<T> {
-    recipeNavInFlight = true;
-    try {
-      return await go();
-    } finally {
-      recipeNavInFlight = false;
-      actionNavPending = false;
-    }
-  }
+  /** the page may hold state a fresh load would not: something was clicked,
+   *  typed, scrolled or navigated since the last entry load, or a scene
+   *  failed partway. Hover and wait leave it clean. */
+  let pageDirty = false;
 
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
   let wallStart = 0;
   const cursor = { x: VIEWPORT.width / 2, y: VIEWPORT.height - 100 }; // parked off-content
   const failedScenes: string[] = [];
+  const sceneErrors: Record<string, string> = {};
   let aborted = false;
+
+  /** record a failed scene and say why; true when the take stops (the
+   *  opening scene failed, or more than half the scenes are lost) */
+  function failScene(name: string, reason: string, opening: boolean): boolean {
+    failedScenes.push(name);
+    sceneErrors[name] = reason;
+    const lost = `${failedScenes.length}/${recipe.scenes.length} scenes lost`;
+    if (opening || failedScenes.length > recipe.scenes.length / 2) {
+      aborted = true;
+      console.error(`abort: scene "${name}" failed (${reason}); ${lost}`);
+      return true;
+    }
+    console.error(`scene "${name}" failed (${reason}); continuing, ${lost}`);
+    return false;
+  }
 
   const observedNow = () => Date.now() - wallStart;
   /** monotonic stamp: event `t` rides the observed clock; sleep/rounding jitter
    *  of a few ms must never produce an out-of-order timeline */
   let lastStampT = 0;
   const stamp = (t: number): number => (lastStampT = Math.max(lastStampT, t));
+
+  /** guard ON: URLs (fragment stripped) the request gate answered with its
+   *  redirect stub; the stub and the document replacing it are one change */
+  const gatedStubs = new Set<string>();
+  /**
+   * Every page change while filming is logged: a scene entry as its `scene`
+   * event (its whole window, settle included, is suppressed below), anything
+   * else (a clicked link, a submit, a goto, a page redirecting itself, an
+   * SPA route change) as a `navigation` event.
+   */
+  const navLog = new NavigationLog({
+    events,
+    stamp,
+    raiseFloor: (t) => { lastStampT = Math.max(lastStampT, t); },
+    isGatedStub: (url) => gatedStubs.has(stripFragment(url)),
+  });
 
   async function moveCursor(points: CursorPoint[], baseT: number): Promise<void> {
     const t0 = Date.now();
@@ -396,7 +479,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // boundingBox returns document coordinates for below/above-fold elements
     // (e.g. y=6549 or y=-3883), the cursor + camera then aim off-frame and the
     // shot is pure background. Scrolling is also how a single-viewport recording
-    // reveals different parts of a long page. (Found on the first live run.)
+    // reveals different parts of a long page.
     const pre = await loc.boundingBox();
     const alreadyInView =
       !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
@@ -439,6 +522,19 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     const box = await loc.boundingBox();
     if (!box) throw new Error(`selector "${selector}" has no bounding box`);
     return { x: box.x, y: box.y, w: box.width, h: box.height };
+  }
+
+  /** the focused element (through open shadow roots) is a text field or an
+   *  editable region that already holds text */
+  async function focusedFieldHasText(): Promise<boolean> {
+    return page
+      .evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value.length > 0;
+        return el instanceof HTMLElement && el.isContentEditable && (el.textContent ?? "").length > 0;
+      })
+      .catch(() => false);
   }
 
   type MutationsApi = {
@@ -529,12 +625,15 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   async function runAction(a: Action): Promise<void> {
     const scheduledT = clock;
     const slotEnd = clock + a.duration_ms;
+    if (a.kind === "click" || a.kind === "type" || a.kind === "goto" || a.kind === "scroll") pageDirty = true;
 
     switch (a.kind) {
       case "goto": {
         if (!a.url) throw new Error("goto action requires url");
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork });
-        const response = await recipeNavigation(() => gotoReady(page, a.url!));
+        // a mid-scene goto is filmed (no frame suppression), so its commit is
+        // logged as a navigation like any other page change
+        const response = await gotoReady(page, a.url);
         await assertSafeNavigationUrl(a.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
         break;
       }
@@ -585,7 +684,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
         if (a.kind === "type") {
           const text = a.text ?? "";
-          const chars = [...text];
+          const keys = graphemes(text);
           const remaining = Math.max(200, a.duration_ms - (observedNow() - scheduledT));
           // human rhythm: a beat after the focusing click, log-normal gaps
           // around ~100ms (longer after spaces/punctuation, never under 45ms),
@@ -593,14 +692,28 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           // schedule shifts (timestamp canon) — never a pasted-in string.
           const rhythm = typingPlan(text, remaining, rng);
           await sleep(rhythm.beforeFirstKey);
-          for (const [i, ch] of chars.entries()) {
-            await cdp.send("Input.insertText", { text: ch });
-            if (i < chars.length - 1) await sleep(rhythm.keyDelays[i]!);
+          // the action types `text` into the field, not after what was there:
+          // select-all then delete, as real keys, so the app sees an edit
+          if (await focusedFieldHasText()) {
+            await page.keyboard.press("ControlOrMeta+a");
+            await sleep(CLEAR_BEAT_MS);
+            await page.keyboard.press("Backspace");
+            await sleep(CLEAR_BEAT_MS);
+          }
+          // real key events (keydown, keypress, input, keyup) per grapheme, so
+          // keyup-driven autocomplete, masks and hotkeys react as they do to a
+          // person. keyboard.type presses a single character the layout has
+          // and inserts it otherwise; a multi-code-point grapheme (an emoji
+          // sequence, a combining mark) goes in as one insert.
+          for (const [i, g] of keys.entries()) {
+            if ([...g].length === 1) await page.keyboard.type(g);
+            else await page.keyboard.insertText(g);
+            if (i < keys.length - 1) await sleep(rhythm.keyDelays[i]!);
           }
           events.push({
             t: stamp(observedNow()), observed_t: observedNow(), type: "type",
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
-            textLen: [...text].length, // code points, matching the for...of insertion
+            textLen: keys.length,
           });
           if (a.submit) {
             // Many query inputs only reveal their payoff on submit (a form's
@@ -685,19 +798,34 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await page.addInitScript(MUTATION_OBSERVER_SCRIPT);
     cdp = await page.context().newCDPSession(page);
 
-    // log page changes an ACTION caused (a clicked link, a form submit): a
-    // cross-document navigation request from the main frame that the recipe
-    // did not issue itself, stamped when the new document commits
-    page.on("request", (req) => {
-      if (capturing && !recipeNavInFlight && req.isNavigationRequest() && req.frame() === page.mainFrame()) {
-        actionNavPending = true;
-      }
+    // page changes come from the browser's own commit events, which say
+    // whether a new document committed (Page.frameNavigated) or the URL
+    // changed within the document (Page.navigatedWithinDocument). A request
+    // that never commits (204, download, abort) produces neither, so it can
+    // leave nothing behind. A scene entry is suppressed for its whole window:
+    // its `scene` event is the page change.
+    if (!allowPrivateNetwork) {
+      page.on("response", (res) => {
+        if (res.headers()[GATED_REDIRECT_HEADER] !== undefined) gatedStubs.add(stripFragment(res.url()));
+      });
+    }
+    await cdp.send("Page.enable");
+    let mainFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
+    let mainUrl = "";
+    const logging = () => capturing && !isNavigating;
+    cdp.on("Page.frameNavigated", ({ frame }) => {
+      if (frame.parentId) return;
+      mainFrameId = frame.id;
+      mainUrl = frame.url;
+      if (logging()) navLog.commit("document", observedNow(), frame.url);
     });
-    page.on("framenavigated", (frame) => {
-      if (frame !== page.mainFrame() || !actionNavPending || recipeNavInFlight) return;
-      actionNavPending = false;
-      const now = observedNow();
-      events.push({ t: stamp(now), observed_t: now, type: "navigation" });
+    cdp.on("Page.navigatedWithinDocument", ({ frameId, url }) => {
+      if (frameId !== mainFrameId) return;
+      const from = mainUrl;
+      mainUrl = url;
+      // a hash jump or a query-only pushState (a filter, a tab) is the same
+      // page; only a new path is a route change
+      if (logging() && pathOf(from) !== pathOf(url)) navLog.commit("spa", observedNow(), url);
     });
 
     if (captureFrames) {
@@ -724,13 +852,23 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           firstFrameStamp = stampMs;
           signalFirstFrame();
         }
-        const file = `frames/${String(frameCounter++).padStart(6, "0")}.jpg`;
         try {
-          await writeFile(join(outDir, file), Buffer.from(ev.data, "base64"));
+          const bytes = Buffer.from(ev.data, "base64");
+          const hash = createHash("sha1").update(bytes).digest("base64");
+          // the beacon forces a commit every display frame, so most frames of
+          // a still page are byte-identical: write each distinct picture once
+          // and point the repeated index entries at that file
+          let file = lastFrame?.hash === hash ? lastFrame.file : undefined;
+          if (!file) {
+            file = `frames/${String(frameCounter++).padStart(6, "0")}.jpg`;
+            await writeFile(join(outDir, file), bytes);
+            lastFrame = { hash, file };
+          }
           // clamp: delivery jitter can hand us a frame stamped a hair BEFORE
           // the first-processed frame; a negative t_source would sort to
           // entry 0 and fail render-plan validation
           frameIndex.push({ file, t_source: Math.max(0, stampMs - firstFrameStamp) });
+          if (wallStart > 0) navLog.frame(stampMs - wallStart, hash);
         } catch {
           writeErrors++;
         } finally {
@@ -754,9 +892,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork });
     const firstResponse = await gotoReady(page, firstScene.entry.url);
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
-    await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
+    // an error page is not worth filming: the opening scene fails and the
+    // take ends before the screencast starts
+    const firstEntryError = entryPageError(firstScene.entry.url, firstResponse);
+    if (firstEntryError) failScene(firstScene.name, firstEntryError, true);
+    else await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
-    if (captureFrames) {
+    if (captureFrames && !aborted) {
       await cdp.send("Page.startScreencast", {
         format: "jpeg",
         quality: JPEG_QUALITY,
@@ -778,27 +920,21 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         ? firstFrameStamp
         : Date.now();
 
-    capturing = true;
+    capturing = !aborted;
     // pre-roll: the opening page at rest before anything moves
-    {
+    if (capturing) {
       const wait = PRE_ROLL_MS - observedNow();
       if (wait > 0) await sleep(wait);
       clock = stamp(Math.max(PRE_ROLL_MS, ceilToFrame(observedNow())));
     }
 
-    for (let i = 0; i < recipe.scenes.length; i++) {
+    for (let i = 0; i < recipe.scenes.length && !aborted; i++) {
       const scene: Scene = recipe.scenes[i]!;
 
       // dependency cascade: parent failed → this scene dies with it
-      if (scene.depends_on.some((d) => failedScenes.includes(d))) {
-        failedScenes.push(scene.name);
-        if (failedScenes.length > recipe.scenes.length / 2) {
-          aborted = true;
-          console.error(
-            `abort: ${failedScenes.length}/${recipe.scenes.length} scenes lost (cascade from "${scene.depends_on.join(",")}")`,
-          );
-          break;
-        }
+      const failedParent = scene.depends_on.find((d) => failedScenes.includes(d));
+      if (failedParent !== undefined) {
+        if (failScene(scene.name, `depends on failed scene "${failedParent}"`, false)) break;
         continue;
       }
 
@@ -809,31 +945,36 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
-          // the previous scene already left the browser on this exact page:
-          // re-navigating only reloads it — a second freeze in the footage and
-          // a flash of the same page. Skipped only after a scene that completed
-          // (a failed one may have left the page in a state a reload resets).
-          const prev = recipe.scenes[i - 1]!;
-          const alreadyThere =
-            !failedScenes.includes(prev.name) && sameUrl(page.url(), scene.entry.url);
+          // every scene is written as if it opens on a freshly loaded entry
+          // page. When the browser already shows that exact page and nothing
+          // since its load changed state (hover and wait only), the reload is
+          // skipped: it would only add a freeze and a flash of the same page.
+          // Typed text, a selection, an open modal, a scroll position, or a
+          // failed scene's leftovers all force the reload.
+          const alreadyThere = !pageDirty && sameUrl(page.url(), scene.entry.url);
           if (!alreadyThere) {
             // suppress capture across the reload so the blank page never lands in
             // the footage (the scene-change flash); resume once it has painted.
+            // The same window suppresses navigation logging: every commit in it
+            // is this scene's entry, which its `scene` event already marks.
             // MUST reset in finally: if gotoReady/assert throws, leaving this true
             // would make the screencast handler drop EVERY subsequent frame and
             // freeze the rest of the video on the previous scene.
             isNavigating = true;
             try {
-              const response = await recipeNavigation(() => gotoReady(page, scene.entry.url));
+              const response = await gotoReady(page, scene.entry.url);
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
+              const entryError = entryPageError(scene.entry.url, response);
+              if (entryError) throw new Error(entryError);
               await sleep(SETTLE_MS);
+              pageDirty = false;
             } finally {
               isNavigating = false;
             }
           }
           // Timestamp canon: when nav finishes early, dwell out the unused
-          // allowance in WALL time so pixels and schedule stay in lockstep —
-          // advancing only the clock made the footage run ~1s ahead of every
+          // allowance in WALL time so pixels and schedule stay in lockstep;
+          // advancing only the clock would put the footage ~1s ahead of every
           // logged event after a fast local navigation. The new page (its
           // first captured frame is at navEnd) also gets its pre-roll.
           const navEnd = observedNow();
@@ -852,14 +993,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           await assertPagePolicy();
         }
       } catch (err) {
-        failedScenes.push(scene.name);
-        const failedWithDeps = failedScenes.length;
-        if (i === 0 || failedWithDeps > recipe.scenes.length / 2) {
-          aborted = true;
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`abort: scene "${scene.name}" failed (${msg}); ${failedWithDeps}/${recipe.scenes.length} scenes lost`);
-          break;
-        }
+        pageDirty = true;
+        if (failScene(scene.name, err instanceof Error ? err.message : String(err), i === 0)) break;
       }
     }
   } finally {
@@ -886,6 +1021,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // The render stage keys its skew/health gates off this marker — never off
     // the capture's frame rate — so a starved take can't pass as "legacy".
     t_source_unified: true,
+    // navigation declaration (schema): every page change while filming is a
+    // `scene` event (scene entries) or a `navigation` event (everything
+    // else), so the renderer may read an unexplained frame gap as a stall
+    navigation_logged: true,
+    // held to the log schema's bounds (recipe scene names are unbounded), so
+    // a take with failures always parses
+    failed_scenes: failedScenes.slice(0, MAX_FAILED_SCENES).map((n) => n.slice(0, MAX_FAILED_SCENE_NAME)),
     viewport: { width: VIEWPORT.width, height: VIEWPORT.height, dpr: DPR },
     fps: FPS,
     events,
@@ -908,5 +1050,5 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const spanMs = Math.max(lastFrameT, maxEventT);
   const avgSourceFps = spanMs > 0 ? (frameIndex.length / spanMs) * 1000 : 0;
 
-  return { eventLog, frameCount: frameIndex.length, avgSourceFps, failedScenes, aborted, outDir };
+  return { eventLog, frameCount: frameIndex.length, avgSourceFps, failedScenes, sceneErrors, aborted, outDir };
 }

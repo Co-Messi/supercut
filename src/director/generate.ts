@@ -139,8 +139,8 @@ export async function preflight(
       // is Chromium, so a UA-gating edge can 403 a URL Chromium loads fine.
       // Warn and continue; if the wall is real the crawl shows it in seconds.
       // Everything else >= 400 is as doomed as it looks (a 404/410/5xx start
-      // page films as an error screen) and used to surface only deep in the
-      // crawl — fail here instead. --skip-preflight overrides the whole probe.
+      // page films as an error screen) and would otherwise surface only deep
+      // in the crawl, so fail here. --skip-preflight overrides the whole probe.
       if (status === 401 || status === 403) {
         log(
           `preflight warning: ${url} responded ${status} — continuing (auth walls at the root are ` +
@@ -158,7 +158,7 @@ export async function preflight(
       clearTimeout(timer);
     }
   }
-  // (review) recipe preview must not need the render toolchain: --dry-run
+  // A recipe preview must not need the render toolchain: --dry-run
   // stops after analyze + script, so nothing is filmed or rendered and a
   // machine without ffmpeg can still produce and review a recipe. The URL
   // policy and reachability checks above still ran.
@@ -439,7 +439,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
       if (result.aborted) {
         throw new Error(
-          `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
+          `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe` +
+            formatSceneErrors(result.sceneErrors),
         );
       }
       // capture-health gate, BEFORE any QC spend: a starved capture (repaint
@@ -530,9 +531,20 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
     // it; nothing is ever drawn over the app. (The director still writes copy in
     // the report for reference, but it is deliberately NOT rendered.)
+    // record() aborts the take when most scenes fail; a take that lost a few
+    // lower-priority scenes is still filmed, QC'd and rendered here, so the
+    // render's partial-take gate is lifted for this one known take only.
+    const partial = result.failedScenes.length > 0;
+    if (partial) {
+      log(
+        `   warning: rendering without failed scene(s) [${result.failedScenes.join(", ")}]` +
+          formatSceneErrors(result.sceneErrors),
+      );
+    }
     const renderRes = await renderTake({
       takeDir,
       outFile,
+      ...(partial ? { allowPartial: true } : {}),
       ...(opts.background ? { background: opts.background } : {}),
       ...(music.spec ? { music: music.spec } : {}),
     });
@@ -548,4 +560,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     logUsage();
     throw err;
   }
+}
+
+/** "; name: reason" pairs for the scenes record() reported as failed. */
+function formatSceneErrors(errors: Record<string, string> | undefined): string {
+  const entries = Object.entries(errors ?? {});
+  return entries.length ? ` (${entries.map(([name, reason]) => `${name}: ${reason}`).join("; ")})` : "";
 }

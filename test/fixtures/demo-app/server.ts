@@ -312,5 +312,5 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
 
 // Run standalone: npx tsx test/fixtures/demo-app/server.ts
 if (process.argv[1]?.endsWith("server.ts")) {
-  startDemoApp(4173).then(({ url }) => console.log(`demo app: ${url}`));
+  startDemoApp(4319).then(({ url }) => console.log(`demo app: ${url}`));
 }

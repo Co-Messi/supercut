@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { assessSkew, musicFilterChain } from "../src/render/index.js";
-import { buildRenderPlan, defaultLayout, FADE_IN_MS, FADE_OUT_MS, SUBFRAMES } from "../src/render/plan.js";
+import { SETTLE_MS } from "../src/capture/executor.js";
+import {
+  buildRenderPlan,
+  defaultLayout,
+  FADE_IN_MS,
+  FADE_OUT_MS,
+  planTake,
+  SPA_RESULT_WINDOW_MS,
+  SUBFRAMES,
+} from "../src/render/plan.js";
 import type { EventLog } from "../src/schema/index.js";
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
@@ -163,10 +172,9 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
     }));
     const plan = buildRenderPlan(log, idx);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
-    // Behaviour change: the camera used to "glide" at z=1.1 on scene 1's stale
-    // focus right up to scene 2 (6000ms read 1.1). A scene change is a cut to
-    // a different page — the camera is fully wide before it, never parked on
-    // a target that no longer exists.
+    // a scene change is a cut to a different page: the camera is fully wide
+    // before it, never gliding at z=1.1 on scene 1's stale focus up to the
+    // marker (a target that is about to disappear)
     expect(zAt(Math.round(6000 / (1000 / 60)))).toBeLessThan(1.02);
     expect(zAt(Math.round(8000 / (1000 / 60)))).toBeLessThan(1.02);
     // the second scene OPENS wide: midway through its establishing shot
@@ -256,13 +264,13 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
 });
 
 describe("source mapping: floor-hold, never a double exposure", () => {
-  // Behaviour change (was: linear cross-blend across 25-500ms gaps, a late
-  // 350ms crossfade across nav/long gaps). Two DIFFERENT source frames mixed
-  // at partial weight is a double exposure — on a real 39fps generate take
-  // 46% of output frames were ghosted. The plan has no pixels to prove two
-  // frames near-identical, and blending near-identical frames is a visual
-  // no-op, so every gap is now floor-held and a page change is a clean cut.
-  // The blend array stays in the plan (all -1/0) for host-page compatibility.
+  // Two DIFFERENT source frames mixed at partial weight is a double exposure
+  // (cross-blending every short gap ghosts a large share of a sub-60fps
+  // take's frames; a crossfade at a navigation superimposes two pages). The
+  // plan has no pixels to prove two frames near-identical, and blending
+  // near-identical frames is a visual no-op, so every gap is floor-held and a
+  // page change is a clean cut. The blend lane stays in the plan (all -1/0)
+  // for the host page contract.
   const gapIndex = [
     ...Array.from({ length: 121 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
@@ -395,6 +403,165 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
     expect(zAtT(plan, 3300)).toBeGreaterThan(1.3);
   });
 
+  describe("navigation_logged takes: only logged page changes cut", () => {
+    // a click whose app then runs a 600ms main-thread task (chart layout,
+    // results render): rAF stops, so does the screencast. Same page, a long
+    // frame gap, no navigation logged.
+    const stallLog = (extra: Partial<EventLog>) =>
+      makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          {
+            t: 3000, type: "click", bbox: [920, 500, 90, 40], selector: "#run", point: [965, 520],
+            focus_bbox: [400, 300, 1100, 500], focus_source: "llm",
+          },
+        ],
+        extra,
+      );
+    const stallIdx = idxWithGap(3000, 3600, 7000);
+
+    it("a 600ms same-page stall after a focused click keeps the payoff punch", () => {
+      const plan = buildRenderPlan(stallLog({ navigation_logged: true }), stallIdx);
+      // arrived by the click, held through the stall and the payoff dwell
+      expect(zAtT(plan, 3000)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 3300)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 3700)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 5000)).toBeGreaterThan(1.35);
+      // no snap anywhere: the camera track is continuous
+      const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+      for (let f = 1; f < plan.frames; f++) expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(0.05);
+      // the frame before the stall is held until the next one exists
+      const held = plan.sourceByFrame[Math.round(3300 / frameMs)]!;
+      expect(stallIdx[held]!.t_source).toBeLessThanOrEqual(3000);
+    });
+
+    it("the same log without the declaration keeps the legacy gap inference (a cut, no punch)", () => {
+      const plan = buildRenderPlan(stallLog({}), stallIdx);
+      for (let t = 2000; t <= 5000; t += 100) expect(zAtT(plan, t)).toBeLessThan(1.02);
+    });
+
+    it("a stall inside a same-URL scene's opening window is not that scene's reload", () => {
+      // scene 2 enters on the same URL (no reload, no gap at its marker); its
+      // payoff click stalls the page 1.7s later, well inside the window where
+      // a marker's reload gap may start. The executor reloads BEFORE a scene's
+      // first action, so a gap after that action cannot be the reload.
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 4000, type: "scene", name: "s2", priority: 2 },
+          {
+            t: 5600, type: "click", bbox: [920, 500, 90, 40], selector: "#run", point: [965, 520],
+            focus_bbox: [400, 300, 1100, 500], focus_source: "llm",
+          },
+        ],
+        { navigation_logged: true },
+      );
+      const plan = buildRenderPlan(log, idxWithGap(5700, 6300, 9000));
+      expect(zAtT(plan, 5600)).toBeGreaterThan(1.35);
+      expect(zAtT(plan, 6400)).toBeGreaterThan(1.35);
+      const z = (f: number) => plan.camera[f * SUBFRAMES * 3]!;
+      for (let f = 1; f < plan.frames; f++) expect(Math.abs(z(f) - z(f - 1))).toBeLessThan(0.05);
+    });
+
+    it("a logged navigation that left a gap still cuts", () => {
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+          { t: 2450, type: "navigation" },
+          { t: 4400, type: "click", bbox: [640, 320, 120, 40], selector: "#b", point: [700, 340] },
+        ],
+        { navigation_logged: true },
+      );
+      const plan = buildRenderPlan(log, idxWithGap(2500, 2900, 7000));
+      expect(zAtT(plan, 2910)).toBeLessThan(1.02);
+      expect(zAtT(plan, 3300)).toBeLessThan(1.02);
+      expect(zAtT(plan, 4400)).toBeGreaterThan(1.3);
+    });
+
+    it("a scene reload gap still cuts", () => {
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 1500, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
+          { t: 4000, type: "scene", name: "s2", priority: 2 },
+        ],
+        { navigation_logged: true },
+      );
+      const plan = buildRenderPlan(log, idxWithGap(4000, 4400, 7000));
+      expect(zAtT(plan, 4000)).toBeLessThan(1.02);
+      expect(zAtT(plan, 4450)).toBeLessThan(1.02);
+    });
+  });
+
+  it("an SPA route change (kind spa) is a page change: wide at the change, no punch dwelling on the old route", () => {
+    for (const extra of [{}, { navigation_logged: true }]) {
+      const log = makeLog(
+        [
+          { t: 0, type: "scene", name: "s1", priority: 1 },
+          { t: 2000, type: "click", bbox: [600, 300, 120, 40], selector: "#tab", point: [660, 320] },
+          { t: 2350, type: "navigation", kind: "spa" },
+          { t: 4600, type: "click", bbox: [600, 300, 120, 40], selector: "#b", point: [660, 320] },
+        ],
+        extra,
+      );
+      const plan = buildRenderPlan(log, idxWithGap(99999, 99999, 7500));
+      // the route's first frame and its establishing read are wide
+      for (let t = 2350 + frameMs; t <= 2350 + 800; t += 50) expect(zAtT(plan, t)).toBeLessThan(1.02);
+      // the new route's own beat still punches
+      expect(zAtT(plan, 4600)).toBeGreaterThan(1.3);
+    }
+  });
+
+  it("an SPA route change that reveals its beat's framed result keeps the payoff punch", () => {
+    // a list item opens its detail route: the recorder read the beat's result
+    // region after the route changed, so the punch frames the new route's
+    // result instead of cutting wide and dropping the payoff
+    for (const extra of [{}, { navigation_logged: true }]) {
+      for (const navAt of [2010, 2060, 2000 + SPA_RESULT_WINDOW_MS]) {
+        const log = makeLog(
+          [
+            { t: 0, type: "scene", name: "s1", priority: 1 },
+            { t: 2000, type: "click", bbox: [100, 300, 200, 40], selector: "#item-2", point: [200, 320], focus_bbox: [700, 200, 600, 500] },
+            { t: navAt, type: "navigation", kind: "spa" },
+          ],
+          extra,
+        );
+        const { plan, diagnostics } = planTake(log, idxWithGap(99999, 99999, 7000));
+        expect(diagnostics.beats[0]).toMatchObject({ framed: true, target: "result" });
+        expect(diagnostics.boundaries).toEqual([]);
+        // framed through the route change and its dwell
+        for (const t of [navAt + frameMs, 3000, 4000]) expect(zAtT(plan, t)).toBeGreaterThan(1.3);
+      }
+    }
+    // later than the result was read, or after a beat that frames only its
+    // control (or a full page load): the route change still cuts wide
+    const cases: [number, Record<string, unknown>, "spa" | "document"][] = [
+      [2000 + SPA_RESULT_WINDOW_MS + 50, { focus_bbox: [700, 200, 600, 500] }, "spa"],
+      [2060, {}, "spa"],
+      [2060, { focus_bbox: [700, 200, 600, 500] }, "document"],
+      // the recorder's changed-region guess is read on its own clock, maybe
+      // before the route changed
+      [2060, { focus_bbox: [700, 200, 600, 500], focus_source: "mutation" }, "spa"],
+    ];
+    for (const [navAt, focus, kind] of cases) {
+      const log = makeLog([
+        { t: 0, type: "scene", name: "s1", priority: 1 },
+        { t: 2000, type: "click", bbox: [100, 300, 200, 40], selector: "#item-2", point: [200, 320], ...focus },
+        { t: navAt, type: "navigation", kind },
+      ]);
+      const { plan, diagnostics } = planTake(log, idxWithGap(99999, 99999, 7000));
+      expect(diagnostics.boundaries.map((b) => b.source)).toEqual(["navigation"]);
+      expect(zAtT(plan, navAt + frameMs)).toBeLessThan(1.02);
+    }
+  });
+
+  it("the SPA result window matches when the recorder reads a beat's result", () => {
+    // the recorder settles SETTLE_MS after an action before it reads the
+    // focus_selector region, so a route change inside the window came first
+    expect(SPA_RESULT_WINDOW_MS).toBe(SETTLE_MS);
+  });
+
   it("skips a punch that could only land after the click", () => {
     // a click 500ms into a new page: the establishing shot owns the opening,
     // so there is no time to arrive — no late zoom chasing the click
@@ -430,7 +597,7 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
   });
 });
 
-describe("plan input bounds (PR #1 review)", () => {
+describe("plan input bounds", () => {
   it("throws on a corrupt huge timestamp instead of allocating the moon", () => {
     const evil = makeLog([
       { t: 99_999_999, type: "scene", name: "x", priority: 1 },
@@ -485,9 +652,9 @@ describe("plan input bounds (PR #1 review)", () => {
   });
 
   it("skew gate: a sparse take that DECLARES the unified clock still fails — a starved capture can't reclassify itself as legacy", () => {
-    // this was the H1 hole: fps was inferred, so 12 frames over 40s read as
-    // "legacy" and the fail downgraded to a warning. Legacy now comes from the
-    // schema declaration only.
+    // legacy-ness comes from the schema declaration only: inferred from fps,
+    // 12 frames over 40s would read as "legacy" and downgrade the fail to a
+    // warning
     const starved = Array.from({ length: 12 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
       t_source: i * 100,

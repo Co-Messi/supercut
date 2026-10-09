@@ -19,14 +19,33 @@ import { z } from "zod";
  */
 
 export const MAX_BUDGET_MS = 60_000;
-/** fixed time a take adds around the recipe's own durations — mirrors the
- *  capture executor and render plan: the 1s head pre-roll (PRE_ROLL_MS), and
- *  per later scene the entry reload + 400ms settle + 1s pre-roll on the new
- *  page (≥ the 1s ENTRY_NAV_ALLOWANCE_MS even without a reload) */
+/*
+ * Time a take adds around the recipe's own durations. These mirror the
+ * capture executor (PRE_ROLL_MS, SETTLE_MS) and the render plan (dwells,
+ * TAIL_MS, SETTLE_TAIL_MS). The estimate is a planning figure: the render
+ * stage measures the real output length and warns when it passes 60s.
+ */
+/** the opening page at rest before the first action (executor PRE_ROLL_MS) */
 export const TAKE_HEAD_MS = 1_000;
-export const SCENE_CHANGE_MS = 1_500;
-/** the render's settled ending past the last beat (plan SETTLE_TAIL_MS) */
-export const TAKE_TAIL_MS = 1_700;
+/** a later scene's entry reload. The executor allows up to 12s; localhost
+ *  reloads take 0.1 to 0.4s and a remote app 0.3 to 3s */
+export const RELOAD_ALLOWANCE_MS = 1_000;
+/** after every navigation the executor lets hydration and paints settle */
+export const SCENE_SETTLE_MS = 400;
+/** each new page opens at rest this long before its first action */
+export const SCENE_PRE_ROLL_MS = 1_000;
+/** one later scene's entry: reload, settle, then pre-roll on the new page */
+export const SCENE_CHANGE_MS = RELOAD_ALLOWANCE_MS + SCENE_SETTLE_MS + SCENE_PRE_ROLL_MS;
+/** minimum picture past the end of the capture (plan TAIL_MS) */
+export const TAKE_TAIL_MS = 1_000;
+/** the render holds a beat's shot this long past its event (plan
+ *  ZOOM_DWELL_MS), and a framed payoff (focus_selector or zoom) longer
+ *  (plan FOCUS_DWELL_MS) */
+const BEAT_DWELL_MS = 1_200;
+const PAYOFF_DWELL_MS = 2_400;
+/** after a beat's dwell the zoom-out settles before the video ends (plan
+ *  SETTLE_TAIL_MS) */
+const ZOOM_OUT_SETTLE_MS = 1_700;
 /** below this an action can't even complete its cursor travel */
 export const MIN_ACTION_MS = 200;
 
@@ -122,10 +141,38 @@ export function totalBudgetMs(r: Recipe): number {
   return r.scenes.reduce((sum, s) => sum + sceneDuration(s), 0);
 }
 
+/**
+ * How far the video runs past the end of the capture. A beat's event can land
+ * as late as the end of its slot (a typed string is stamped when the last key
+ * lands), and the render then holds the shot for the beat's dwell and lets the
+ * zoom-out settle. Whatever the final scene films after that slot (later
+ * steps, its hold) already covers part of it; TAKE_TAIL_MS is the floor.
+ */
+export function takeTailMs(r: Recipe): number {
+  const last = r.scenes[r.scenes.length - 1];
+  if (!last) return TAKE_TAIL_MS;
+  let tail = TAKE_TAIL_MS;
+  let after = last.hold_ms; // filmed time after the step being looked at
+  const steps = [...last.entry.prelude, ...last.actions];
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const a = steps[i]!;
+    if (a.kind === "click" || a.kind === "hover" || a.kind === "type") {
+      // a click or type can always end up framing a payoff: without a
+      // focus_selector the recorder frames the region its DOM change touched.
+      // A hover frames one only when the script names it.
+      const payoff = a.kind !== "hover" || a.focus_selector || a.zoom;
+      const dwell = payoff ? PAYOFF_DWELL_MS : BEAT_DWELL_MS;
+      tail = Math.max(tail, dwell + ZOOM_OUT_SETTLE_MS - after);
+    }
+    after += a.duration_ms;
+  }
+  return tail;
+}
+
 /** the rendered video's expected length: scene budgets plus the take's
- *  fixed overhead (an action that overruns its slot can still add to it) */
+ *  overhead (an action that overruns its slot can still add to it) */
 export function estimatedTakeMs(r: Recipe): number {
-  return totalBudgetMs(r) + TAKE_HEAD_MS + SCENE_CHANGE_MS * Math.max(0, r.scenes.length - 1) + TAKE_TAIL_MS;
+  return totalBudgetMs(r) + TAKE_HEAD_MS + SCENE_CHANGE_MS * Math.max(0, r.scenes.length - 1) + takeTailMs(r);
 }
 
 /**

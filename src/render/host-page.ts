@@ -22,6 +22,12 @@ export const ENCODER_BITRATE = 16_000_000;
  *  ~120MB, so 512MB is generous headroom without risking an in-tab OOM */
 export const MAX_ENCODED_BYTES = 512e6;
 
+/** motion-blur pass caps per accumulator. float16 sums 1/n weights exactly
+ *  (n is a power of two). An 8-bit buffer rounds every 1/n-weighted pass, so
+ *  n passes can shift a channel by up to n/2 levels: 4 keeps it within 2. */
+export const FLOAT_ACCUM_MAX_PASSES = 32;
+export const BYTE_ACCUM_MAX_PASSES = 4;
+
 /**
  * Motion-blur pass count for one output frame: enough shutter samples that
  * consecutive copies of the content window sit ≤ 1px apart at the corner that
@@ -89,16 +95,20 @@ async function main() {
   // motion-blur accumulator: 'lighter' (additive) at 1/n alpha per pass is a
   // TRUE average — n × src-over at 1/n alpha only reaches ~66% opacity and
   // washes the content dark. It accumulates in float16 where available: in
-  // an 8-bit buffer every 1/n-weighted pass rounds, and 48 passes of white
-  // summed to 240/255 (visible dimming and banding during every zoom).
+  // an 8-bit buffer every 1/n-weighted pass rounds, so many passes visibly
+  // dim and band the picture during a zoom.
   const accumCanvas = new OffscreenCanvas(W, H);
-  let actx = accumCanvas.getContext("2d", { colorType: "float16" });
+  // ?accum=8bit forces the fallback (diagnostics and tests)
+  const force8bit = new URLSearchParams(location.search).get("accum") === "8bit";
+  let actx = force8bit ? null : accumCanvas.getContext("2d", { colorType: "float16" });
   const floatAccum = !!(actx && actx.getContextAttributes &&
     actx.getContextAttributes().colorType === "float16");
   if (!actx) actx = accumCanvas.getContext("2d");
-  // 8-bit fallback: keep n small so per-pass rounding cannot add up
-  const MAX_PASSES = floatAccum ? 32 : 8;
-  log("blur accumulator: " + (floatAccum ? "float16, up to 32 passes" : "8-bit, up to 8 passes"));
+  // 8-bit fallback: every pass adds round(v/n), so n passes can shift a
+  // channel by up to n/2 levels; 4 passes keep that within 2 levels
+  const MAX_PASSES = floatAccum ? ${FLOAT_ACCUM_MAX_PASSES} : ${BYTE_ACCUM_MAX_PASSES};
+  // parsed by the orchestrator (render-report.json, CLI log)
+  log("accumulator " + (floatAccum ? "float16" : "8bit") + " " + MAX_PASSES);
   // downscaling the 2x-DPR source with the default (low / bilinear) filter
   // aliased text into shimmering stair-steps; 'high' is a proper resampler
   for (const c of [ctx, actx]) {
@@ -131,12 +141,10 @@ async function main() {
     codec: "avc1.640028",
     width: W, height: H,
     framerate: fps,
-    // 10 Mbps washed out thin serif strokes (lowercase 's' vanished from caption
-    // text while chunkier glyphs survived). Crisp 1080p60 text needs more head-
-    // room.
-    // B3 (review): lowered 40 Mbps → 16 Mbps to reduce Chromium memory pressure
-    // (the encoder buffers chunks in-page; 40 Mbps risked OOM on long takes).
-    // 16 Mbps is ample for 1080p60 screen content and still holds fine detail.
+    // a ceiling, not a floor: crisp thin strokes in 1080p60 text need well
+    // over 10 Mbps when the camera moves, while the encoder buffers every
+    // chunk in-page, so a much higher rate risks an in-tab OOM on long takes.
+    // Static screens legitimately encode far below it.
     bitrate: ${ENCODER_BITRATE},
     bitrateMode: "constant",
     avc: { format: "annexb" },
@@ -350,16 +358,16 @@ async function main() {
     }
 
     // 3) cursor: drawn SHARP on the final composite (dark pixels vanish in the
-    //    additive blur layer). It still tracks the camera:
-    //    position + scale from the last subframe's transform.
+    //    additive blur layer). It still tracks the camera, at mid-shutter like
+    //    the shadow: the content is the shutter average, so an end-of-shutter
+    //    cursor would lead its target by half a shutter during a fast zoom.
     {
-      const base = (f * SUB + (SUB - 1)) * 3;
-      const [z, offX, offY] = cameraTransform(camera[base], camera[base + 1], camera[base + 2], W, H, C);
+      const [z, offX, offY] = camAt(0.5);
       ctx.save();
       ctx.translate(z * cur[0] + offX, z * cur[1] + offY);
-      // damped scale (sqrt z): full proportional growth read as distracting
-      // but a fully fixed cursor detaches from the content —
-      // sqrt keeps it cohesive while barely growing (~1.2x at max zoom)
+      // damped scale (sqrt z): full proportional growth distracts, but a
+      // fixed-size cursor detaches from the content; sqrt keeps it cohesive
+      // while barely growing (~1.2x at max zoom)
       const cs = Math.sqrt(z);
       ctx.scale(cs, cs);
       drawCursor(ctx, 0, 0, cur[2]);

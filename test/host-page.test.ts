@@ -13,7 +13,7 @@ const content = { x: 192, y: 100, w: 1536, h: 864 };
 describe("motion blur pass count", () => {
   it("uses the corner that moves MOST, not just the top-left", () => {
     // zooming about the content's top-left: that corner barely moves while the
-    // far corner sweeps ~20px — the old top-left-only count left 20px ghost gaps
+    // far corner sweeps ~20px, so a top-left-only count leaves 20px ghost gaps
     const a = offsets(1.2, 200, 110);
     const b = offsets(1.215, 200, 110);
     const topLeft = Math.hypot(b[0] * content.x + b[1] - (a[0] * content.x + a[1]), b[0] * content.y + b[2] - (a[0] * content.y + a[2]));
@@ -39,6 +39,14 @@ describe("compositor sharpness settings", () => {
     expect(HOST_PAGE).toContain('colorType: "float16"');
     // the page embeds the SAME pass-count function the tests exercise
     expect(HOST_PAGE).toContain("function blurPassCount");
+  });
+
+  it("draws the cursor and the shadow at mid-shutter, where the blurred content is centred", () => {
+    // the content is the average over the shutter; an end-of-shutter cursor
+    // leads its target by half a shutter during every fast zoom
+    const cursorBlock = HOST_PAGE.slice(HOST_PAGE.indexOf("// 3) cursor"), HOST_PAGE.indexOf("// 4) picture fade"));
+    expect(cursorBlock).toContain("camAt(0.5)");
+    expect(cursorBlock).not.toMatch(/SUB - 1/);
   });
 
   it("frames the camera with the plan's cameraTransform — no inline copy of an older formula", () => {

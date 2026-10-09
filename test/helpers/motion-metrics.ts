@@ -1,22 +1,41 @@
 /**
- * Motion-quality metrics over a render plan — the numbers behind "does the
- * video feel natural". Shared by test/motion-quality.test.ts and by
- * tools-style scripts that score a real take (`npx tsx` this module's
- * `scoreTake`), so the regression suite and the real-output check measure
- * exactly the same thing.
+ * Motion-quality metrics over a render plan: the numbers behind "does the
+ * video feel natural". Shared by test/motion-quality.test.ts and by scripts
+ * that score a real take, so the regression suite and a real-output check
+ * measure exactly the same thing.
+ *
+ * Timing thresholds come from the planner itself (plan.ts exports them), so
+ * the grader can never drift from the planner by a copied constant. What
+ * counts as a page change is decided here from the log's evidence: scene
+ * markers after the first, logged navigations (except an SPA route change
+ * that reveals its beat's framed result, read with the planner's own
+ * predicate), and (legacy takes only) long unexplained gaps.
  */
 import type { EventLog } from "../../src/schema/index.js";
-import { cameraTransform, SUBFRAMES, type FrameIndexEntry, type RenderPlan } from "../../src/render/plan.js";
+import {
+  cameraTransform,
+  MARKER_GAP_AFTER_MS,
+  MARKER_GAP_BEFORE_MS,
+  NAV_EVENT_GAP_AFTER_MS,
+  NAV_EVENT_GAP_BEFORE_MS,
+  NAV_GAP_MS,
+  SUBFRAMES,
+  revealsFramedResult,
+  UNATTRIBUTED_GAP_MS,
+  ZOOM_LEAD_MS,
+  type FrameIndexEntry,
+  type RenderPlan,
+} from "../../src/render/plan.js";
 
-/** a source gap at least this long is a page transition (navigation /
- *  reload), never ordinary capture jitter */
-export const NAV_GAP_MS = 250;
-const UNATTRIBUTED_GAP_MS = 500;
-/** a navigation gap attributed to a scene marker may start this long before
- *  the marker or up to this long after it */
-const MARKER_WINDOW_BEFORE_MS = 1000;
-const MARKER_WINDOW_AFTER_MS = 4000;
 const WIDE_Z = 1.02;
+/** a per-frame zoom change this large is a snap (a cut resets the camera);
+ *  the spring alone moves at most ~0.017 per frame */
+const SNAP_DZ = 0.05;
+/** an arrival window stops this long before the next beat: that beat's
+ *  punch may start ZOOM_LEAD_MS early, plus a frame-rounding margin */
+const NEXT_LEAD_GUARD_MS = ZOOM_LEAD_MS + 50;
+
+type Beat = "click" | "type" | "hover";
 
 export interface MotionMetrics {
   /** max camera z at any scene marker (after the first) */
@@ -27,25 +46,30 @@ export interface MotionMetrics {
   minWideRestMs: number;
   /** per-scene wide rest, in scene order */
   wideRestMs: number[];
-  /** per click: fraction of the punch completed at the click (1 = arrived);
-   *  null when the camera never punched for that click */
+  /** per beat of each kind: fraction of the punch completed at the event
+   *  (1 = arrived); null when the camera never punched for it */
   clickArrival: (number | null)[];
-  /** min over clicks that punched */
+  typeArrival: (number | null)[];
+  hoverArrival: (number | null)[];
+  /** min over clicks / types / hovers that punched (1 when none did) */
   minClickArrival: number;
-  /** max zoom GAINED right after a click — from the click to 400ms later, cut
-   *  off where the next beat's 750ms lead-in could begin, so only this
-   *  click's own punch can contribute. An arrived punch gains < 0.02 here; a
-   *  punch that only starts at/after the click (the camera chasing the
-   *  action) gains ≥ 0.05 even in a short window. clickArrival cannot see
-   *  that case when the next beat follows closely (its window is truncated
-   *  and the late punch reads as "skipped"). */
+  minTypeArrival: number;
+  minHoverArrival: number;
+  /** max zoom GAINED right after a beat: from the event to 400ms later, cut
+   *  off where the next beat's lead-in could begin, so only this beat's own
+   *  punch can contribute. An arrived punch gains < 0.02 here; a punch that
+   *  only starts at/after the event (the camera chasing the action) gains
+   *  ≥ 0.05 even in a short window. */
   maxLateRise: number;
+  /** max on-screen pan per output frame outside snaps: how far (canvas px)
+   *  the content point under the screen centre travels between frames,
+   *  scaled by zoom. Measured through cameraTransform, so a focus change
+   *  while wide (which the framing ramp hides) counts as no motion. */
+  maxPanPxPerFrame: number;
   /** max |Δz| per output frame over the final 300ms */
   tailMaxDzPerFrame: number;
   /** final camera z */
   finalZ: number;
-  /** share of output frames that blend two different source frames */
-  blendedShare: number;
   /** max z range across ONE output frame's shutter samples — a camera snap
    *  that lands mid-shutter motion-blurs the whole window across the jump
    *  (one smeared frame); a moving spring spans < 0.01 */
@@ -105,19 +129,49 @@ export function framingMetrics(plan: RenderPlan): FramingMetrics {
   return { maxOneSidedWallpaperPx: oneSided, maxUncoveredWhileCoverablePx: uncovered, maxFocusCentringErrorPx: centring };
 }
 
-/** source gaps that are page changes: ≥ 250ms near a scene marker or a
- *  logged navigation, ≥ 500ms otherwise (a shorter unexplained gap is a
- *  capture hiccup on the same page, where the camera must NOT cut) */
+/** max on-screen pan per frame outside snaps (see MotionMetrics) */
+export function maxPanPxPerFrame(plan: RenderPlan): number {
+  const { canvasW: W, canvasH: H, content: C } = plan.layout;
+  const at = (f: number) => {
+    const i = f * SUBFRAMES * 3;
+    const z = plan.camera[i]!;
+    const [, offX, offY] = cameraTransform(z, plan.camera[i + 1]!, plan.camera[i + 2]!, W, H, C);
+    return { z, px: (W / 2 - offX) / z, py: (H / 2 - offY) / z };
+  };
+  let max = 0;
+  let prev = at(0);
+  for (let f = 1; f < plan.frames; f++) {
+    const cur = at(f);
+    if (Math.abs(cur.z - prev.z) < SNAP_DZ) {
+      max = Math.max(max, cur.z * Math.hypot(cur.px - prev.px, cur.py - prev.py));
+    }
+    prev = cur;
+  }
+  return max;
+}
+
+/**
+ * Source gaps that are page changes, from the log's evidence: a gap ≥
+ * NAV_GAP_MS starting inside a later scene marker's window or a logged
+ * navigation's window (the planner's own windows). An unexplained gap is a
+ * page change only on a legacy take, and only from UNATTRIBUTED_GAP_MS; on a
+ * navigation-logged take it is a stall on the same page, where the camera
+ * must NOT cut.
+ */
 export function navGaps(frameIndex: FrameIndexEntry[], log?: EventLog): { tA: number; tB: number }[] {
-  const anchors = (log?.events ?? [])
-    .filter((e) => e.type === "scene" || e.type === "navigation")
-    .map((e) => e.t);
+  const events = log?.events ?? [];
+  const markers = events.filter((e) => e.type === "scene").map((e) => e.t).slice(1);
+  const navs = events.filter((e) => e.type === "navigation" && !(log && revealsFramedResult(log, e))).map((e) => e.t);
+  const anchored = (tA: number) =>
+    markers.some((m) => tA >= m - MARKER_GAP_BEFORE_MS && tA <= m + MARKER_GAP_AFTER_MS) ||
+    navs.some((t) => tA >= t - NAV_EVENT_GAP_BEFORE_MS && tA <= t + NAV_EVENT_GAP_AFTER_MS);
   const gaps: { tA: number; tB: number }[] = [];
   for (let i = 1; i < frameIndex.length; i++) {
     const tA = frameIndex[i - 1]!.t_source;
     const tB = frameIndex[i]!.t_source;
-    const anchored = anchors.some((t) => tA >= t - MARKER_WINDOW_BEFORE_MS && tA <= t + MARKER_WINDOW_AFTER_MS);
-    if (tB - tA >= (anchored ? NAV_GAP_MS : UNATTRIBUTED_GAP_MS)) gaps.push({ tA, tB });
+    const len = tB - tA;
+    if (len < NAV_GAP_MS) continue;
+    if (anchored(tA) || (!log?.navigation_logged && len >= UNATTRIBUTED_GAP_MS)) gaps.push({ tA, tB });
   }
   return gaps;
 }
@@ -142,7 +196,7 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
   // a logged action-triggered navigation that left no gap: the frame after
   // its commit already shows (or is about to show) the new page
   for (const e of log.events) {
-    if (e.type === "navigation") maxZAfterNavGap = Math.max(maxZAfterNavGap, zAtFrame(Math.min(last, frameAt(e.t) + 1)));
+    if (e.type === "navigation" && !revealsFramedResult(log, e)) maxZAfterNavGap = Math.max(maxZAfterNavGap, zAtFrame(Math.min(last, frameAt(e.t) + 1)));
   }
 
   // each scene's first NEW frame: the take head for scene 1; for later scenes
@@ -150,7 +204,7 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
   // itself when the scene change did not reload)
   const sceneStarts = markers.map((m, i) => {
     if (i === 0) return 0;
-    const g = gaps.find((g) => g.tA >= m - MARKER_WINDOW_BEFORE_MS && g.tA <= m + MARKER_WINDOW_AFTER_MS);
+    const g = gaps.find((g) => g.tA >= m - MARKER_GAP_BEFORE_MS && g.tA <= m + MARKER_GAP_AFTER_MS);
     return g ? g.tB : m;
   });
   const wideRestMs = sceneStarts.map((s) => {
@@ -160,41 +214,40 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
     return (f - f0) * frameMs;
   });
 
-  const interactions = log.events
-    .filter((e) => e.type === "click" || e.type === "type" || e.type === "hover")
-    .map((e) => e.t);
-  const clickArrival = log.events
-    .filter((e) => e.type === "click")
-    .map((e) => {
-      const f = frameAt(e.t);
-      // the punch's settled zoom: the peak within 1s after the click, but
-      // never reaching into the NEXT beat's lead-in (that zoom is not ours)
-      const nextBeat = interactions.find((t) => t > e.t) ?? Infinity;
-      const windowEnd = Math.min(e.t + 1000, nextBeat - 800);
-      let target = zAtFrame(f);
-      for (let g = f; g <= frameAt(windowEnd); g++) target = Math.max(target, zAtFrame(g));
-      if (target - 1 < 0.02) return null; // never punched: skipped, fine
-      return (zAtFrame(f) - 1) / (target - 1);
-    });
-  const punched = clickArrival.filter((a): a is number => a !== null);
+  const isBeat = (e: EventLog["events"][number]): e is Extract<EventLog["events"][number], { type: Beat }> =>
+    e.type === "click" || e.type === "type" || e.type === "hover";
+  const beatTimes = log.events.filter(isBeat).map((e) => e.t);
+  const nextBeatAfter = (t: number) => beatTimes.find((b) => b > t) ?? Infinity;
+  /** fraction of the punch done at the event, or null when it never punched */
+  const arrival = (t: number): number | null => {
+    const f = frameAt(t);
+    // the punch's settled zoom: the peak within 1s after the event, but never
+    // reaching into the NEXT beat's lead-in (that zoom is not ours)
+    const windowEnd = Math.min(t + 1000, nextBeatAfter(t) - NEXT_LEAD_GUARD_MS);
+    let target = zAtFrame(f);
+    for (let g = f; g <= frameAt(windowEnd); g++) target = Math.max(target, zAtFrame(g));
+    if (target - 1 < 0.02) return null; // never punched: skipped, reported by the plan
+    return (zAtFrame(f) - 1) / (target - 1);
+  };
+  const arrivals = (kind: Beat) => log.events.filter((e) => e.type === kind).map((e) => arrival(e.t));
+  const minOf = (a: (number | null)[]) => {
+    const punched = a.filter((x): x is number => x !== null);
+    return punched.length ? Math.min(...punched) : 1;
+  };
+  const clickArrival = arrivals("click");
+  const typeArrival = arrivals("type");
+  const hoverArrival = arrivals("hover");
+
   let maxLateRise = 0;
-  for (const e of log.events) {
-    if (e.type !== "click") continue;
-    const nextBeat = interactions.find((t) => t > e.t) ?? Infinity;
-    const end = Math.min(e.t + 400, nextBeat - 750, last * frameMs);
-    if (end - e.t < 80) continue;
-    maxLateRise = Math.max(maxLateRise, zAt(end) - zAt(e.t));
+  for (const t of beatTimes) {
+    const end = Math.min(t + 400, nextBeatAfter(t) - ZOOM_LEAD_MS, last * frameMs);
+    if (end - t < 80) continue;
+    maxLateRise = Math.max(maxLateRise, zAt(end) - zAt(t));
   }
 
   let tailMaxDzPerFrame = 0;
   for (let f = Math.max(1, last - Math.round(300 / frameMs)); f <= last; f++) {
     tailMaxDzPerFrame = Math.max(tailMaxDzPerFrame, Math.abs(zAtFrame(f) - zAtFrame(f - 1)));
-  }
-
-  let blended = 0;
-  for (let f = 0; f < plan.frames; f++) {
-    const b = plan.blend[f * 2]!;
-    if (b >= 0 && b !== plan.sourceByFrame[f] && plan.blend[f * 2 + 1]! > 0) blended++;
   }
 
   let maxIntraFrameDz = 0;
@@ -215,11 +268,15 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
     minWideRestMs: Math.min(...wideRestMs),
     wideRestMs,
     clickArrival,
-    minClickArrival: punched.length ? Math.min(...punched) : 1,
+    typeArrival,
+    hoverArrival,
+    minClickArrival: minOf(clickArrival),
+    minTypeArrival: minOf(typeArrival),
+    minHoverArrival: minOf(hoverArrival),
     maxLateRise,
+    maxPanPxPerFrame: maxPanPxPerFrame(plan),
     tailMaxDzPerFrame,
     finalZ: zAtFrame(last),
-    blendedShare: blended / plan.frames,
     ...framingMetrics(plan),
   };
 }

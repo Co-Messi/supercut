@@ -13,6 +13,7 @@ test/.tmp/
 .env.local
 
 .worktrees/
+.claude/worktrees/
 .next/
 examples/demo-app/node_modules/
 examples/demo-app/.next/

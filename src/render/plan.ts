@@ -132,9 +132,8 @@ export interface RenderPlan {
    *  frame at or before the output time is held — not the temporally nearest) */
   sourceByFrame: number[];
   /** flattened [srcB, k] per output frame: a second source index and its
-   *  blend weight. The planner no longer blends (srcB = -1, k = 0 everywhere
-   *  — see "source blend" in buildRenderPlan); the field stays so the host
-   *  page contract is unchanged. */
+   *  blend weight. The planner never blends (srcB = -1, k = 0 everywhere,
+   *  see noSourceBlend); the host page contract still carries the field. */
   blend: number[];
   /** flattened [z, fx, fy] per subframe: frames × SUBFRAMES × 3 (canvas coords) */
   camera: number[];
@@ -143,7 +142,9 @@ export interface RenderPlan {
   sourceFiles: string[];
 }
 
-interface CameraSegment {
+/** a camera target held over [start, end]: z = 1 for an establishing shot,
+ *  z > 1 for a punch-in on (fx, fy) in canvas coords */
+export interface CameraSegment {
   start: number;
   end: number;
   z: number;
@@ -153,23 +154,23 @@ interface CameraSegment {
 
 /** MAXIMUM punch-in, reached only for small widgets — a plain bbox is inflated
  *  to a context region and fit-zoomed, so large targets zoom far less */
-const ZOOM_TARGET = 1.42;
+export const ZOOM_TARGET = 1.42;
 /** camera starts moving this long before the click lands: the critically
  *  damped spring covers ~95% of a punch in 750ms, so the zoom has ARRIVED
  *  when the click happens instead of chasing it */
-const ZOOM_LEAD_MS = 750;
+export const ZOOM_LEAD_MS = 750;
 /** time for the spring to cover 90% of a punch (ωt ≈ 3.9 at OMEGA 6.5). A
  *  punch that cannot start this long before its event is skipped: a zoom
  *  landing after the click reads as the camera lagging the action. */
-const ARRIVE_MS = 600;
-const ZOOM_DWELL_MS = 1200; // stays on target after the event
+export const ARRIVE_MS = 600;
+export const ZOOM_DWELL_MS = 1200; // stays on target after the event
 /** a punch whose hold after the event would be shorter than this (the page
  *  navigates right after the click) is skipped — an in-out pump, not a shot */
-const MIN_HOLD_AFTER_EVENT_MS = 300;
+export const MIN_HOLD_AFTER_EVENT_MS = 300;
 /** each scene opens wide: this long at z=1 from the first frame of the new
  *  page, so the viewer reads the whole page before the first punch-in
  *  (Screen-Studio establishing shot) */
-const ESTABLISH_MS = 800;
+export const ESTABLISH_MS = 800;
 /** a plain interaction bbox is inflated to at least this fraction of the
  *  viewport before fit-zooming — the framed shot always keeps page context,
  *  and a full-width hero gets no punch at all */
@@ -180,7 +181,7 @@ const MIN_CONTEXT_FRAC = 0.55;
 const MERGE_DIST_FRAC = 0.5;
 /** a framed RESULT (focus_bbox) is the payoff — hold on it longer than a plain
  *  interaction so the viewer reads the graph/results before the camera moves */
-const FOCUS_DWELL_MS = 2400;
+export const FOCUS_DWELL_MS = 2400;
 /** a result region should FILL the frame, not be punched-into and cropped:
  *  fit it to this fraction of the viewport (the rest is breathing room) */
 const FOCUS_FILL = 0.88;
@@ -191,7 +192,7 @@ const MERGE_GAP_MS = 3400;
  *  relaxes to this gentle floor instead of snapping all the way back to z=1.
  *  Never across a page change: the next page is a different picture, so the
  *  camera is fully wide before it. */
-const GLIDE_Z = 1.1;
+export const GLIDE_Z = 1.1;
 /** a source gap at least this long is a page change (navigation / reload):
  *  capture drops frames while the next document loads, and ordinary capture
  *  jitter at ~60fps never comes close */
@@ -204,37 +205,54 @@ export const UNATTRIBUTED_GAP_MS = 500;
 /** a navigation gap starting within this window around a scene marker is
  *  that scene's entry navigation (the marker is emitted before the goto; on
  *  real networks policy DNS checks run between them) */
-const MARKER_GAP_BEFORE_MS = 1000;
-const MARKER_GAP_AFTER_MS = 4000;
+export const MARKER_GAP_BEFORE_MS = 1000;
+export const MARKER_GAP_AFTER_MS = 4000;
 /** a logged navigation whose reload also left a source gap starting in this
  *  window is already covered by that gap's boundary */
-const NAV_EVENT_GAP_BEFORE_MS = 200;
-const NAV_EVENT_GAP_AFTER_MS = 1500;
+export const NAV_EVENT_GAP_BEFORE_MS = 200;
+export const NAV_EVENT_GAP_AFTER_MS = 1500;
 /** zoom-out lead before a scene change: from a full punch the spring reaches
  *  z ≤ 1.02 in ~710ms, so the camera is wide when the page changes */
-const ZOOM_OUT_MS = 800;
+export const ZOOM_OUT_MS = 800;
 /** minimum picture after the last event's dwell */
-const TAIL_MS = 1000;
+export const TAIL_MS = 1000;
 /** the take runs at least this long past the last punch's end, so the
  *  spring's zoom-out has fully settled (|Δz| < 1e-4/frame) before the end —
  *  never finishing mid-move */
-const SETTLE_TAIL_MS = 1700;
+export const SETTLE_TAIL_MS = 1700;
 /** picture fade from / to black — the SAME lengths as the music bed's afade
  *  in/out (musicFilterChain), so picture and sound open and close together */
 export const FADE_IN_MS = 600;
 export const FADE_OUT_MS = 1800;
 const PULSE_MS = 350;
-/** critically damped spring: ~settles in ≈ 4/OMEGA seconds — 6.5 is a calm,
- *  stately glide; 9 read as restless */
+/** critically damped spring: settles in about 4/OMEGA seconds. 6.5 is a calm,
+ *  stately glide; a stiffer spring reads as restless */
 const OMEGA = 6.5;
 
+/** what told the planner the page changed (reported in render-report.json) */
+export type BoundarySource =
+  /** a later scene's entry navigation, which left a frame gap */
+  | "scene-reload"
+  /** a later scene on the same URL that did not reload: no cut, the camera
+   *  zooms out before the marker */
+  | "scene-same-url"
+  /** a logged navigation with no frame gap: the cut is its commit time */
+  | "navigation"
+  /** a logged navigation whose load left a frame gap: the gap is the cut */
+  | "navigation-gap"
+  /** a legacy take's long unexplained frame gap, read as a page change */
+  | "inferred-gap";
+
 /** a page change: the camera must be wide by `out` (zoom-out complete) and
- *  the new page's first frame appears at `in`. `snap` marks a real source
- *  gap — the picture cuts there, so the camera state resets to wide with it. */
-interface Boundary {
+ *  the new page's first frame appears at `in`. `snap` marks a real cut in
+ *  the picture, so the camera state resets to wide with it. `at` is the time
+ *  of the evidence (scene marker, navigation event or gap start). */
+export interface Boundary {
   out: number;
   in: number;
   snap: boolean;
+  source: BoundarySource;
+  at: number;
 }
 
 export function defaultLayout(viewport: EventLog["viewport"]): Layout {
@@ -264,8 +282,8 @@ export function defaultLayout(viewport: EventLog["viewport"]): Layout {
  *  - the offset is clamped to the window's legal range: while z·content is
  *    smaller than the canvas the window stays fully on canvas, and once it is
  *    larger the window covers the canvas — never wallpaper on one edge while
- *    the opposite edge overflows (the old "move the focus 30% toward centre"
- *    form, unclamped, showed up to ~300px of wallpaper on one side);
+ *    the opposite edge overflows (an unclamped offset shows hundreds of px of
+ *    wallpaper on one side when the focus sits near an edge);
  *  - that range is narrowed toward the plain scale-about-centre offset by a
  *    ramp g = 0 at z=1 → 1 where the content starts to cover the canvas, so a
  *    wide shot is exactly centred whatever the focus spring is doing, and a
@@ -309,14 +327,10 @@ function toCanvas(layout: Layout, cssX: number, cssY: number): { x: number; y: n
   return { x: layout.content.x + cssX * s, y: layout.content.y + cssY * s };
 }
 
-export function buildRenderPlan(
-  log: EventLog,
-  frameIndex: FrameIndexEntry[],
-  opts: { layout?: Layout; background?: string | BackgroundStyle } = {},
-): RenderPlan {
+/** the frame index is external input: one malformed entry can otherwise
+ *  request absurd allocations or break the floor-hold walk */
+export function validateFrameIndex(frameIndex: FrameIndexEntry[]): void {
   if (frameIndex.length === 0) throw new Error("render plan: empty frame index");
-  // frame index is external input — one malformed entry can otherwise request
-  // absurd allocations or break the nearest-hold walk.
   let prevT = -1;
   for (const [i, e] of frameIndex.entries()) {
     if (typeof e?.file !== "string" || e.file.length === 0 || typeof e?.t_source !== "number") {
@@ -333,98 +347,221 @@ export function buildRenderPlan(
     }
     prevT = e.t_source;
   }
-  const fps = log.fps;
-  if (!Number.isInteger(fps) || fps < 1 || fps > 240) {
-    throw new Error(`render plan: unreasonable fps ${fps}`);
-  }
-  const frameMs = 1000 / fps;
-  const layout = opts.layout ?? defaultLayout(log.viewport);
-  const background =
-    typeof opts.background === "object"
-      ? opts.background
-      : buildBackground(opts.background ?? "aurora", layout.canvasW, layout.canvasH);
-  const center = { x: layout.canvasW / 2, y: layout.canvasH / 2 };
+}
 
-  // ---- scene / page boundaries ----
-  // The first scene is loaded when capture starts (the take head opens it).
-  // Every later scene marker is a page change, and so is any source gap long
-  // enough to be a navigation — including one a click triggered, which the
-  // event log never marks. The marker is emitted BEFORE the goto and frames
-  // are dropped until the new page has painted, so a scene's opening is
-  // anchored to its first NEW frame, not to the marker.
-  const sceneMarkers = log.events.filter((e) => e.type === "scene").map((e) => e.t);
-  const gaps: { tA: number; tB: number }[] = [];
+export interface SourceGap {
+  tA: number;
+  tB: number;
+}
+
+/** stretches with no captured frame long enough to be a page change
+ *  (NAV_GAP_MS): `tA` is the last frame before, `tB` the first after */
+export function sourceGaps(frameIndex: FrameIndexEntry[]): SourceGap[] {
+  const gaps: SourceGap[] = [];
   for (let i = 1; i < frameIndex.length; i++) {
     const tA = frameIndex[i - 1]!.t_source;
     const tB = frameIndex[i]!.t_source;
     if (tB - tA >= NAV_GAP_MS) gaps.push({ tA, tB });
   }
+  return gaps;
+}
+
+/**
+ * Phase 1: page boundaries, sorted by `in`.
+ *
+ * The first scene is loaded when capture starts (the take head opens it).
+ * Every later scene marker is a page change; the marker is emitted BEFORE the
+ * goto and frames are dropped until the new page has painted, so a scene's
+ * opening is anchored to its first NEW frame, not to the marker. A logged
+ * navigation is a page change, cut at its gap when its load left one and at
+ * its commit time otherwise. What any other frame gap means depends on the
+ * take: a navigation-logged take logged every page change, so the gap is a
+ * stall on the same page; a legacy take infers a page change from a long one.
+ */
+export function detectBoundaries(log: EventLog, frameIndex: FrameIndexEntry[]): Boundary[] {
+  const sceneMarkers = log.events.filter((e) => e.type === "scene").map((e) => e.t);
+  const gaps = sourceGaps(frameIndex);
   const boundaries: Boundary[] = [];
   const claimed = new Set<number>();
+  /** the scene's first action after marker m: the recorder reloads, settles
+   *  and pre-rolls BEFORE it, so a gap starting after it is not the reload */
+  const firstActionAfter = (m: number) =>
+    log.events.find((e) => e.t >= m && e.type !== "scene" && e.type !== "cursor_path")?.t ?? Infinity;
   for (const m of sceneMarkers.slice(1)) {
+    const reloadBy = firstActionAfter(m);
     const gi = gaps.findIndex(
-      (g, i) => !claimed.has(i) && g.tA >= m - MARKER_GAP_BEFORE_MS && g.tA <= m + MARKER_GAP_AFTER_MS,
+      (g, i) =>
+        !claimed.has(i) && g.tA >= m - MARKER_GAP_BEFORE_MS && g.tA <= m + MARKER_GAP_AFTER_MS && g.tA < reloadBy,
     );
     if (gi >= 0) {
       claimed.add(gi);
       const g = gaps[gi]!;
-      boundaries.push({ out: Math.min(m, g.tA) - ZOOM_OUT_MS, in: g.tB, snap: true });
+      boundaries.push({ out: Math.min(m, g.tA) - ZOOM_OUT_MS, in: g.tB, snap: true, source: "scene-reload", at: m });
     } else {
       // the scene change did not reload (same URL): there is no cut to hide
       // a snap behind, so the zoom-out completes before the marker
-      boundaries.push({ out: m - ZOOM_OUT_MS, in: m, snap: false });
+      boundaries.push({ out: m - ZOOM_OUT_MS, in: m, snap: false, source: "scene-same-url", at: m });
     }
   }
-  const navTimes = log.events.filter((e) => e.type === "navigation").map((e) => e.t);
-  const loggedNav = (g: { tA: number }) =>
-    navTimes.some((t) => g.tA >= t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= t + NAV_EVENT_GAP_AFTER_MS);
+  const navTimes = log.events
+    .filter((e) => e.type === "navigation" && !revealsFramedResult(log, e))
+    .map((e) => e.t);
+  const nearNavigation = (g: SourceGap, t: number) =>
+    g.tA >= t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= t + NAV_EVENT_GAP_AFTER_MS;
   gaps.forEach((g, i) => {
-    // a click-triggered navigation: widen while the old page freezes, cut wide
     if (claimed.has(i)) return;
-    if (loggedNav(g) || g.tB - g.tA >= UNATTRIBUTED_GAP_MS) boundaries.push({ out: g.tA, in: g.tB, snap: true });
+    // a click-triggered navigation: widen while the old page freezes, cut wide
+    if (navTimes.some((t) => nearNavigation(g, t))) {
+      boundaries.push({ out: g.tA, in: g.tB, snap: true, source: "navigation-gap", at: g.tA });
+    } else if (!log.navigation_logged && g.tB - g.tA >= UNATTRIBUTED_GAP_MS) {
+      // legacy take: a long unexplained gap is read as a page change. A
+      // navigation-logged take holds the frame and keeps the camera instead
+      // (a long main-thread task stops rAF and the screencast with it).
+      boundaries.push({ out: g.tA, in: g.tB, snap: true, source: "inferred-gap", at: g.tA });
+    }
   });
   // an action-triggered navigation the recorder logged: a fast local one keeps
   // frames flowing (no gap to detect), so the logged commit time is the cut.
-  // A slow one also left a gap — that boundary already covers it.
-  for (const e of log.events) {
-    if (e.type !== "navigation") continue;
-    if (gaps.some((g) => g.tA >= e.t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= e.t + NAV_EVENT_GAP_AFTER_MS)) continue;
-    boundaries.push({ out: e.t, in: e.t, snap: true });
+  // A slow one also left a gap, and that boundary already covers it. An SPA
+  // route change (kind "spa") is the same cut: the picture is a different
+  // page, so no punch may keep dwelling on the old one. The exception is a
+  // route change that shows the result its beat frames (revealsFramedResult):
+  // that punch already targets the new route, so there is nothing to cut.
+  for (const t of navTimes) {
+    if (gaps.some((g) => nearNavigation(g, t))) continue;
+    boundaries.push({ out: t, in: t, snap: true, source: "navigation", at: t });
   }
   boundaries.sort((x, y) => x.in - y.in);
-  /** the new-page time that opens the stretch containing t (0 = take head) */
-  const openingOf = (t: number) => boundaries.reduce((m, b) => (b.in <= t && b.in > m ? b.in : m), 0);
-  /** true when a page change separates times a < b */
-  const boundaryBetween = (a: number, b: number) => boundaries.some((x) => x.in > a && x.in <= b);
-  /** the latest end a shot starting at `start` may have: its zoom-out must be
-   *  complete by the next page change */
-  const endLimit = (start: number) => {
-    for (const x of boundaries) if (x.in > start) return x.out;
-    return Infinity;
-  };
+  return boundaries;
+}
 
-  // ---- camera segments ----
+/** the recorder reads a beat's named result region (focus_selector) no
+ *  sooner than its SETTLE_MS (400ms) after the action, so an SPA route change
+ *  logged within this window of the beat happened before the region was read */
+export const SPA_RESULT_WINDOW_MS = 400;
+
+type Beat = { t: number; focus_bbox?: [number, number, number, number] | undefined; focus_source?: string | undefined };
+
+/**
+ * True for an SPA route change that reveals the result its beat frames: a
+ * list item opening its detail route, a search submitting to a results path.
+ * The beat's named result region was read on the new route, so its punch
+ * frames the payoff there; cutting wide at the route change would drop the
+ * shot the beat exists for. A document load, a later route change, a beat
+ * that frames only its control, or one whose region is the recorder's
+ * changed-region guess (read on its own clock, possibly before the route
+ * changed) is still a cut.
+ */
+export function revealsFramedResult(log: EventLog, nav: { t: number; type: string; kind?: string | undefined }): boolean {
+  if (nav.type !== "navigation" || nav.kind !== "spa") return false;
+  // the beat the route change follows: the latest click, hover or type at or
+  // before it
+  const beat = log.events.reduce<Beat | undefined>(
+    (latest, e) =>
+      (e.type === "click" || e.type === "hover" || e.type === "type") && e.t <= nav.t && (!latest || e.t >= latest.t)
+        ? e
+        : latest,
+    undefined,
+  );
+  if (!beat || nav.t - beat.t > SPA_RESULT_WINDOW_MS || beat.focus_source === "mutation") return false;
+  if (effectiveFocus(beat) === undefined) return false;
+  // a scene entry between the beat and the route change: a different scene
+  return !log.events.some((e) => e.type === "scene" && e.t > beat.t && e.t <= nav.t);
+}
+
+/** the new-page time that opens the stretch containing t (0 = take head) */
+export function openingOf(boundaries: Boundary[], t: number): number {
+  return boundaries.reduce((m, b) => (b.in <= t && b.in > m ? b.in : m), 0);
+}
+
+/** true when a page change separates times a < b */
+export function boundaryBetween(boundaries: Boundary[], a: number, b: number): boolean {
+  return boundaries.some((x) => x.in > a && x.in <= b);
+}
+
+/** the latest end a shot starting at `start` may have: its zoom-out must be
+ *  complete by every later page change. Boundaries are sorted by `in`, but a
+ *  same-URL scene's `out` sits ZOOM_OUT_MS before its marker, so a later
+ *  boundary can demand the earlier zoom-out: take the minimum `out`. */
+export function endLimit(boundaries: Boundary[], start: number): number {
+  let limit = Infinity;
+  for (const x of boundaries) if (x.in > start) limit = Math.min(limit, x.out);
+  return limit;
+}
+
+/** a focus_bbox narrower or shorter than this (CSS px) names no result
+ *  region: fit-zooming it would punch the maximum zoom into a sliver */
+export const MIN_FOCUS_SIDE_PX = 8;
+
+/** the result region a beat frames, or undefined when it has none or the one
+ *  it names is degenerate (zero-area or a sliver). The punch and the take
+ *  duration both read the dwell from this, so they always agree. */
+export function effectiveFocus(e: { focus_bbox?: [number, number, number, number] | undefined }): [number, number, number, number] | undefined {
+  const box = e.focus_bbox;
+  if (!box) return undefined;
+  const [, , w, h] = box;
+  return w >= MIN_FOCUS_SIDE_PX && h >= MIN_FOCUS_SIDE_PX ? box : undefined;
+}
+
+/** why a beat got no punch-in (render-report.json) */
+export type SkipReason =
+  /** the framed region is so large that fitting it needs no zoom */
+  | "fills-viewport"
+  /** the page opened too recently: the establishing shot owns the opening,
+   *  and a punch starting after it could not arrive by the event */
+  | "page-just-opened"
+  /** the page changes too soon after the event to hold the shot */
+  | "page-changes-after";
+
+/** one interaction beat and what the camera did with it */
+export interface BeatDecision {
+  t: number;
+  type: "click" | "hover" | "type";
+  selector: string;
+  /** "result": framed the action's focus_bbox (its payoff region);
+   *  "interaction": framed the control itself */
+  target: "result" | "interaction";
+  framed: boolean;
+  reason?: SkipReason;
+  /** the punch: zoom and its [start, end] before bridging */
+  z?: number;
+  start?: number;
+  end?: number;
+}
+
+/**
+ * Phase 2: camera segments. Every page opens on an establishing shot (z=1;
+ * focus is moot at z=1, centre keeps the spring target continuous), then each
+ * click/hover/type beat gets a punch-in on its result region (focus_bbox) or
+ * its control, unless it cannot be framed (reported in `beats`).
+ */
+export function planPunches(
+  log: EventLog,
+  layout: Layout,
+  boundaries: Boundary[],
+): { segments: CameraSegment[]; beats: BeatDecision[] } {
+  const center = { x: layout.canvasW / 2, y: layout.canvasH / 2 };
   const segments: CameraSegment[] = [];
-  // establishing shots: each page opens at z=1 (focus is moot at z=1; center
-  // keeps the spring target continuous)
+  const beats: BeatDecision[] = [];
   for (const t of [0, ...boundaries.map((b) => b.in)]) {
     segments.push({ start: t, end: t + ESTABLISH_MS, z: 1, fx: center.x, fy: center.y });
   }
   for (const e of log.events) {
     if (e.type !== "click" && e.type !== "hover" && e.type !== "type") continue;
-    // 4b: prefer the result region (focus_bbox) when the action named one — the
-    // camera holds on the payoff (graph/results), not the input that made it.
-    const framed = e.focus_bbox ?? e.bbox;
-    const [bx, by, bw, bh] = framed;
-    // defense in depth: clamp the focus point to the viewport so a stray
-    // off-frame bbox can never fly the camera off into empty background
-    // (the capture stage now scrolls targets in-view, but never trust a bbox)
+    // prefer the result region (focus_bbox) when the action named one: the
+    // camera holds on the payoff (graph/results), not the input that made it
+    const focusBox = effectiveFocus(e);
+    const [bx, by, bw, bh] = focusBox ?? e.bbox;
+    const beat: BeatDecision = { t: e.t, type: e.type, selector: e.selector, target: focusBox ? "result" : "interaction", framed: false };
+    beats.push(beat);
+    // clamp the focus point to the viewport so a stray off-frame bbox can
+    // never fly the camera off into empty background
     const cssX = Math.min(Math.max(bx + bw / 2, 0), layout.viewport.width);
     const cssY = Math.min(Math.max(by + bh / 2, 0), layout.viewport.height);
     const focus = toCanvas(layout, cssX, cssY);
     let z: number;
     let dwell: number;
-    if (e.focus_bbox) {
+    if (focusBox) {
       // a result region should FILL the frame (FOCUS_FILL), not be cropped
       const fitW = (FOCUS_FILL * layout.viewport.width) / Math.max(bw, 1);
       const fitH = (FOCUS_FILL * layout.viewport.height) / Math.max(bh, 1);
@@ -441,23 +578,38 @@ export function buildRenderPlan(
       z = Math.max(1, Math.min(ZOOM_TARGET, fitW, fitH));
       dwell = ZOOM_DWELL_MS;
     }
-    if (z <= 1) continue;
+    if (z <= 1) {
+      beat.reason = "fills-viewport";
+      continue;
+    }
     // the establishing shot owns the page's opening; a punch that then cannot
     // arrive by its event is skipped rather than landing after the click
-    const start = Math.max(e.t - ZOOM_LEAD_MS, openingOf(e.t) + ESTABLISH_MS);
-    if (start > e.t - ARRIVE_MS) continue;
-    const end = Math.min(e.t + dwell, endLimit(start));
-    if (end < e.t + MIN_HOLD_AFTER_EVENT_MS) continue;
+    const start = Math.max(e.t - ZOOM_LEAD_MS, openingOf(boundaries, e.t) + ESTABLISH_MS);
+    if (start > e.t - ARRIVE_MS) {
+      beat.reason = "page-just-opened";
+      continue;
+    }
+    const end = Math.min(e.t + dwell, endLimit(boundaries, start));
+    if (end < e.t + MIN_HOLD_AFTER_EVENT_MS) {
+      beat.reason = "page-changes-after";
+      continue;
+    }
+    Object.assign(beat, { framed: true, z, start, end });
     segments.push({ start, end, z, fx: focus.x, fy: focus.y });
   }
   segments.sort((a, b) => a.start - b.start);
+  return { segments, beats };
+}
 
-  // bridge nearby segments so the camera pans between targets instead of
-  // zooming out and back in — but only when the targets are spatially near
-  // (or the current shot is already wide), and NEVER across a page change.
-  // OVERLAPS always truncate: once a later beat starts the earlier one is
-  // over — letting it outlive the later beat would drag the camera back to a
-  // stale target after the later dwell ends.
+/**
+ * Phase 3: bridge nearby segments so the camera pans between targets instead
+ * of zooming out and back in, but only when the targets are spatially near
+ * (or the current shot is already wide), and NEVER across a page change.
+ * Overlaps always truncate: once a later beat starts the earlier one is over;
+ * letting it outlive the later beat would drag the camera back to a stale
+ * target after the later dwell ends. Mutates `segments` (sorted by start).
+ */
+export function bridgeSegments(segments: CameraSegment[], boundaries: Boundary[], layout: Layout): void {
   const contentDiag = Math.hypot(layout.content.w, layout.content.h);
   for (let i = 0; i < segments.length - 1; i++) {
     const cur = segments[i]!;
@@ -467,12 +619,20 @@ export function buildRenderPlan(
       cur.end = next.start;
       continue;
     }
-    if (gap >= MERGE_GAP_MS || boundaryBetween(cur.start, next.start)) continue;
+    if (gap >= MERGE_GAP_MS || boundaryBetween(boundaries, cur.start, next.start)) continue;
     const near = Math.hypot(next.fx - cur.fx, next.fy - cur.fy) < MERGE_DIST_FRAC * contentDiag;
     if (near || cur.z <= GLIDE_Z) cur.end = next.start;
   }
+}
 
-  const targetAt = (t: number): { z: number; fx: number; fy: number } => {
+/** the camera's target at time t: the active segment, a gentle glide between
+ *  two punches of the same page, or wide */
+export function cameraTargetAt(
+  segments: CameraSegment[],
+  boundaries: Boundary[],
+  center: { x: number; y: number },
+): (t: number) => { z: number; fx: number; fy: number } {
+  return (t) => {
     let active: CameraSegment | undefined;
     let prevEnded: CameraSegment | undefined; // most recent segment already over
     let next: CameraSegment | undefined; // first segment still ahead
@@ -487,22 +647,34 @@ export function buildRenderPlan(
     if (active) return active;
     // strictly between two punches on the same page: glide at a gentle floor
     // on the last focus instead of pumping fully out and back in
-    if (prevEnded && next && prevEnded.z > GLIDE_Z && !boundaryBetween(prevEnded.end, next.start)) {
+    if (prevEnded && next && prevEnded.z > GLIDE_Z && !boundaryBetween(boundaries, prevEnded.end, next.start)) {
       return { z: GLIDE_Z, fx: prevEnded.fx, fy: prevEnded.fy };
     }
     // a page change ahead, before the first beat, after the last: wide
     return { z: 1, fx: center.x, fy: center.y };
   };
+}
 
-  // ---- duration ----
+/** hard ceiling on a take's span: the product maximum is 60s, and 2 minutes
+ *  of slack covers overruns. Beyond it a corrupt timestamp is asking the
+ *  planner to allocate the moon. */
+const MAX_TAKE_MS = 120_000;
+
+/**
+ * Phase 4: the output length in ms. The picture runs past the last frame,
+ * event dwell and cursor point by TAIL_MS, and past the last punch until its
+ * zoom-out has settled (SETTLE_TAIL_MS): the take never ends with the camera
+ * still moving.
+ */
+export function takeDurationMs(log: EventLog, frameIndex: FrameIndexEntry[], segments: CameraSegment[]): number {
   let lastT = frameIndex[frameIndex.length - 1]!.t_source;
   for (const e of log.events) {
-    // a focused payoff holds for FOCUS_DWELL_MS (the camera segment above uses
-    // it); reserve the SAME dwell here or the render can end mid-hold and cut the
-    // result framing short on a final focused beat.
+    // a focused payoff holds for FOCUS_DWELL_MS (its camera segment does);
+    // reserve the SAME dwell here or the render ends mid-hold on a final
+    // focused beat
     let dwell = 0;
     if (e.type === "click" || e.type === "hover" || e.type === "type") {
-      dwell = e.focus_bbox ? FOCUS_DWELL_MS : ZOOM_DWELL_MS;
+      dwell = effectiveFocus(e) ? FOCUS_DWELL_MS : ZOOM_DWELL_MS;
     }
     lastT = Math.max(lastT, e.t + dwell);
     if (e.type === "cursor_path") {
@@ -510,22 +682,19 @@ export function buildRenderPlan(
       if (last) lastT = Math.max(lastT, last[0]);
     }
   }
-  // hard ceiling: product max is 60s; 2 min of slack covers overruns — beyond
-  // that a corrupt timestamp is asking us to allocate the moon.
-  const MAX_TAKE_MS = 120_000;
   if (lastT > MAX_TAKE_MS) {
     throw new Error(
       `render plan: take spans ${Math.round(lastT)}ms > ${MAX_TAKE_MS}ms cap — corrupt timestamp in events.json or frames-index.json?`,
     );
   }
-  // run past the last punch until its zoom-out has settled: the take never
-  // ends with the camera still moving
   let lastPunchEnd = 0;
   for (const s of segments) if (s.z > 1) lastPunchEnd = Math.max(lastPunchEnd, s.end);
-  const frames = Math.ceil(Math.max(lastT + TAIL_MS, lastPunchEnd + SETTLE_TAIL_MS) / frameMs);
+  return Math.max(lastT + TAIL_MS, lastPunchEnd + SETTLE_TAIL_MS);
+}
 
-  // ---- source mapping (floor-hold per Event-Log Schema v0: hold the last
-  // frame whose t_source is <= the output frame time) ----
+/** Phase 5: output frame → source frame, floor-hold per Event-Log Schema v0
+ *  (hold the last frame whose t_source is <= the output frame time) */
+export function floorHoldSources(frameIndex: FrameIndexEntry[], frames: number, frameMs: number): number[] {
   const sourceByFrame = new Array<number>(frames);
   let p = 0;
   for (let f = 0; f < frames; f++) {
@@ -533,40 +702,51 @@ export function buildRenderPlan(
     while (p + 1 < frameIndex.length && frameIndex[p + 1]!.t_source <= t) p++;
     sourceByFrame[f] = p;
   }
+  return sourceByFrame;
+}
 
-  // ---- source blend: none (floor-hold only) ----
-  // Mixing two DIFFERENT source frames at partial weight is a double
-  // exposure: cross-blending every 25-500ms gap ghosted ~46% of output frames
-  // on a 39fps take, and a nav crossfade superimposed two pages. The plan has
-  // no pixels to prove two frames near-identical — and blending near-identical
-  // frames is a visual no-op — so every gap is floor-held and a page change is
-  // a clean cut (the camera is wide by then). The array stays in the plan
-  // contract (srcB = -1, k = 0) so the host page is unchanged.
+/**
+ * The plan's blend lane, all (srcB = -1, k = 0). Mixing two DIFFERENT source
+ * frames at partial weight is a double exposure (a ghost on every gap, two
+ * pages superimposed at a navigation). The plan has no pixels to prove two
+ * frames near-identical, and blending near-identical frames is a visual
+ * no-op, so every gap is floor-held and a page change is a clean cut.
+ */
+function noSourceBlend(frames: number): number[] {
   const blend = new Array<number>(frames * 2);
   for (let f = 0; f < frames; f++) {
     blend[f * 2] = -1;
     blend[f * 2 + 1] = 0;
   }
+  return blend;
+}
 
-  // ---- spring integration at subframe resolution ----
-  // 180° shutter: integrate 2×SUBFRAMES steps per frame but RECORD only the
-  // first half — blur spans half the frame interval, halving ghost spacing
-  // (prevents onion-ring edge artifacts)
+/**
+ * Phase 6: spring integration at subframe resolution, flattened
+ * [z, fx, fy] × SUBFRAMES per output frame.
+ *
+ * 180° shutter: integrate 2×SUBFRAMES steps per frame but record only the
+ * first half, so blur spans half the frame interval (halving ghost spacing,
+ * no onion-ring edges). A snap boundary (a real cut in the picture) resets
+ * the camera to wide rest with the picture, on the first FRAME at or after
+ * the cut: a frame is wholly before or wholly after the jump, never a smeared
+ * frame motion-blurred across it.
+ */
+export function integrateCamera(
+  targetAt: (t: number) => { z: number; fx: number; fy: number },
+  boundaries: Boundary[],
+  center: { x: number; y: number },
+  frames: number,
+  frameMs: number,
+): number[] {
   const STEPS = SUBFRAMES * 2;
   const dt = frameMs / 1000 / STEPS;
   const state = { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 };
   const camera = new Array<number>(frames * SUBFRAMES * 3);
-  // a real cut (source gap) resets the camera to wide rest with the picture:
-  // any residual zoom-out is hidden by the page change instead of carried
-  // onto the new page
   const snaps = boundaries.filter((b) => b.snap).map((b) => b.in);
   let nextSnap = 0;
   let w = 0;
   for (let f = 0; f < frames; f++) {
-    // snaps land on FRAME boundaries — the first frame at/after the cut — so
-    // a frame is wholly before or wholly after the jump: a snap inside one
-    // frame's shutter motion-blurred the entire window from z≈1.42 to 1 (a
-    // smeared flash frame at every gapless click-navigation)
     while (nextSnap < snaps.length && snaps[nextSnap]! <= f * frameMs) {
       nextSnap++;
       Object.assign(state, { z: 1, fx: center.x, fy: center.y, vz: 0, vfx: 0, vfy: 0 });
@@ -588,14 +768,17 @@ export function buildRenderPlan(
       }
     }
   }
+  return camera;
+}
 
-  // ---- cursor track + click pulses ----
-  // merge ALL cursor_path events (third-party recorders may emit segments)
+/** Phase 7: cursor track + click pulses, flattened [x, y, pulse] per output
+ *  frame in canvas coords. ALL cursor_path events merge in time order
+ *  (third-party recorders may emit segments). */
+export function cursorTrack(log: EventLog, layout: Layout, frames: number, frameMs: number): number[] {
   const points: [number, number, number][] = log.events
     .flatMap((e) => (e.type === "cursor_path" ? e.points : []))
     .sort((a, b) => a[0] - b[0]);
   const clicks = log.events.filter((e) => e.type === "click").map((e) => e.t);
-
   const cursor = new Array<number>(frames * 3);
   let q = 0;
   for (let f = 0; f < frames; f++) {
@@ -622,8 +805,49 @@ export function buildRenderPlan(
     cursor[f * 3 + 1] = pos.y;
     cursor[f * 3 + 2] = pulse;
   }
+  return cursor;
+}
 
-  return {
+/** what the planner decided and why: the material for render-report.json */
+export interface PlanDiagnostics {
+  /** the take declared navigation_logged (unexplained gaps are stalls) */
+  navigationLogged: boolean;
+  boundaries: Boundary[];
+  beats: BeatDecision[];
+  durationMs: number;
+}
+
+export interface PlanOptions {
+  layout?: Layout;
+  background?: string | BackgroundStyle;
+}
+
+/** the render plan plus the decisions behind it */
+export function planTake(
+  log: EventLog,
+  frameIndex: FrameIndexEntry[],
+  opts: PlanOptions = {},
+): { plan: RenderPlan; diagnostics: PlanDiagnostics } {
+  validateFrameIndex(frameIndex);
+  const fps = log.fps;
+  if (!Number.isInteger(fps) || fps < 1 || fps > 240) {
+    throw new Error(`render plan: unreasonable fps ${fps}`);
+  }
+  const frameMs = 1000 / fps;
+  const layout = opts.layout ?? defaultLayout(log.viewport);
+  const background =
+    typeof opts.background === "object"
+      ? opts.background
+      : buildBackground(opts.background ?? "aurora", layout.canvasW, layout.canvasH);
+  const center = { x: layout.canvasW / 2, y: layout.canvasH / 2 };
+
+  const boundaries = detectBoundaries(log, frameIndex);
+  const { segments, beats } = planPunches(log, layout, boundaries);
+  bridgeSegments(segments, boundaries, layout);
+  const durationMs = takeDurationMs(log, frameIndex, segments);
+  const frames = Math.ceil(durationMs / frameMs);
+
+  const plan: RenderPlan = {
     fps,
     frames,
     layout,
@@ -632,10 +856,18 @@ export function buildRenderPlan(
       inFrames: Math.min(Math.round(FADE_IN_MS / frameMs), Math.floor(frames / 3)),
       outFrames: Math.min(Math.round(FADE_OUT_MS / frameMs), Math.floor(frames / 3)),
     },
-    sourceByFrame,
-    blend,
-    camera,
-    cursor,
+    sourceByFrame: floorHoldSources(frameIndex, frames, frameMs),
+    blend: noSourceBlend(frames),
+    camera: integrateCamera(cameraTargetAt(segments, boundaries, center), boundaries, center, frames, frameMs),
+    cursor: cursorTrack(log, layout, frames, frameMs),
     sourceFiles: frameIndex.map((e) => e.file),
   };
+  return {
+    plan,
+    diagnostics: { navigationLogged: log.navigation_logged === true, boundaries, beats, durationMs: frames * frameMs },
+  };
+}
+
+export function buildRenderPlan(log: EventLog, frameIndex: FrameIndexEntry[], opts: PlanOptions = {}): RenderPlan {
+  return planTake(log, frameIndex, opts).plan;
 }

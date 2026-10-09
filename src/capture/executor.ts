@@ -32,7 +32,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type CDPSession, type Page } from "playwright";
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
-import { cursorPath, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
+import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { NavigationLog } from "./navigation.js";
 import {
   GATED_REDIRECT_HEADER,
@@ -69,6 +69,9 @@ const PRE_ROLL_MS = 1_000;
  *  end of the travel read as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
+/** the beat after select-all and after delete when clearing a field: fixed,
+ *  so a prefilled field never shifts the seeded rhythm of what follows */
+const CLEAR_BEAT_MS = 120;
 
 /**
  * CDP screencast is change-driven: a static page produces NO compositor
@@ -477,6 +480,19 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     return { x: box.x, y: box.y, w: box.width, h: box.height };
   }
 
+  /** the focused element (through open shadow roots) is a text field or an
+   *  editable region that already holds text */
+  async function focusedFieldHasText(): Promise<boolean> {
+    return page
+      .evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value.length > 0;
+        return el instanceof HTMLElement && el.isContentEditable && (el.textContent ?? "").length > 0;
+      })
+      .catch(() => false);
+  }
+
   type MutationsApi = {
     __supercutMutations?: {
       arm: () => void;
@@ -624,7 +640,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
         if (a.kind === "type") {
           const text = a.text ?? "";
-          const chars = [...text];
+          const keys = graphemes(text);
           const remaining = Math.max(200, a.duration_ms - (observedNow() - scheduledT));
           // human rhythm: a beat after the focusing click, log-normal gaps
           // around ~100ms (longer after spaces/punctuation, never under 45ms),
@@ -632,14 +648,28 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           // schedule shifts (timestamp canon) — never a pasted-in string.
           const rhythm = typingPlan(text, remaining, rng);
           await sleep(rhythm.beforeFirstKey);
-          for (const [i, ch] of chars.entries()) {
-            await cdp.send("Input.insertText", { text: ch });
-            if (i < chars.length - 1) await sleep(rhythm.keyDelays[i]!);
+          // the action types `text` into the field, not after what was there:
+          // select-all then delete, as real keys, so the app sees an edit
+          if (await focusedFieldHasText()) {
+            await page.keyboard.press("ControlOrMeta+a");
+            await sleep(CLEAR_BEAT_MS);
+            await page.keyboard.press("Backspace");
+            await sleep(CLEAR_BEAT_MS);
+          }
+          // real key events (keydown, keypress, input, keyup) per grapheme, so
+          // keyup-driven autocomplete, masks and hotkeys react as they do to a
+          // person. keyboard.type presses a single character the layout has
+          // and inserts it otherwise; a multi-code-point grapheme (an emoji
+          // sequence, a combining mark) goes in as one insert.
+          for (const [i, g] of keys.entries()) {
+            if ([...g].length === 1) await page.keyboard.type(g);
+            else await page.keyboard.insertText(g);
+            if (i < keys.length - 1) await sleep(rhythm.keyDelays[i]!);
           }
           events.push({
             t: stamp(observedNow()), observed_t: observedNow(), type: "type",
             bbox: [box.x, box.y, box.w, box.h], selector: a.selector,
-            textLen: [...text].length, // code points, matching the for...of insertion
+            textLen: keys.length,
           });
           if (a.submit) {
             // Many query inputs only reveal their payoff on submit (a form's

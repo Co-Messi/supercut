@@ -115,6 +115,62 @@ describe("scene entry", () => {
   }, 60_000);
 });
 
+type Keys = { down: string[]; press: string[]; up: string[]; input: [string, string | null][] };
+
+async function typeInto(url: string, text: string) {
+  const { result: res, logs } = await logsDuring(() =>
+    record({
+      recipe: recipeOf([{
+        name: "type", url,
+        actions: [{ kind: "type", selector: "#q", text, submit: true, duration_ms: 2400 }], hold_ms: 400,
+      }]),
+      outDir: outDir("type"), seed: 6, captureFrames: false, allowPrivateNetwork: true,
+    }),
+  );
+  expect(res.failedScenes).toEqual([]);
+  const submit = logs.find((l) => l.ev === "submit") as { value: string; suggestions: number; keys: Keys } | undefined;
+  expect(submit).toBeDefined();
+  return { res, submit: submit! };
+}
+
+describe("typing", () => {
+  it("types with real key events, so keyup-driven autocomplete reacts", async () => {
+    const { submit } = await typeInto(`${app.url}/form`, "pay");
+    expect(submit.value).toBe("pay");
+    for (const k of ["p", "a", "y"]) {
+      expect(submit.keys.down).toContain(k);
+      expect(submit.keys.press).toContain(k);
+      expect(submit.keys.up).toContain(k);
+    }
+    // the suggestions list is built only on keyup: "payments", "payouts"
+    expect(submit.suggestions).toBe(2);
+    // an empty field is not cleared first
+    expect(submit.keys.down).not.toContain("Backspace");
+  }, 60_000);
+
+  it("clears a prefilled field with select-all and delete before typing", async () => {
+    const { submit } = await typeInto(`${app.url}/form?prefill=stale`, "pay");
+    expect(submit.value).toBe("pay");
+    const down = submit.keys.down;
+    expect(down.indexOf("Backspace")).toBeGreaterThan(-1);
+    expect(down.indexOf("Backspace")).toBeLessThan(down.indexOf("p"));
+    expect(submit.keys.input[0]).toEqual(["deleteContentBackward", null]);
+  }, 60_000);
+
+  it("types grapheme by grapheme: keys for what a keyboard has, one insert per other grapheme", async () => {
+    const text = "née 👩‍💻!";
+    const { submit, res } = await typeInto(`${app.url}/form`, text);
+    expect(submit.value).toBe(text);
+    const inserted = submit.keys.input.filter(([type]) => type === "insertText").map(([, data]) => data);
+    expect(inserted).toEqual(["n", "é", "e", " ", "👩‍💻", "!"]);
+    // keyboard-producible characters arrive as real keys; é and the emoji do not
+    expect(submit.keys.up).toEqual(expect.arrayContaining(["n", "e", " ", "!"]));
+    expect(submit.keys.up).not.toContain("é");
+    const typed = res.eventLog.events.find((e) => e.type === "type");
+    expect(typed?.textLen).toBe(6);
+  }, 60_000);
+});
+
 describe("page changes", () => {
   it("logs nothing for a 204, a download, a same-path pushState or a hash jump", async () => {
     // a navigation that never commits must not leave a pending state that

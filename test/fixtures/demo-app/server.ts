@@ -230,13 +230,58 @@ const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
+/** sixth route: an input that reports how it was operated — pointer settle
+ *  before the press, press hold, keystroke times, Enter — to POST /keylog,
+ *  so the capture stage's human-timing behaviour is testable end to end.
+ *  Placed below the fold so reaching it needs a scroll-into-view. */
+const KEYS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Keys</title>
+<style>body{margin:0;font:16px sans-serif} .spacer{height:1700px}
+input{font-size:20px;padding:10px;width:420px;margin:40px}</style></head><body>
+<div class="spacer"></div>
+<input id="k" placeholder="type here">
+<div class="spacer"></div>
+<script>
+  const log = { moves: [], down: null, up: null, keys: [], enter: null, scrolls: [] };
+  addEventListener("mousemove", () => log.moves.push(performance.now()));
+  addEventListener("scroll", () => log.scrolls.push([performance.now(), scrollY]));
+  const k = document.getElementById("k");
+  k.addEventListener("mousedown", () => { log.down = performance.now(); });
+  k.addEventListener("mouseup", () => { log.up = performance.now(); });
+  k.addEventListener("input", () => log.keys.push(performance.now()));
+  k.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    log.enter = performance.now();
+    fetch("/keylog", { method: "POST", body: JSON.stringify(log) });
+  });
+</script></body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
+  /** bodies POSTed to /keylog by the /keys page, oldest first */
+  keylogs: unknown[];
+  /** GET count per path (query stripped) — proves whether a page reloaded */
+  hits: Map<string, number>;
 }
 
 export async function startDemoApp(port = 0): Promise<DemoApp> {
+  const keylogs: unknown[] = [];
+  const hits = new Map<string, number>();
   const server: Server = createServer((req, res) => {
+    if (req.method === "GET") {
+      const path = (req.url ?? "/").split("?")[0]!;
+      hits.set(path, (hits.get(path) ?? 0) + 1);
+    }
+    if (req.url === "/keylog" && req.method === "POST") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        try { keylogs.push(JSON.parse(body)); } catch { /* ignore */ }
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
     // open redirect: /redirect?to=<url> answers 302 → <url>. The gate tests
     // use it as the "public" first hop of a chain that ends on a private host.
     if (req.url?.startsWith("/redirect")) {
@@ -250,6 +295,7 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/fleet") ? FLEET
       : req.url?.startsWith("/overlay") ? OVERLAY
       : req.url?.startsWith("/probe") ? PROBE
+      : req.url?.startsWith("/keys") ? KEYS
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);
@@ -258,6 +304,8 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
   const addr = server.address() as { port: number };
   return {
     url: `http://127.0.0.1:${addr.port}`,
+    keylogs,
+    hits,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

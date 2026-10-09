@@ -67,6 +67,16 @@ export const sceneEvent = z.object({
   priority: z.number().int().min(1),
 }).strict();
 
+/** The page changed documents because of an ACTION (a clicked link, a form
+ *  submit) — recipe-driven gotos are not logged. Fast local navigations keep
+ *  the screencast flowing with no gap, so without this marker the renderer
+ *  cannot know the picture is now a different page. No URL: the log carries
+ *  timing only. */
+export const navigationEvent = z.object({
+  ...baseEvent,
+  type: z.literal("navigation"),
+}).strict();
+
 export const cursorPathEvent = z.object({
   ...baseEvent,
   type: z.literal("cursor_path"),
@@ -79,6 +89,7 @@ export const knownEvent = z.discriminatedUnion("type", [
   scrollEvent,
   hoverEvent,
   sceneEvent,
+  navigationEvent,
   cursorPathEvent,
 ]);
 
@@ -109,6 +120,7 @@ const KNOWN_EVENT_TYPES = new Set([
   "scroll",
   "hover",
   "scene",
+  "navigation",
   "cursor_path",
 ]);
 

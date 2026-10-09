@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BudgetedLlmClient, TokenBudgetExceededError, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
+import { BudgetedLlmClient, TokenBudgetExceededError, escalationCeiling, extractJson, type ChatOptions, type LlmClient } from "../src/director/llm.js";
 import { DESTRUCTIVE_RE, isDestructiveLabel, pageUrlHasSecret } from "../src/director/inventory.js";
 import { dryRunFollowUpCommand, pickMusic, preflight, shellQuote } from "../src/director/generate.js";
 import { writeRecipe } from "../src/director/script.js";
@@ -1252,5 +1252,118 @@ describe("LLM completion accounting (M-new-6)", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe("LLM max_tokens escalation on truncation", () => {
+  type Reply = { status?: number; content?: string; finish?: string };
+  async function run(replies: Reply[], maxTokens: number | undefined) {
+    const { OpenAICompatibleClient } = await import("../src/director/llm.js");
+    const realFetch = globalThis.fetch;
+    const sentMax: number[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+      sentMax.push((JSON.parse(init!.body!) as { max_tokens: number }).max_tokens);
+      const r = replies[Math.min(sentMax.length - 1, replies.length - 1)]!;
+      if (r.status && r.status !== 200) return new Response("too big", { status: r.status });
+      const message = r.content ? { content: r.content } : { content: "", reasoning_content: "thinking…" };
+      return new Response(JSON.stringify({ choices: [{ message, finish_reason: r.finish ?? "stop" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const client = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      const out = await client.chat({ system: "s", user: [{ type: "text", text: "t" }], maxTokens }).catch((e: Error) => e);
+      return { out, sentMax };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it("doubles max_tokens after a reasoning model runs out of tokens (8k → 16k → 32k)", async () => {
+    const { out, sentMax } = await run(
+      [{ finish: "length" }, { finish: "length" }, { content: '{"ok":true}' }],
+      8000,
+    );
+    expect(out).toBe('{"ok":true}');
+    expect(sentMax).toEqual([8000, 16000, 32000]);
+  });
+
+  it("never escalates past the ceiling (4x the requested max_tokens)", async () => {
+    const { sentMax } = await run([{ finish: "length" }], 8000);
+    expect(sentMax).toEqual([8000, 16000, 32000, 32000]);
+    expect(Math.max(...sentMax)).toBe(escalationCeiling(8000));
+  });
+
+  it("retries an empty answer that was NOT truncated at the same size", async () => {
+    const { sentMax } = await run([{ finish: "stop" }, { content: "done" }], 8000);
+    expect(sentMax).toEqual([8000, 8000]);
+  });
+
+  it("falls back to the last accepted size when the provider rejects an escalated max_tokens", async () => {
+    const { out, sentMax } = await run(
+      [{ finish: "length" }, { status: 400 }, { content: "done" }],
+      8000,
+    );
+    expect(out).toBe("done");
+    expect(sentMax).toEqual([8000, 16000, 8000]);
+  });
+
+  /** a provider that bills every attempt in full (prompt ~20 + the whole
+   *  max_tokens) and always truncates mid-reasoning: the worst case a budget
+   *  must survive */
+  async function budgetedTruncating(budget: number) {
+    const { OpenAICompatibleClient } = await import("../src/director/llm.js");
+    const realFetch = globalThis.fetch;
+    const sentMax: number[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+      const max = (JSON.parse(init!.body!) as { max_tokens: number }).max_tokens;
+      sentMax.push(max);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "", reasoning_content: "thinking…" }, finish_reason: "length" }],
+          usage: { total_tokens: max + 20 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const inner = new OpenAICompatibleClient({
+        apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: false,
+      });
+      const llm = new BudgetedLlmClient(inner, budget);
+      const out = await llm.chat({ system: "s", user: [{ type: "text", text: "p" }], maxTokens: 8000 }).catch((e: Error) => e);
+      return { out, sentMax, metered: llm.meteredTokens };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it("retries and escalations inside ONE call never carry spend past the budget", async () => {
+    // 4 attempts at 8k → 16k → 32k → 32k would bill ~88k; the budget is 40k
+    const { out, sentMax, metered } = await budgetedTruncating(40_000);
+    expect(out).toBeInstanceOf(TokenBudgetExceededError);
+    expect(sentMax[0]).toBe(8000);
+    expect(metered).toBeLessThanOrEqual(40_000 * 1.01); // prompt estimate slack only
+  });
+
+  it("a small budget still admits the first attempt; escalation is clamped to the room left", async () => {
+    const { sentMax, metered } = await budgetedTruncating(20_000);
+    expect(sentMax[0]).toBe(8000);
+    expect(sentMax.length).toBeGreaterThanOrEqual(2); // it did get to escalate
+    expect(sentMax[1]).toBeLessThan(16000); // …but only into the room the budget had left
+    expect(metered).toBeLessThanOrEqual(20_000 * 1.01);
+  });
+
+  it("the budget wrapper refuses a call whose FIRST attempt cannot fit", async () => {
+    let sent = 0;
+    const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };
+    const llm = new BudgetedLlmClient(noUsage, 6_000);
+    const call = (maxTokens: number) => llm.chat({ system: "s", user: [{ type: "text", text: "p" }], maxTokens });
+    await expect(call(8000)).rejects.toThrow(/8000 completion/);
+    expect(sent).toBe(0);
+    await expect(call(4000)).resolves.toBe("ok");
   });
 });

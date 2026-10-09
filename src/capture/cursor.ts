@@ -89,3 +89,52 @@ export function cursorPath(opts: PathOptions): CursorPoint[] {
   }
   return points;
 }
+
+export interface TypingPlan {
+  /** pause after the focusing click, before the first key */
+  beforeFirstKey: number;
+  /** the gaps BETWEEN consecutive keys: keyDelays[i] is waited after
+   *  character i, before character i + 1 (length = characters − 1) */
+  keyDelays: number[];
+  /** pause after the last key before pressing Enter (submit) */
+  beforeEnter: number;
+}
+
+/** keys after these land later: a person finishes a word/token, then moves on */
+const WORD_BREAK = /[\s.,@!?;:/\-_]/;
+const KEY_FLOOR_MS = 45;
+const KEY_MEAN_MAX_MS = 100;
+const KEY_MEAN_MIN_MS = 60;
+const WORD_BREAK_FACTOR = 1.8;
+/** log-normal spread of inter-key intervals (σ of the underlying normal) */
+const KEY_SIGMA = 0.35;
+
+/**
+ * Seeded human keystroke timing: log-normal inter-key intervals around a mean
+ * of ~100ms (compressed toward 60ms, never below, when the slot is short —
+ * a short slot must not collapse into a paste), longer after spaces and
+ * punctuation, a 45ms floor, a 250-400ms beat before the first key and
+ * ~300ms before Enter. Uniform per-char delays read as a metronome.
+ */
+export function typingPlan(text: string, availableMs: number, rng: () => number): TypingPlan {
+  const chars = [...text];
+  const beforeFirstKey = Math.round(250 + rng() * 150);
+  const beforeEnter = Math.round(250 + rng() * 100);
+  const breaks = chars.filter((c, i) => i > 0 && WORD_BREAK.test(chars[i - 1]!)).length;
+  // weight units: a post-break key costs WORD_BREAK_FACTOR ordinary keys
+  const units = Math.max(1, chars.length - 1 - breaks + breaks * WORD_BREAK_FACTOR);
+  const budget = availableMs - beforeFirstKey - beforeEnter;
+  const mean = Math.min(KEY_MEAN_MAX_MS, Math.max(KEY_MEAN_MIN_MS, budget / units));
+  const gauss = () => {
+    // Box-Muller from the seeded uniform source
+    const u = Math.max(rng(), 1e-9);
+    const v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const keyDelays = chars.slice(0, -1).map((c) => {
+    const base = WORD_BREAK.test(c) ? mean * WORD_BREAK_FACTOR : mean;
+    const d = base * Math.exp(KEY_SIGMA * gauss() - (KEY_SIGMA * KEY_SIGMA) / 2);
+    return Math.round(Math.min(base * 3, Math.max(KEY_FLOOR_MS, d)));
+  });
+  return { beforeFirstKey, keyDelays, beforeEnter };
+}

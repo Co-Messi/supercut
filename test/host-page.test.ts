@@ -41,6 +41,14 @@ describe("compositor sharpness settings", () => {
     expect(HOST_PAGE).toContain("function blurPassCount");
   });
 
+  it("draws the cursor and the shadow at mid-shutter, where the blurred content is centred", () => {
+    // the content is the average over the shutter; an end-of-shutter cursor
+    // leads its target by half a shutter during every fast zoom
+    const cursorBlock = HOST_PAGE.slice(HOST_PAGE.indexOf("// 3) cursor"), HOST_PAGE.indexOf("// 4) picture fade"));
+    expect(cursorBlock).toContain("camAt(0.5)");
+    expect(cursorBlock).not.toMatch(/SUB - 1/);
+  });
+
   it("frames the camera with the plan's cameraTransform — no inline copy of an older formula", () => {
     expect(HOST_PAGE).toContain("function cameraTransform");
     expect(HOST_PAGE).toContain("cameraTransform(z, fx, fy, W, H, C)");

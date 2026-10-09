@@ -358,16 +358,16 @@ async function main() {
     }
 
     // 3) cursor: drawn SHARP on the final composite (dark pixels vanish in the
-    //    additive blur layer). It still tracks the camera:
-    //    position + scale from the last subframe's transform.
+    //    additive blur layer). It still tracks the camera, at mid-shutter like
+    //    the shadow: the content is the shutter average, so an end-of-shutter
+    //    cursor would lead its target by half a shutter during a fast zoom.
     {
-      const base = (f * SUB + (SUB - 1)) * 3;
-      const [z, offX, offY] = cameraTransform(camera[base], camera[base + 1], camera[base + 2], W, H, C);
+      const [z, offX, offY] = camAt(0.5);
       ctx.save();
       ctx.translate(z * cur[0] + offX, z * cur[1] + offY);
-      // damped scale (sqrt z): full proportional growth read as distracting
-      // but a fully fixed cursor detaches from the content —
-      // sqrt keeps it cohesive while barely growing (~1.2x at max zoom)
+      // damped scale (sqrt z): full proportional growth distracts, but a
+      // fixed-size cursor detaches from the content; sqrt keeps it cohesive
+      // while barely growing (~1.2x at max zoom)
       const cs = Math.sqrt(z);
       ctx.scale(cs, cs);
       drawCursor(ctx, 0, 0, cur[2]);

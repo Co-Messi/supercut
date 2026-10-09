@@ -18,7 +18,7 @@ import { pipeline } from "node:stream/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { chromium } from "playwright";
+import { chromium, type Browser } from "playwright";
 import { parseEventLog, type EventLog } from "../schema/index.js";
 import { buildRenderPlan, FADE_IN_MS, FADE_OUT_MS, type FrameIndexEntry } from "./plan.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
@@ -45,6 +45,9 @@ export interface RenderOptions {
   /** ms; when unset, sized from the plan's frame count (≥5 min floor) so a
    *  long take's legitimately slow encode isn't killed by a flat ceiling */
   timeoutMs?: number;
+  /** starts the render browser; defaults to full Chromium. A seam for tests
+   *  and embedders (a custom executable, a remote browser). */
+  launchBrowser?: () => Promise<Browser>;
 }
 
 export interface RenderResult {
@@ -131,6 +134,25 @@ export function frameMimeType(name: string): string {
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".webp")) return "image/webp";
   return "application/octet-stream";
+}
+
+/** the one command that fixes a missing render browser */
+const CHROMIUM_INSTALL_HINT = "run: npx playwright install chromium";
+
+/**
+ * A browser launch failure as a one-line, actionable error. Playwright's own
+ * message for a missing executable is a multi-line banner; its first line
+ * names the cause, the hint names the fix. Other launch failures (sandbox,
+ * permissions) keep their cause and get the hint as a possibility only.
+ */
+export function launchFailure(err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  const first = msg.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "unknown error";
+  const missing = /executable doesn't exist|no such file|ENOENT|playwright install/i.test(msg);
+  const hint = missing
+    ? `Chromium for rendering is not installed; ${CHROMIUM_INSTALL_HINT}`
+    : `if Chromium for rendering is not installed, ${CHROMIUM_INSTALL_HINT}`;
+  return new Error(`render: could not launch Chromium (${first}). ${hint}`);
 }
 
 /** gentle loudness normalization + edge fades (skipped on clips too short to
@@ -462,22 +484,26 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const port = (server.address() as { port: number }).port;
 
   // Full Chromium: the stripped headless shell has no WebCodecs.
-  const browser = await chromium.launch({ headless: true, channel: "chromium" });
-  // (review) the watchdog timeout and the fatal-poll loop below are REFERENCED
-  // timers: left running after the encode settles, they keep the event loop
-  // alive. The CLI exits via process.exitCode (never process.exit(), which can
-  // truncate piped stdout), so a surviving multi-minute watchdog made a
-  // successful `supercut render` print its result and then appear to hang
-  // until the timer fired. Track both here and stop them in the finally that
-  // already owns teardown, so every exit path — success, timeout, in-page
-  // FATAL, result-stream failure — leaves no timer behind.
+  const launch = opts.launchBrowser ?? (() => chromium.launch({ headless: true, channel: "chromium" }));
+  let browser: Browser | undefined;
+  // The CLI exits via process.exitCode (never process.exit(), which can
+  // truncate piped stdout), so anything still holding the event loop after
+  // the render settles keeps the process alive: the listening server, the
+  // watchdog timeout and the fatal-poll loop below. The inner finally owns
+  // all three, and everything from the browser launch on runs inside it, so
+  // every exit path (launch failure, success, timeout, in-page FATAL,
+  // result-stream failure) releases them.
   let watchdog: NodeJS.Timeout | undefined;
   let raceSettled = false;
-  // B2 (review): outer try wraps the encode + mux so the temp raw file is
-  // unlinked on EVERY exit path — render timeout, in-page FATAL, "no encoded
-  // output", or an ffmpeg mux failure all flow through the finally below.
+  // the outer try wraps the encode + mux so the temp raw file is unlinked on
+  // every exit path, including an ffmpeg mux failure
   try {
     try {
+      try {
+        browser = await launch();
+      } catch (err) {
+        throw launchFailure(err);
+      }
       const page = await browser.newPage();
       let fatal: string | null = null;
       page.on("console", (msg) => {
@@ -518,14 +544,14 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         })(),
       ]);
     } finally {
-      // stop the watchdog + poll loop FIRST (see the declaration above): the
-      // race has settled, and any timer that survives this block outlives the
-      // render and blocks natural process exit.
+      // stop the watchdog + poll loop first: any timer that survives this
+      // block outlives the render and blocks natural process exit
       raceSettled = true;
       clearTimeout(watchdog);
-      // guard close: if browser.close() throws, server.close() must still run,
-      // else the loopback render server leaks the port until process exit.
-      await browser.close().catch(() => {});
+      // a failing browser.close() must not skip server.close(), or the
+      // loopback render server holds its port until process exit
+      await browser?.close().catch(() => {});
+      server.closeAllConnections();
       await new Promise<void>((r) => server.close(() => r()));
     }
 

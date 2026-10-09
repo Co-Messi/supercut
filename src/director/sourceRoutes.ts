@@ -72,8 +72,8 @@ function walk(
     return;
   }
   // deterministic traversal: readdir order is filesystem-dependent (hashed on
-  // ext4, near-alphabetical on APFS), so WHICH routes survived the budgets
-  // used to vary by machine. Sorted entries make the walk reproducible.
+  // ext4, near-alphabetical on APFS), so WHICH routes survive the budgets
+  // would vary by machine. Sorted entries make the walk reproducible.
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of entries) {
     if (state.files.length >= maxFiles || state.visited >= MAX_WALK_VISITED) {
@@ -91,12 +91,11 @@ function walk(
       if (state.truncated) return;
     } else {
       const file = join(dir, e.name);
-      // (review) the include predicate (--app scoping) runs INSIDE the walk:
-      // a file outside the selected app is neither kept nor charged against
-      // the file budget. Filtering after the walk let a monorepo's OTHER apps
-      // exhaust the budget before the requested app was ever reached — so
-      // --app web returned no routes while the truncation warning recommended
-      // --app as the remedy.
+      // The include predicate (--app scoping) runs INSIDE the walk: a file
+      // outside the selected app is neither kept nor charged against the file
+      // budget. Filtering after the walk would let a monorepo's OTHER apps
+      // exhaust the budget before the requested app was reached, so --app web
+      // would return no routes while the truncation warning recommends --app.
       if (include(file)) state.files.push(file);
     }
   }

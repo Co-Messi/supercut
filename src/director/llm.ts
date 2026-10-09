@@ -327,10 +327,9 @@ export function estimateTokens(opts: ChatOptions): number {
  * estimated prompt size would carry the total past it — so a misbehaving
  * model/retry loop is bounded instead of burning unbounded spend.
  * Metering prefers provider-reported usage; a provider that reports none is
- * metered by the local estimate instead of being unmeterable (the advertised
- * --max-tokens default used to be inert exactly for custom endpoints, the
- * case most likely to omit usage). budget <= 0 disables the cap
- * (accounting still runs).
+ * metered at its worst case (prompt estimate plus max_tokens) so the cap holds
+ * for custom endpoints, the case most likely to omit usage. budget <= 0
+ * disables the cap (accounting still runs).
  */
 export class BudgetedLlmClient implements LlmClient {
   readonly label: string;
@@ -453,8 +452,8 @@ export const UNTRUSTED_RULES =
  *  Any literal marker that appears anyway is scrubbed to a FIXPOINT as belt
  *  and braces — a single pass is NOT enough, because removing a marker nested
  *  inside its own text closes the surrounding halves back into a valid marker
- *  (`<<<END UNTRUSTED PAGE ` + END + `CONTENT>>>` reassembled a fresh END
- *  under the old fixed markers; found in review). */
+ *  (`<<<END UNTRUSTED PAGE ` + END + `CONTENT>>>` reassembles a fresh END
+ *  if the nested marker is removed in one pass). */
 export function wrapUntrusted(text: string): string {
   let scrubbed = text;
   while (scrubbed.includes(UNTRUSTED_BEGIN) || scrubbed.includes(UNTRUSTED_END)) {

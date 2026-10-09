@@ -139,8 +139,8 @@ export async function preflight(
       // is Chromium, so a UA-gating edge can 403 a URL Chromium loads fine.
       // Warn and continue; if the wall is real the crawl shows it in seconds.
       // Everything else >= 400 is as doomed as it looks (a 404/410/5xx start
-      // page films as an error screen) and used to surface only deep in the
-      // crawl — fail here instead. --skip-preflight overrides the whole probe.
+      // page films as an error screen) and would otherwise surface only deep
+      // in the crawl, so fail here. --skip-preflight overrides the whole probe.
       if (status === 401 || status === 403) {
         log(
           `preflight warning: ${url} responded ${status} — continuing (auth walls at the root are ` +
@@ -158,7 +158,7 @@ export async function preflight(
       clearTimeout(timer);
     }
   }
-  // (review) recipe preview must not need the render toolchain: --dry-run
+  // A recipe preview must not need the render toolchain: --dry-run
   // stops after analyze + script, so nothing is filmed or rendered and a
   // machine without ffmpeg can still produce and review a recipe. The URL
   // policy and reachability checks above still ran.

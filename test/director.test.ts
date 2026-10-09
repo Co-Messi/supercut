@@ -627,7 +627,7 @@ describe("LLM token budget guard", () => {
     await expect(ask(llm)).resolves.toBe("ok");
   });
 
-  it("meters a usage-less provider by local estimate instead of leaving it unmeterable (M8)", async () => {
+  it("meters a usage-less provider by local estimate instead of leaving it unmeterable", async () => {
     // the advertised --max-tokens default used to be inert for providers that
     // omit usage — exactly the custom-endpoint case. Now the local estimate
     // (~4 chars/token) accrues and eventually trips the budget.
@@ -643,7 +643,7 @@ describe("LLM token budget guard", () => {
     expect(llm.breakdown()).toMatch(/analyze \d+/);
   });
 
-  it("refuses a single oversized call BEFORE sending it — image payloads count (M8)", async () => {
+  it("refuses a single oversized call BEFORE sending it — image payloads count", async () => {
     let sent = 0;
     const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };
     const llm = new BudgetedLlmClient(noUsage, 3000);
@@ -697,7 +697,7 @@ describe("QC verdicts — frozen patch surface", () => {
     ]);
   });
 
-  it("cutting a parent cascades to dependents; a total cut throws a TYPED error (M4)", () => {
+  it("cutting a parent cascades to dependents; a total cut throws a TYPED error", () => {
     // both scenes die → applyVerdicts must THROW, never return. An earlier
     // draft returned the original recipe with changed:false + an allCut flag,
     // which fails open: any caller that predates the flag proceeds on
@@ -1000,7 +1000,7 @@ describe("script prompt trust boundary (analysis laundering)", () => {
   });
 });
 
-describe("retry feedback trust boundary (M-new-1)", () => {
+describe("retry feedback trust boundary", () => {
   /** every text part of a prompt with its marked regions cut out */
   async function outsideMarkers(opts: ChatOptions): Promise<string> {
     const { UNTRUSTED_BEGIN, UNTRUSTED_END } = await import("../src/director/llm.js");
@@ -1066,7 +1066,7 @@ describe("retry feedback trust boundary (M-new-1)", () => {
   });
 });
 
-describe("untrusted rules cover screenshots (M-new-2)", () => {
+describe("untrusted rules cover screenshots", () => {
   it("the shared rules text says text inside screenshots is untrusted too", async () => {
     const { UNTRUSTED_RULES } = await import("../src/director/llm.js");
     expect(UNTRUSTED_RULES).toMatch(/screenshot/i);
@@ -1074,7 +1074,7 @@ describe("untrusted rules cover screenshots (M-new-2)", () => {
   });
 });
 
-describe("storyboard mismatch degrades instead of killing the run (M10)", () => {
+describe("storyboard mismatch degrades instead of killing the run", () => {
   /** validRecipeJson plus a third, valid-but-off-storyboard scene */
   function threeScenes(): string {
     const r = JSON.parse(validRecipeJson("#cta")) as { scenes: Record<string, unknown>[] };
@@ -1144,7 +1144,7 @@ describe("storyboard mismatch degrades instead of killing the run (M10)", () => 
   });
 });
 
-describe("unused analysis copy never fails a paid run (M10)", () => {
+describe("unused analysis copy never fails a paid run", () => {
   it("headline, tagline, product_name and caption may be short or missing", async () => {
     const { validateAnalysis } = await import("../src/director/analyze.js");
     const raw = {
@@ -1158,7 +1158,7 @@ describe("unused analysis copy never fails a paid run (M10)", () => {
   });
 });
 
-describe("LLM completion accounting (M-new-6)", () => {
+describe("LLM completion accounting", () => {
   it("the pre-send check reserves the call's maxTokens completion, not just the prompt", async () => {
     let sent = 0;
     const noUsage: LlmClient = { label: "no-usage", chat: async () => { sent++; return "ok"; } };

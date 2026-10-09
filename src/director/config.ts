@@ -112,7 +112,7 @@ export function resolveProvider(
   ].filter(Boolean);
 
   // ANY multi-key situation is ambiguous — SUPERCUT_API_KEY must not silently
-  // pick a winner (DeepSeek used to win), so require an explicit provider.
+  // pick a winner, so require an explicit provider.
   if (!explicitProvider && providerKeys.length > 1) {
     throw new Error("multiple provider keys found; set SUPERCUT_PROVIDER to deepseek, openrouter, or custom");
   }

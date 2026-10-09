@@ -259,7 +259,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(await probeStreams(res.outFile)).toEqual(["video:h264"]);
   }, 300_000);
 
-  it("preserves the recorded take + artifacts when QC cuts every scene (M4)", async () => {
+  it("preserves the recorded take + artifacts when QC cuts every scene", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-allcut-"));
     dirs.push(outDir);
     const llm = new ScriptedLlm(() => [

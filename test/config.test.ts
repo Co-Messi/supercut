@@ -231,7 +231,7 @@ describe(".env loading", () => {
     }
   });
 
-  describe("parser edge cases (M-new-4)", () => {
+  describe("parser edge cases", () => {
     const ENV_KEYS = [
       "SUPERCUT_TEST_EMPTY", "SUPERCUT_TEST_COMMENT", "SUPERCUT_TEST_HASH_QUOTED", "SUPERCUT_TEST_HASH_GLUED",
       "SUPERCUT_TEST_EXPORTED", "SUPERCUT_TEST_CRLF", "SUPERCUT_TEST_SQ", "DATABASE_URL_SUPERCUT_TEST",

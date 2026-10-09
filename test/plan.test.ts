@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { assessSkew, musicFilterChain } from "../src/render/index.js";
-import { buildRenderPlan, defaultLayout, FADE_IN_MS, FADE_OUT_MS, SUBFRAMES } from "../src/render/plan.js";
+import { SETTLE_MS } from "../src/capture/executor.js";
+import {
+  buildRenderPlan,
+  defaultLayout,
+  FADE_IN_MS,
+  FADE_OUT_MS,
+  planTake,
+  SPA_RESULT_WINDOW_MS,
+  SUBFRAMES,
+} from "../src/render/plan.js";
 import type { EventLog } from "../src/schema/index.js";
 
 const viewport = { width: 1920, height: 1080, dpr: 2 };
@@ -502,6 +511,55 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
       // the new route's own beat still punches
       expect(zAtT(plan, 4600)).toBeGreaterThan(1.3);
     }
+  });
+
+  it("an SPA route change that reveals its beat's framed result keeps the payoff punch", () => {
+    // a list item opens its detail route: the recorder read the beat's result
+    // region after the route changed, so the punch frames the new route's
+    // result instead of cutting wide and dropping the payoff
+    for (const extra of [{}, { navigation_logged: true }]) {
+      for (const navAt of [2010, 2060, 2000 + SPA_RESULT_WINDOW_MS]) {
+        const log = makeLog(
+          [
+            { t: 0, type: "scene", name: "s1", priority: 1 },
+            { t: 2000, type: "click", bbox: [100, 300, 200, 40], selector: "#item-2", point: [200, 320], focus_bbox: [700, 200, 600, 500] },
+            { t: navAt, type: "navigation", kind: "spa" },
+          ],
+          extra,
+        );
+        const { plan, diagnostics } = planTake(log, idxWithGap(99999, 99999, 7000));
+        expect(diagnostics.beats[0]).toMatchObject({ framed: true, target: "result" });
+        expect(diagnostics.boundaries).toEqual([]);
+        // framed through the route change and its dwell
+        for (const t of [navAt + frameMs, 3000, 4000]) expect(zAtT(plan, t)).toBeGreaterThan(1.3);
+      }
+    }
+    // later than the result was read, or after a beat that frames only its
+    // control (or a full page load): the route change still cuts wide
+    const cases: [number, Record<string, unknown>, "spa" | "document"][] = [
+      [2000 + SPA_RESULT_WINDOW_MS + 50, { focus_bbox: [700, 200, 600, 500] }, "spa"],
+      [2060, {}, "spa"],
+      [2060, { focus_bbox: [700, 200, 600, 500] }, "document"],
+      // the recorder's changed-region guess is read on its own clock, maybe
+      // before the route changed
+      [2060, { focus_bbox: [700, 200, 600, 500], focus_source: "mutation" }, "spa"],
+    ];
+    for (const [navAt, focus, kind] of cases) {
+      const log = makeLog([
+        { t: 0, type: "scene", name: "s1", priority: 1 },
+        { t: 2000, type: "click", bbox: [100, 300, 200, 40], selector: "#item-2", point: [200, 320], ...focus },
+        { t: navAt, type: "navigation", kind },
+      ]);
+      const { plan, diagnostics } = planTake(log, idxWithGap(99999, 99999, 7000));
+      expect(diagnostics.boundaries.map((b) => b.source)).toEqual(["navigation"]);
+      expect(zAtT(plan, navAt + frameMs)).toBeLessThan(1.02);
+    }
+  });
+
+  it("the SPA result window matches when the recorder reads a beat's result", () => {
+    // the recorder settles SETTLE_MS after an action before it reads the
+    // focus_selector region, so a route change inside the window came first
+    expect(SPA_RESULT_WINDOW_MS).toBe(SETTLE_MS);
   });
 
   it("skips a punch that could only land after the click", () => {

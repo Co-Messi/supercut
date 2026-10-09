@@ -52,6 +52,7 @@ First public release of `@co-messi/supercut`.
 - A failed Chromium launch no longer hangs `render`; it closes the local server and says `npx playwright install chromium`.
 - A take with failed scenes is refused unless `SUPERCUT_ALLOW_PARTIAL=1`. `generate` renders a take that lost a few scenes and says which ones and why.
 - On takes that declare `navigation_logged`, an unexplained frame gap is a stall on the same page: the frame holds and the payoff zoom survives. Older takes keep the gap inference.
+- An SPA route change cuts like a page load, except one within 400ms of a beat whose named result region (`focus_selector`, or a QC zoom) was read on the new route: that beat keeps its punch, so a list item opening its detail route still frames the detail.
 - Focus boxes under 8px are ignored instead of zooming into a corner. A shot ends at the earliest required zoom out.
 - The 60 second estimate now counts reload, settle and pre-roll per scene and the real end tail. The measured length is checked after planning and warned about loudly when over 60 seconds.
 - `render-report.json` is written next to every video: page changes and their source, beats framed or skipped with a reason, duration, source fps, accumulator mode, bitrate. The CLI prints a one line summary such as `framed 4 of 5 beats`.

@@ -403,7 +403,9 @@ export function detectBoundaries(log: EventLog, frameIndex: FrameIndexEntry[]): 
       boundaries.push({ out: m - ZOOM_OUT_MS, in: m, snap: false, source: "scene-same-url", at: m });
     }
   }
-  const navTimes = log.events.filter((e) => e.type === "navigation").map((e) => e.t);
+  const navTimes = log.events
+    .filter((e) => e.type === "navigation" && !revealsFramedResult(log, e))
+    .map((e) => e.t);
   const nearNavigation = (g: SourceGap, t: number) =>
     g.tA >= t - NAV_EVENT_GAP_BEFORE_MS && g.tA <= t + NAV_EVENT_GAP_AFTER_MS;
   gaps.forEach((g, i) => {
@@ -422,13 +424,49 @@ export function detectBoundaries(log: EventLog, frameIndex: FrameIndexEntry[]): 
   // frames flowing (no gap to detect), so the logged commit time is the cut.
   // A slow one also left a gap, and that boundary already covers it. An SPA
   // route change (kind "spa") is the same cut: the picture is a different
-  // page, so no punch may keep dwelling on the old one.
+  // page, so no punch may keep dwelling on the old one. The exception is a
+  // route change that shows the result its beat frames (revealsFramedResult):
+  // that punch already targets the new route, so there is nothing to cut.
   for (const t of navTimes) {
     if (gaps.some((g) => nearNavigation(g, t))) continue;
     boundaries.push({ out: t, in: t, snap: true, source: "navigation", at: t });
   }
   boundaries.sort((x, y) => x.in - y.in);
   return boundaries;
+}
+
+/** the recorder reads a beat's named result region (focus_selector) no
+ *  sooner than its SETTLE_MS (400ms) after the action, so an SPA route change
+ *  logged within this window of the beat happened before the region was read */
+export const SPA_RESULT_WINDOW_MS = 400;
+
+type Beat = { t: number; focus_bbox?: [number, number, number, number] | undefined; focus_source?: string | undefined };
+
+/**
+ * True for an SPA route change that reveals the result its beat frames: a
+ * list item opening its detail route, a search submitting to a results path.
+ * The beat's named result region was read on the new route, so its punch
+ * frames the payoff there; cutting wide at the route change would drop the
+ * shot the beat exists for. A document load, a later route change, a beat
+ * that frames only its control, or one whose region is the recorder's
+ * changed-region guess (read on its own clock, possibly before the route
+ * changed) is still a cut.
+ */
+export function revealsFramedResult(log: EventLog, nav: { t: number; type: string; kind?: string | undefined }): boolean {
+  if (nav.type !== "navigation" || nav.kind !== "spa") return false;
+  // the beat the route change follows: the latest click, hover or type at or
+  // before it
+  const beat = log.events.reduce<Beat | undefined>(
+    (latest, e) =>
+      (e.type === "click" || e.type === "hover" || e.type === "type") && e.t <= nav.t && (!latest || e.t >= latest.t)
+        ? e
+        : latest,
+    undefined,
+  );
+  if (!beat || nav.t - beat.t > SPA_RESULT_WINDOW_MS || beat.focus_source === "mutation") return false;
+  if (effectiveFocus(beat) === undefined) return false;
+  // a scene entry between the beat and the route change: a different scene
+  return !log.events.some((e) => e.type === "scene" && e.t > beat.t && e.t <= nav.t);
 }
 
 /** the new-page time that opens the stretch containing t (0 = take head) */

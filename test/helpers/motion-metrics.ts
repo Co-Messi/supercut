@@ -7,8 +7,9 @@
  * Timing thresholds come from the planner itself (plan.ts exports them), so
  * the grader can never drift from the planner by a copied constant. What
  * counts as a page change is decided here from the log's evidence: scene
- * markers after the first, logged navigations, and (legacy takes only) long
- * unexplained gaps.
+ * markers after the first, logged navigations (except an SPA route change
+ * that reveals its beat's framed result, read with the planner's own
+ * predicate), and (legacy takes only) long unexplained gaps.
  */
 import type { EventLog } from "../../src/schema/index.js";
 import {
@@ -19,6 +20,7 @@ import {
   NAV_EVENT_GAP_BEFORE_MS,
   NAV_GAP_MS,
   SUBFRAMES,
+  revealsFramedResult,
   UNATTRIBUTED_GAP_MS,
   ZOOM_LEAD_MS,
   type FrameIndexEntry,
@@ -159,7 +161,7 @@ export function maxPanPxPerFrame(plan: RenderPlan): number {
 export function navGaps(frameIndex: FrameIndexEntry[], log?: EventLog): { tA: number; tB: number }[] {
   const events = log?.events ?? [];
   const markers = events.filter((e) => e.type === "scene").map((e) => e.t).slice(1);
-  const navs = events.filter((e) => e.type === "navigation").map((e) => e.t);
+  const navs = events.filter((e) => e.type === "navigation" && !(log && revealsFramedResult(log, e))).map((e) => e.t);
   const anchored = (tA: number) =>
     markers.some((m) => tA >= m - MARKER_GAP_BEFORE_MS && tA <= m + MARKER_GAP_AFTER_MS) ||
     navs.some((t) => tA >= t - NAV_EVENT_GAP_BEFORE_MS && tA <= t + NAV_EVENT_GAP_AFTER_MS);
@@ -194,7 +196,7 @@ export function motionMetrics(log: EventLog, frameIndex: FrameIndexEntry[], plan
   // a logged action-triggered navigation that left no gap: the frame after
   // its commit already shows (or is about to show) the new page
   for (const e of log.events) {
-    if (e.type === "navigation") maxZAfterNavGap = Math.max(maxZAfterNavGap, zAtFrame(Math.min(last, frameAt(e.t) + 1)));
+    if (e.type === "navigation" && !revealsFramedResult(log, e)) maxZAfterNavGap = Math.max(maxZAfterNavGap, zAtFrame(Math.min(last, frameAt(e.t) + 1)));
   }
 
   // each scene's first NEW frame: the take head for scene 1; for later scenes

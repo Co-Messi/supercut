@@ -238,6 +238,32 @@ describe("the stall scenario frames its payoff", () => {
     expect(navGaps(index, { ...log, navigation_logged: undefined }).length).toBe(2);
   });
 
+  it("an SPA route change that reveals the framed result is no page change: the payoff punch arrives and holds", () => {
+    // a list item opens its detail route 60ms after the click, and the new
+    // route takes 300ms to render (a gap right at the route change)
+    const index = numberFrames([...sourceFrames(0, 3060, 16.7, 41), ...sourceFrames(3360, 7000, 16.7, 42)]);
+    const log: EventLog = {
+      version: 0, t_source_unified: true, navigation_logged: true, viewport, fps: 60,
+      events: [
+        { t: 0, type: "scene", name: "s1", priority: 1 },
+        {
+          t: 3000, type: "click", bbox: [100, 300, 200, 40], selector: "#item-2", point: [200, 320],
+          focus_bbox: [700, 200, 600, 500], focus_source: "llm",
+        },
+        { t: 3060, type: "navigation", kind: "spa" },
+      ],
+    };
+    const metrics = score(log, index);
+    expect(navGaps(index, log)).toEqual([]);
+    expect(metrics.clickArrival[0]).not.toBeNull();
+    expect(metrics.clickArrival[0]!).toBeGreaterThanOrEqual(0.9);
+    // the grader reads the route change as the planner does (not a page
+    // change), so the punch framing through it is not a stale-page zoom
+    expect(metrics.maxZAfterNavGap).toBeLessThanOrEqual(1.05);
+    expect(metrics.maxPanPxPerFrame).toBeLessThan(48);
+    expect(metrics.maxLateRise).toBeLessThan(0.035);
+  });
+
   it("the grader anchors gaps only to scene markers after the first (as the planner does)", () => {
     // a 300ms hiccup 1s into the take: the opening marker is the take head,
     // not a page change, so this gap is no navigation

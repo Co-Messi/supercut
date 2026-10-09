@@ -411,8 +411,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   /** capture timeline started (events may be stamped) */
   let capturing = false;
   /** the page may hold state a fresh load would not: something was clicked,
-   *  typed or navigated since the last entry load, or a scene failed partway.
-   *  Hover, scroll and wait leave it clean. */
+   *  typed, scrolled or navigated since the last entry load, or a scene
+   *  failed partway. Hover and wait leave it clean. */
   let pageDirty = false;
 
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */

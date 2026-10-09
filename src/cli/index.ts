@@ -208,7 +208,7 @@ async function main(): Promise<number> {
         `done in ${(res.wallMs / 1000).toFixed(1)}s — ${res.frames} frames, ` +
           `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded` +
           (res.music ? `, music: ${res.music}` : "") +
-          ` → ${res.outFile}`,
+          ` → ${res.outFile}\n${res.summary} (report: ${res.reportFile})`,
       );
       return 0;
     }

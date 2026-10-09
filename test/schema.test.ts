@@ -171,8 +171,9 @@ describe("recipe schema", () => {
 
   it("counts the take's fixed capture + render overhead against the 60s ceiling", () => {
     // 4 scenes of 14.5s actions = 58s of recipe — under 60s on paper, but the
-    // take adds a 1s head pre-roll, ~1.5s per later scene (reload + settle +
-    // pre-roll) and a ~1.7s settled tail: the video would run ~65s
+    // take adds a 1s head pre-roll, ~2.4s per later scene (reload allowance +
+    // settle + pre-roll) and a settled tail after the last beat: the video
+    // would run well past 60s
     const scene = (name: string, ms: number) => ({
       name,
       priority: 1,

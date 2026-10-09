@@ -10,7 +10,7 @@ supercut is a TypeScript CLI: an AI director films a real web app with Playwrigh
 npm ci
 npm run build          # tsc to dist/
 npm run typecheck      # tsc --noEmit
-npm run test:fast      # the quick unit files, no browser
+npm run test:fast      # every unit test file, no browser
 npm test               # whole suite including e2e (needs Chromium and ffmpeg)
 npm run test:e2e       # only *.e2e.test.ts
 npm run check:pack     # asserts the npm tarball contents and size

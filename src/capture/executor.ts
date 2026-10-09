@@ -60,11 +60,11 @@ const JPEG_QUALITY = 92;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
 /** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
  *  a settle pause before the schedule continues */
-const SETTLE_MS = 400;
+export const SETTLE_MS = 400;
 /** every page opens at rest for at least this long before its first action:
  *  the render's establishing shot reads the page wide, and the first punch-in
  *  has time to arrive BEFORE the first click instead of chasing it */
-const PRE_ROLL_MS = 1_000;
+export const PRE_ROLL_MS = 1_000;
 /** the pointer comes to rest on a target before pressing, and a press is
  *  held like a finger does — a zero-length press/release pair right at the
  *  end of the travel reads as robotic */
@@ -625,7 +625,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   async function runAction(a: Action): Promise<void> {
     const scheduledT = clock;
     const slotEnd = clock + a.duration_ms;
-    if (a.kind === "click" || a.kind === "type" || a.kind === "goto") pageDirty = true;
+    if (a.kind === "click" || a.kind === "type" || a.kind === "goto" || a.kind === "scroll") pageDirty = true;
 
     switch (a.kind) {
       case "goto": {
@@ -947,10 +947,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
           // every scene is written as if it opens on a freshly loaded entry
           // page. When the browser already shows that exact page and nothing
-          // since its load changed state (hover, scroll and wait only), the
-          // reload is skipped: it would only add a freeze and a flash of the
-          // same page. Typed text, a selection, an open modal, or a failed
-          // scene's leftovers all force the reload.
+          // since its load changed state (hover and wait only), the reload is
+          // skipped: it would only add a freeze and a flash of the same page.
+          // Typed text, a selection, an open modal, a scroll position, or a
+          // failed scene's leftovers all force the reload.
           const alreadyThere = !pageDirty && sameUrl(page.url(), scene.entry.url);
           if (!alreadyThere) {
             // suppress capture across the reload so the blank page never lands in

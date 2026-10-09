@@ -439,7 +439,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
       if (result.aborted) {
         throw new Error(
-          `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe`,
+          `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe` +
+            formatSceneErrors(result.sceneErrors),
         );
       }
       // capture-health gate, BEFORE any QC spend: a starved capture (repaint
@@ -530,9 +531,20 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
     // it; nothing is ever drawn over the app. (The director still writes copy in
     // the report for reference, but it is deliberately NOT rendered.)
+    // record() aborts the take when most scenes fail; a take that lost a few
+    // lower-priority scenes is still filmed, QC'd and rendered here, so the
+    // render's partial-take gate is lifted for this one known take only.
+    const partial = result.failedScenes.length > 0;
+    if (partial) {
+      log(
+        `   warning: rendering without failed scene(s) [${result.failedScenes.join(", ")}]` +
+          formatSceneErrors(result.sceneErrors),
+      );
+    }
     const renderRes = await renderTake({
       takeDir,
       outFile,
+      ...(partial ? { allowPartial: true } : {}),
       ...(opts.background ? { background: opts.background } : {}),
       ...(music.spec ? { music: music.spec } : {}),
     });
@@ -548,4 +560,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     logUsage();
     throw err;
   }
+}
+
+/** "; name: reason" pairs for the scenes record() reported as failed. */
+function formatSceneErrors(errors: Record<string, string> | undefined): string {
+  const entries = Object.entries(errors ?? {});
+  return entries.length ? ` (${entries.map(([name, reason]) => `${name}: ${reason}`).join("; ")})` : "";
 }

@@ -38,8 +38,30 @@ First public release of `@co-messi/supercut`.
 
 ### Capture
 
-- (to be filled in by the integrator)
+- A scene that shares the previous scene's URL now reloads unless the previous scene only hovered or waited. Typed text, filters, modals and scroll position no longer carry into the next scene.
+- Typing clears the field first, then types each grapheme with real key events (keydown, keypress, input, keyup), so autocomplete and key driven inputs react as they would for a person.
+- Every page change is logged: link and submit navigations as `navigation` events, SPA route changes as `navigation` with `kind: "spa"`, scene entries as `scene` events. Each take declares `navigation_logged: true`.
+- A navigation is stamped at the first frame that actually shows the new page, not at commit time, so the camera no longer cuts on the old page.
+- Navigations that never commit (204, downloads, aborts) leave nothing behind, commits within 300ms collapse into one, and a guard redirect logs one navigation.
+- A scene whose entry page answers with HTTP 400 or above fails with a message naming the URL and status. Failed scenes are written to `failed_scenes` in `events.json`, with reasons printed.
+- The repaint beacon is a CSS animation instead of a script that rewrote a style 60 times a second: zero DOM mutations in the filmed app, and frames keep flowing during long main thread tasks.
+- Identical consecutive frames are written once. The bundled demo's frame directory went from 72MB to 7.9MB.
 
 ### Render
 
-- (to be filled in by the integrator)
+- A failed Chromium launch no longer hangs `render`; it closes the local server and says `npx playwright install chromium`.
+- A take with failed scenes is refused unless `SUPERCUT_ALLOW_PARTIAL=1`. `generate` renders a take that lost a few scenes and says which ones and why.
+- On takes that declare `navigation_logged`, an unexplained frame gap is a stall on the same page: the frame holds and the payoff zoom survives. Older takes keep the gap inference.
+- Focus boxes under 8px are ignored instead of zooming into a corner. A shot ends at the earliest required zoom out.
+- The 60 second estimate now counts reload, settle and pre-roll per scene and the real end tail. The measured length is checked after planning and warned about loudly when over 60 seconds.
+- `render-report.json` is written next to every video: page changes and their source, beats framed or skipped with a reason, duration, source fps, accumulator mode, bitrate. The CLI prints a one line summary such as `framed 4 of 5 beats`.
+- The bitrate line is informational; a mostly static take encodes small and is not a problem.
+- When the float16 accumulator is unavailable the CLI says so, and the 8 bit fallback is capped at 4 passes to keep colour shift small.
+- The cursor is drawn at mid shutter so it no longer leads the blurred content during fast zooms.
+- The motion quality suite grades with the planner's own thresholds, adds pan speed and type and hover arrival metrics, uses a new JPEG pipeline fixture, and a pixel level e2e test checks luminance and cut timing on rendered frames.
+
+### Behaviour changes for existing takes
+
+- Takes recorded before pre-roll existed lose zooms on clicks in the first 1.4 seconds of a page; `render-report.json` lists them as too soon after the page opened.
+- Recipes close to 60 seconds may now fail validation, because the overhead estimate is more honest.
+- Takes with failed scenes are refused by `render` (see above).

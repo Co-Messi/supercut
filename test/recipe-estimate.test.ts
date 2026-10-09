@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { PRE_ROLL_MS, SETTLE_MS } from "../src/capture/executor.js";
 import { FOCUS_DWELL_MS, SETTLE_TAIL_MS, TAIL_MS, ZOOM_DWELL_MS } from "../src/render/plan.js";
 import {
   estimatedTakeMs,
@@ -44,8 +45,8 @@ function recipe(lastActions: Step[], lastHold: number, scenes = 1): Recipe {
 
 describe("take overhead model", () => {
   it("a scene change costs the reload allowance, the settle and the new page's pre-roll", () => {
-    expect(SCENE_SETTLE_MS).toBe(400);
-    expect(SCENE_PRE_ROLL_MS).toBe(1000);
+    expect(SCENE_SETTLE_MS).toBe(SETTLE_MS);
+    expect(SCENE_PRE_ROLL_MS).toBe(PRE_ROLL_MS);
     expect(SCENE_CHANGE_MS).toBe(RELOAD_ALLOWANCE_MS + SCENE_SETTLE_MS + SCENE_PRE_ROLL_MS);
     // a remote app reloads in 0.3 to 3s; 1s is the planning allowance
     expect(RELOAD_ALLOWANCE_MS).toBeGreaterThanOrEqual(1000);

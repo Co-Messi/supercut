@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "supercut",
+  "description": "supercut: film your real web app into a cinematic launch video.",
+  "owner": {
+    "name": "Brayden Siew",
+    "url": "https://github.com/Co-Messi"
+  },
+  "plugins": [
+    {
+      "name": "supercut",
+      "description": "Let your coding agent direct a cinematic launch video of your running web app. No LLM API key needed.",
+      "version": "0.1.0",
+      "source": "./",
+      "category": "productivity",
+      "tags": ["launch-video", "demo-video", "playwright"]
+    }
+  ]
+}

@@ -163,10 +163,9 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
     }));
     const plan = buildRenderPlan(log, idx);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
-    // Behaviour change: the camera used to "glide" at z=1.1 on scene 1's stale
-    // focus right up to scene 2 (6000ms read 1.1). A scene change is a cut to
-    // a different page — the camera is fully wide before it, never parked on
-    // a target that no longer exists.
+    // a scene change is a cut to a different page: the camera is fully wide
+    // before it, never gliding at z=1.1 on scene 1's stale focus up to the
+    // marker (a target that is about to disappear)
     expect(zAt(Math.round(6000 / (1000 / 60)))).toBeLessThan(1.02);
     expect(zAt(Math.round(8000 / (1000 / 60)))).toBeLessThan(1.02);
     // the second scene OPENS wide: midway through its establishing shot
@@ -256,13 +255,13 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
 });
 
 describe("source mapping: floor-hold, never a double exposure", () => {
-  // Behaviour change (was: linear cross-blend across 25-500ms gaps, a late
-  // 350ms crossfade across nav/long gaps). Two DIFFERENT source frames mixed
-  // at partial weight is a double exposure — on a real 39fps generate take
-  // 46% of output frames were ghosted. The plan has no pixels to prove two
-  // frames near-identical, and blending near-identical frames is a visual
-  // no-op, so every gap is now floor-held and a page change is a clean cut.
-  // The blend array stays in the plan (all -1/0) for host-page compatibility.
+  // Two DIFFERENT source frames mixed at partial weight is a double exposure
+  // (cross-blending every short gap ghosts a large share of a sub-60fps
+  // take's frames; a crossfade at a navigation superimposes two pages). The
+  // plan has no pixels to prove two frames near-identical, and blending
+  // near-identical frames is a visual no-op, so every gap is floor-held and a
+  // page change is a clean cut. The blend lane stays in the plan (all -1/0)
+  // for the host page contract.
   const gapIndex = [
     ...Array.from({ length: 121 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
@@ -517,7 +516,7 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
   });
 });
 
-describe("plan input bounds (PR #1 review)", () => {
+describe("plan input bounds", () => {
   it("throws on a corrupt huge timestamp instead of allocating the moon", () => {
     const evil = makeLog([
       { t: 99_999_999, type: "scene", name: "x", priority: 1 },
@@ -572,9 +571,9 @@ describe("plan input bounds (PR #1 review)", () => {
   });
 
   it("skew gate: a sparse take that DECLARES the unified clock still fails — a starved capture can't reclassify itself as legacy", () => {
-    // this was the H1 hole: fps was inferred, so 12 frames over 40s read as
-    // "legacy" and the fail downgraded to a warning. Legacy now comes from the
-    // schema declaration only.
+    // legacy-ness comes from the schema declaration only: inferred from fps,
+    // 12 frames over 40s would read as "legacy" and downgrade the fail to a
+    // warning
     const starved = Array.from({ length: 12 }, (_, i) => ({
       file: `frames/${String(i).padStart(6, "0")}.png`,
       t_source: i * 100,

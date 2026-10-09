@@ -13,7 +13,7 @@ const content = { x: 192, y: 100, w: 1536, h: 864 };
 describe("motion blur pass count", () => {
   it("uses the corner that moves MOST, not just the top-left", () => {
     // zooming about the content's top-left: that corner barely moves while the
-    // far corner sweeps ~20px — the old top-left-only count left 20px ghost gaps
+    // far corner sweeps ~20px, so a top-left-only count leaves 20px ghost gaps
     const a = offsets(1.2, 200, 110);
     const b = offsets(1.215, 200, 110);
     const topLeft = Math.hypot(b[0] * content.x + b[1] - (a[0] * content.x + a[1]), b[0] * content.y + b[2] - (a[0] * content.y + a[2]));

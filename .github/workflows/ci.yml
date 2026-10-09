@@ -91,3 +91,14 @@ jobs:
             if (!track) throw new Error("bundled music track pulse did not resolve");
             console.log("assets ok:", bg.spec, track);
           '
+      # npm 11 rewrites or drops package.json fields it considers invalid at
+      # publish time (a ./ prefixed bin is removed), and npm 10 on this runner
+      # does not. Run the publish checks with npm 11 and fail on any correction.
+      - name: publish dry run with npm 11
+        run: |
+          set -euo pipefail
+          npx --yes npm@11.6.2 publish --dry-run --access public 2>&1 | tee publish-dry-run.log
+          if grep -q "auto-corrected" publish-dry-run.log; then
+            echo "npm would rewrite package.json on publish; fix the fields listed above" >&2
+            exit 1
+          fi

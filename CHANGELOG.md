@@ -28,6 +28,7 @@ First public release of `@co-messi/supercut`.
 
 ### Fixed
 
+- The `supercut` command survives `npm publish` on npm 11, which drops a `bin` path written with a leading `./`. CI now runs an npm 11 publish dry run and fails if npm would rewrite `package.json`.
 - `supercut record` exits nonzero when any scene failed (the take is still written), names each failed scene with its reason, and points at the likely cause: the app URL and port for an error page or a refused connection, the selector for a control that never became visible. An app that is not listening gives a short message instead of a Playwright call log.
 - `supercut doctor` no longer passes when the Chromium binary is missing from disk. The unused ffprobe check is removed.
 - The Chromium install command in `doctor` and `render` errors runs supercut's own copy of Playwright (`node "<its path>/cli.js" install chromium`). `npx playwright install chromium`, even with a version pinned, run inside an app with its own `@playwright/test` ran that app's Playwright and installed its browser revision, which supercut cannot find.

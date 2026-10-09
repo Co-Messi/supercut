@@ -22,6 +22,13 @@ describe("package name ownership (C1)", () => {
     expect(Object.keys(pkg.bin)).toEqual(["supercut"]);
   });
 
+  it("bin paths are plain relative paths, because npm 11 strips a ./ prefixed bin on publish", () => {
+    for (const path of Object.values(pkg.bin)) {
+      expect(path).not.toMatch(/^\.?\//);
+      expect(path).toMatch(/^dist\/.+\.js$/);
+    }
+  });
+
   it("every README npx invocation of supercut uses the owned package name", () => {
     const npxTargets = [...readme.matchAll(/npx\s+(\S+)/g)].map((m) => m[1]!);
     const ours = npxTargets.filter((t) => t.includes("supercut"));

@@ -85,6 +85,36 @@ describe("frames on disk", () => {
   }, 60_000);
 });
 
+/** /log bodies posted during `run`, after in-flight posts have landed */
+async function logsDuring<T>(run: () => Promise<T>): Promise<{ result: T; logs: Record<string, unknown>[] }> {
+  const from = app.logs.length;
+  const result = await run();
+  await new Promise((r) => setTimeout(r, 300));
+  return { result, logs: app.logs.slice(from) };
+}
+
+describe("scene entry", () => {
+  it("reloads a shared entry URL after a scene that typed: the next scene starts from a clean field", async () => {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([
+          { name: "type-pay", url: `${app.url}/form`, actions: [{ kind: "type", selector: "#q", text: "pay", duration_ms: 1400 }] },
+          {
+            name: "type-auth", url: `${app.url}/form`,
+            actions: [{ kind: "type", selector: "#q", text: "auth", submit: true, duration_ms: 1600 }], hold_ms: 400,
+          },
+        ]),
+        outDir: outDir("reload"), seed: 4, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    expect(res.failedScenes).toEqual([]);
+    // each scene opened on a freshly loaded page and focused an empty field
+    expect(logs.filter((l) => l.ev === "load")).toHaveLength(2);
+    expect(logs.filter((l) => l.ev === "focus").map((l) => l.value)).toEqual(["", ""]);
+    expect(logs.find((l) => l.ev === "submit")?.value).toBe("auth");
+  }, 60_000);
+});
+
 describe("page changes", () => {
   it("logs nothing for a 204, a download, a same-path pushState or a hash jump", async () => {
     // a navigation that never commits must not leave a pending state that

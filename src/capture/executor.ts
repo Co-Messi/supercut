@@ -379,6 +379,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   /** capture timeline started (events may be stamped) */
   let capturing = false;
+  /** the page may hold state a fresh load would not: something was clicked,
+   *  typed or navigated since the last entry load, or a scene failed partway.
+   *  Hover, scroll and wait leave it clean. */
+  let pageDirty = false;
 
   /** schedule clock (paces slots + budget); wall anchor shared with frame t_source */
   let clock = 0;
@@ -561,6 +565,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   async function runAction(a: Action): Promise<void> {
     const scheduledT = clock;
     const slotEnd = clock + a.duration_ms;
+    if (a.kind === "click" || a.kind === "type" || a.kind === "goto") pageDirty = true;
 
     switch (a.kind) {
       case "goto": {
@@ -868,13 +873,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       try {
         if (i > 0) {
           await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork });
-          // the previous scene already left the browser on this exact page:
-          // re-navigating only reloads it — a second freeze in the footage and
-          // a flash of the same page. Skipped only after a scene that completed
-          // (a failed one may have left the page in a state a reload resets).
-          const prev = recipe.scenes[i - 1]!;
-          const alreadyThere =
-            !failedScenes.includes(prev.name) && sameUrl(page.url(), scene.entry.url);
+          // every scene is written as if it opens on a freshly loaded entry
+          // page. When the browser already shows that exact page and nothing
+          // since its load changed state (hover, scroll and wait only), the
+          // reload is skipped: it would only add a freeze and a flash of the
+          // same page. Typed text, a selection, an open modal, or a failed
+          // scene's leftovers all force the reload.
+          const alreadyThere = !pageDirty && sameUrl(page.url(), scene.entry.url);
           if (!alreadyThere) {
             // suppress capture across the reload so the blank page never lands in
             // the footage (the scene-change flash); resume once it has painted.
@@ -888,6 +893,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
               const response = await gotoReady(page, scene.entry.url);
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
               await sleep(SETTLE_MS);
+              pageDirty = false;
             } finally {
               isNavigating = false;
             }
@@ -914,6 +920,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         }
       } catch (err) {
         failedScenes.push(scene.name);
+        pageDirty = true;
         const failedWithDeps = failedScenes.length;
         if (i === 0 || failedWithDeps > recipe.scenes.length / 2) {
           aborted = true;

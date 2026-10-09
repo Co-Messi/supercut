@@ -1,15 +1,13 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Co-Messi/supercut/main/assets/supercut-wordmark-final.png" alt="supercut — real app footage → cinematic launch video" width="620" />
+  <img src="https://raw.githubusercontent.com/Co-Messi/supercut/main/assets/supercut-wordmark-final.png" alt="supercut: real app footage to cinematic launch video" width="620" />
 </p>
 
 <p align="center">
-  <strong>Point an AI director at your live app. Get a cinematic 60-second launch video.</strong>
-  <br />
-  <em>Real product footage — performed, shot, and edited automatically. No mockups, no timeline, no manual cuts.</em>
+  <strong>Point an AI director at your live app. Get a cinematic 60 second launch video.</strong>
 </p>
 
 <p align="center">
-  <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_start-1a1a1a" alt="Quick start" /></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_start-1a1a1a" alt="Quick start" /></a>
   <a href="#license"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white" alt="Node >= 20" />
   <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
@@ -19,54 +17,20 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/Co-Messi/supercut/main/assets/demo-pulse.webp" alt="supercut filming a live service-health dashboard: it searches for a service, then flips through services as their live metrics update" width="900" />
   <br />
-  <sub><em>One <code>supercut generate</code> run against a live dashboard — zero manual editing. The director picked the moments; the cursor, camera, and cuts are all automatic. Rendered at 1080p60 with music.</em></sub>
+  <sub><em>A preview of one supercut run against a live service-health dashboard: the cursor, camera and cuts are all automatic. This clip is a 1200px, silent animated WebP. The real render is an MP4 with music.</em></sub>
 </p>
 
 ---
 
-**You built something great. Now you need a launch video — and all you've got is a screen recording, iMovie, and a deadline.**
-
-`supercut` is an AI director for launch videos. Screen recorders hand you a canvas and a timeline and leave the direction to you — supercut decides what to film by itself. Point it at your *running* app: it reads your source, crawls the live UI, picks the 2–4 moments that actually sell the product, drives a real browser to perform them on camera, then renders the result cinematically — spring zoom-to-cursor, motion blur, music, a wallpaper stage, and a clean 1080p60 export.
-
-> Not a screen recording. Not a fake UI mockup. **Your real product**, shot like a launch film — automatically.
-
-## ✨ What makes it different
-
-- **Real footage only.** It drives your actual app in a real browser. Nothing is faked or re-created.
-- **It understands the product.** It reads your routes/source *and* crawls the DOM, so it films the money moments — type a query → frame the result — instead of parking on the landing page.
-- **It frames the payoff.** The camera holds on the *result* an action produces (the graph, the dashboard, the detail panel), not the button you clicked.
-- **Works on any app.** Same pipeline for a light editorial dashboard or a dark single-page tool — copy and colors adapt per app.
-- **No API key required to run it.** `record` + `render` work fully offline; only the AI director (`generate`) calls an LLM.
-- **An open contract.** The recorder writes a documented event log; any recorder can feed the renderer.
-
-## 🎬 How it works
-
-```text
- your app URL ──▶ ① analyze   read the source + crawl the app → pick the money moments (LLM)
-                  ② script    write the filming recipe (LLM, schema-validated, no hallucinated selectors)
-                  ③ record    a deterministic browser performs it, captured frame-by-frame
-                  ④ qc        deterministic + optional vision checks, bounded re-takes
-                  ⑤ render    cinematic compositing ──▶ final.mp4 (≤60s, 1080p60)
-```
-
-Each stage hands off a plain-JSON artifact, so you can stop at any point, hand-edit, and resume.
-
-## 🚀 Quick start
+## Quick start
 
 ```bash
-# your app running locally? one command:
 npx @co-messi/supercut generate --url http://localhost:3000
 ```
 
-`generate` needs an LLM key in a `.env` (see [provider setup](#-llm-provider-setup)),
-plus Chromium and ffmpeg: `npx playwright install chromium`, an `ffmpeg` on your PATH,
-and `npx @co-messi/supercut doctor` checks both.
+`generate` needs an LLM key in a `.env` (see [LLM provider setup](#llm-provider-setup)), plus Chromium and ffmpeg: `npx playwright install chromium`, and an `ffmpeg` on your PATH. `npx @co-messi/supercut doctor` checks both.
 
-> Any command accepts `--help` to print its own usage (e.g. `npx @co-messi/supercut generate --help`).
-> Examples further down write the command as plain `supercut …`: run it as
-> `npx @co-messi/supercut …`, or `node dist/cli/index.js …` from a source checkout.
-
-### From source (contributors — and the no-API-key demo)
+From source:
 
 ```bash
 git clone https://github.com/Co-Messi/supercut
@@ -77,113 +41,80 @@ npm run build
 node dist/cli/index.js generate --url http://127.0.0.1:3000
 ```
 
-No key? The non-AI path works standalone against the bundled demo app:
+Any command accepts `--help`. Examples below write the command as plain `supercut ...`: run it as `npx @co-messi/supercut ...`, or `node dist/cli/index.js ...` from a source checkout.
+
+No key? The keyless path works standalone against the bundled demo app:
 
 ```bash
-# 1. serve the bundled demo app on port 4173 (or: npx serve -l 4173 examples/demo-app)
-python3 -m http.server 4173 --directory examples/demo-app &
+# 1. serve the bundled demo app on port 4319
+python3 -m http.server 4319 --directory examples/demo-app &
 
 # 2. film it with the example recipe, then render
 node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
 node dist/cli/index.js render --take out/take --out out/final.mp4
-
-node dist/cli/index.js doctor   # check Chromium + ffmpeg are installed
 ```
 
-### 🤖 Or: let your coding agent set it up
+## Use it from your coding agent (no API key)
 
-Already living in **Claude Code, Codex, opencode, Cursor, or Cline**? Don't run the
-steps by hand — paste the block below in as your task, fill in the two `<...>`
-placeholders, and let the agent clone, build, install Chromium/ffmpeg, and film your app:
+Already working in Claude Code? Let your agent be the director. It reads your app, writes the filming recipe itself, runs `supercut record` and `supercut render`, then looks at a contact sheet of the result before it reports back. No LLM key is needed because your agent is the LLM.
 
 ```text
-Set up and run supercut (https://github.com/Co-Messi/supercut) to make a launch
-video of my app. Steps:
-
-1. git clone https://github.com/Co-Messi/supercut && cd supercut
-2. npm install && npm run build
-3. npx playwright install chromium
-4. Ensure ffmpeg is on PATH (install it if missing), then run:
-   node dist/cli/index.js doctor
-5. Ask me which LLM provider to use, then create a .env:
-   - DeepSeek:    SUPERCUT_PROVIDER=deepseek    + DEEPSEEK_API_KEY=...
-   - OpenRouter:  SUPERCUT_PROVIDER=openrouter  + OPENROUTER_API_KEY=...
-6. Film it (my app is running locally — fill these in):
-   node dist/cli/index.js generate --url <MY_APP_URL> --repo <MY_APP_SOURCE_DIR> --yes
-7. When it finishes, open out/final.mp4 and show me the result.
-
-No API key handy? Skip the .env and use the no-LLM path instead:
-   python3 -m http.server 4173 --directory examples/demo-app &
-   node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
-   node dist/cli/index.js render --take out/take --out out/final.mp4
+/plugin marketplace add Co-Messi/supercut
+/plugin install supercut@supercut
 ```
 
-Same block works in any agent — they all take a pasted task. `--repo` is optional but
-makes the director read your routes so it films real panels, not just the landing page.
+Then ask: "make a launch video of my app running on localhost:3000". The skill lives in [`.claude/skills/supercut/SKILL.md`](.claude/skills/supercut/SKILL.md) and works in any agent that can read a skill file or a pasted task: it documents the recipe schema with a minimal valid example, the staging-only safety rules, and the exact commands.
 
-Help the director understand a deeper, multi-page app by pointing it at the source:
+Using a different agent? Paste this as the task:
 
-```bash
-node dist/cli/index.js generate --url http://127.0.0.1:3000 --repo ./
+```text
+Make a launch video of my app using supercut (https://github.com/Co-Messi/supercut).
+Follow .claude/skills/supercut/SKILL.md from that repo: read my app, write recipe.json,
+show me the action list and wait for my yes, then run supercut record and supercut render,
+and look at a contact sheet of the result before reporting. My app runs at <MY_APP_URL>
+and its source is in <MY_APP_SOURCE_DIR>. Film staging or local data only.
 ```
 
-### Private/local apps & untrusted targets
+## How it works
 
-Filming your own local dev app is the primary use case, so `generate` **allows**
-localhost / RFC1918 / link-local by default — no flag needed. If you point it at an
-**untrusted or public** URL, add `--block-private-network` to engage the SSRF guard
-(rejects localhost, RFC1918, link-local, and cloud-metadata addresses, and validates
-each redirect hop):
-
-```bash
-node dist/cli/index.js generate --url https://untrusted.example --block-private-network
+```text
+ your app URL ──▶ 1 analyze   read the source + crawl the app, pick the money moments (LLM)
+                  2 script    write the filming recipe (LLM, schema-validated, no invented selectors)
+                  3 record    a deterministic browser performs it, captured frame by frame
+                  4 qc        deterministic + optional vision checks, bounded re-takes
+                  5 render    cinematic compositing ──▶ final.mp4 (up to 60s)
 ```
 
-(`--allow-private-network` is a deprecated no-op kept for back-compat.) With the guard on,
-every in-flight browser request is checked against the policy before it leaves the
-browser. That covers navigations from clicked links and submits, `fetch`/XHR, images,
-scripts, and WebSocket connections, and it covers **every redirect hop** of each request.
-To see redirect hops at all, supercut makes the guarded requests itself (from Node),
-checks each `Location` before following it, and hands the browser the final response.
-A click that ends on a blocked or private page fails the scene instead of filming an
-error page. Service workers are blocked while the guard is on.
+Each stage hands off a plain JSON artifact, so you can stop at any point, hand-edit, and resume. Stages 3 and 5 need no LLM.
 
-The guard has costs and limits:
-- A redirected page is reached through a one-line stub page that replaces itself with
-  the redirect target, so the page ends up at the right URL and the target is still
-  fetched only once. A `307`/`308` chain that ends in a `POST` cannot be replayed that
-  way and renders at the URL that was requested.
-- Responses are buffered, not streamed. A response that never completes (a
-  long-poll or server-sent-events endpoint) fails after 30 seconds.
-- WebSocket gating relies on Playwright's `routeWebSocket`. On a Playwright older than
-  1.48, supercut prints a warning and WebSocket connections are **not** policy-checked.
-- Blocked ranges include CGNAT (`100.64.0.0/10`), `198.18.0.0/15`, multicast, and IPv6
-  link-local, unique-local, NAT64 and 6to4 forms of private addresses. A proxy or VPN in
-  "fake-IP" DNS mode (e.g. Clash) answers every lookup from `198.18.0.0/15`, so the guard
-  blocks every hostname there. The real destination is hidden inside the tunnel. Turn
-  fake-IP off, or film from a machine without it.
-- The guard is **best-effort against active DNS rebinding.** It checks each hostname
-  with a DNS lookup, and the connection makes its own lookup a moment later. A hostname
-  built to answer "public" to the first and "private" to the second can slip between
-  them. Enforcing at the connection would need a filtering proxy, which supercut does
-  not ship. For a genuinely hostile target, run supercut on a machine or network
-  namespace that cannot reach anything private.
+- **Real footage only.** It drives your actual app in a real browser. Nothing is faked or re-created.
+- **It understands the product.** It reads your routes and source and crawls the DOM, so it films the moments that sell the product (type a query, frame the result) instead of parking on the landing page.
+- **It frames the payoff.** The camera holds on the result an action produces, not the button you clicked.
+- **An open contract.** The recorder writes a documented event log, and any recorder can feed the renderer.
 
-> ⚠️ **supercut drives and may MUTATE the target app** — it performs real clicks and
-> typing on whatever you point it at. Destructive controls (Delete, Remove, Pay, …)
-> are excluded from filming by default, but that filter is **best-effort and
-> English-only**: it matches visible labels and cannot catch icon-only buttons or
-> other wording. Film against a disposable/staging environment, never production
-> data or URLs/recipes you do not trust. Pass `--allow-destructive` to opt back in.
->
-> `generate` prints the recipe's full action list — every selector and every typed
-> string — before filming starts. At a terminal it then asks before the first click;
-> `--yes` skips the question. With no terminal to ask on (CI, a coding agent, piped
-> stdin), `generate` refuses to start unless you pass `--yes` (or `--dry-run`).
-> `--dry-run` stops right there instead: review `recipe.json`, then film it with
-> `supercut record`.
+## How it compares
 
-## 🔌 LLM provider setup
+| | Films your real running app | Needs a human to record or edit | Needs an LLM API key | Open source |
+| --- | --- | --- | --- | --- |
+| supercut | Yes | No | `generate`: yes. Agent skill path: no | Yes (MIT) |
+| Screen Studio | Yes (screen recording) | Yes | No | No |
+| openscreen | Yes (screen recording) | Yes | No | Yes (MIT) |
+| agentic-product-demo | No (rebuilds the UI as code in Remotion) | No (your coding agent writes it) | No separate key (runs inside your coding agent) | Yes |
+
+Based on each project's public description at the time of writing. Check them before you decide, they change.
+
+## Project principles
+
+- Real product footage beats mockups.
+- The event log is a public contract.
+- The keyless `record` and `render` paths stay useful without an API key.
+- Defaults fail loudly on unsafe or ambiguous config.
+
+## Safety
+
+supercut drives and may mutate the app you point it at. Film staging or local data, never production. Destructive controls (Delete, Pay, and similar) are excluded by default on a best effort basis, `generate` prints every action before filming and asks first, and `--block-private-network` engages an SSRF guard for untrusted targets. Full details are in [SECURITY.md](SECURITY.md).
+
+## LLM provider setup
 
 Copy `.env.example` to `.env` (or pass `--env-file <file>`):
 
@@ -199,7 +130,7 @@ DEEPSEEK_API_KEY=...
 SUPERCUT_MODEL=deepseek-v4-pro
 ```
 
-OpenRouter / custom OpenAI-compatible providers can use vision-capable models:
+OpenRouter and custom OpenAI-compatible providers can use vision-capable models:
 
 ```env
 SUPERCUT_PROVIDER=openrouter
@@ -208,30 +139,19 @@ SUPERCUT_MODEL=anthropic/claude-sonnet-4.6
 SUPERCUT_VISION=true
 ```
 
-For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`.
-A provider-scoped key never leaves its provider: with `deepseek` or `openrouter` (set or
-auto-detected), a `SUPERCUT_LLM_BASE_URL` on any other host is refused, and every base URL
-must be `https:` (plain `http:` only for a loopback model server).
-If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly — ambiguous
-config fails loudly rather than guessing.
+For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`. A provider-scoped key never leaves its provider. If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly: ambiguous config fails loudly rather than guessing.
 
-Every `generate` run has a hard LLM spend ceiling: 300k tokens by default, tunable with
-`--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0`/`off` disables). The run aborts with a
-per-stage spend breakdown if a misbehaving model would blow past it.
+Every `generate` run has a hard LLM spend ceiling: 300000 tokens by default, tunable with `--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0` or `off` disables). Retries, escalations and timed-out attempts all count against it, and the run aborts with a per-stage breakdown if it would pass the ceiling.
 
-## 🖼 Backgrounds
+## Backgrounds
 
-Every render stages the app window on a background. The default is the bundled
-`cobalt` wallpaper — deep blue-violet waves with strong contrast behind a light
-app window. Pick another with `--bg` (on `render` and `generate`):
+Every render stages the app window on a background. The default is the bundled `cobalt` wallpaper. Pick another with `--bg` (on `render` and `generate`):
 
 ```sh
 supercut render --take out/take --bg sunrise            # bundled wallpaper
 supercut render --take out/take --bg midnight           # procedural palette
 supercut render --take out/take --bg path/to/wall.png   # your own image
 ```
-
-Bundled wallpapers (in `assets/backgrounds/`):
 
 | wallpaper            | look                        |
 | -------------------- | --------------------------- |
@@ -243,15 +163,11 @@ Bundled wallpapers (in `assets/backgrounds/`):
 | `coral`              | pastel coral bloom          |
 | `lavender`           | soft blue-lavender          |
 
-Procedural palettes (generated at render time, no asset): `aurora`, `midnight`,
-`dusk`, `paper`.
+Procedural palettes (generated at render time, no asset): `aurora`, `midnight`, `dusk`, `paper`.
 
-## 🎵 Music
+## Music
 
-`render` is silent by default; on `generate` the AI director picks the bundled track
-matching your app's look. `--music` (on `render` and `generate`) muxes a looped,
-loudness-normalized track with fade-in/out under the video — never re-encoding the
-video and never changing its length:
+`render` is silent by default. On `generate` the AI director picks the bundled track that matches your app's look. `--music` (on `render` and `generate`) muxes a looped, loudness-normalized track with fade in and out under the video, without re-encoding the video or changing its length:
 
 ```sh
 supercut render   --take out/take --music midnight
@@ -259,8 +175,7 @@ supercut generate --url http://localhost:3000 --music pulse
 supercut render   --take out/take --music path/to/your-track.mp3   # your own file
 ```
 
-Bundled tracks (in `assets/music/` — original instrumentals made for supercut;
-provenance in `assets/music/CREDITS.md`):
+Bundled tracks (original instrumentals made for supercut, provenance in `assets/music/CREDITS.md`):
 
 | track      | vibe                    |
 | ---------- | ----------------------- |
@@ -269,20 +184,13 @@ provenance in `assets/music/CREDITS.md`):
 | `midnight` | dark synthwave/techno   |
 | `momentum` | driving minimal techno  |
 
-`--music off` forces a silent cut; on `render`, omitting the flag does too. `--music`
-always outranks the director's pick on `generate`.
+`--music off` forces a silent cut. `--music` always outranks the director's pick on `generate`.
 
-## 🔒 Privacy
+## Privacy
 
-`generate` sends crawled page text, element labels/selectors, and optional repo notes
-(`--repo`) to your configured LLM provider. **In vision mode it also uploads full,
-unredacted screenshots of your app.** Text gets best-effort secret redaction (keys,
-tokens, emails, private keys) — but redaction cannot cover images, so don't film apps
-showing real customer data or secrets with vision on. It also writes frames, recipes,
-and director reports to `out/`; review those before sharing. `record` + `render` are a
-fully no-LLM workflow.
+`generate` sends crawled page text, element labels and selectors, and optional repo notes (`--repo`) to your configured LLM provider. In vision mode it also uploads full, unredacted screenshots of your app, so do not film apps showing real customer data or secrets with vision on. It writes frames, recipes and director reports to `out/`; review those before sharing. `record` and `render` never call an LLM. See [SECURITY.md](SECURITY.md).
 
-## 📜 Event-log contract
+## Event-log contract
 
 The public boundary is plain JSON, so any recorder can feed the renderer:
 
@@ -290,44 +198,28 @@ The public boundary is plain JSON, so any recorder can feed the renderer:
 recipe.json ──▶ record ──▶ take directory
                          ├─ events.json        (the event-log contract)
                          ├─ frames-index.json
-                         └─ frames/*.png
+                         └─ frames/*
 
 take directory ──▶ render ──▶ final.mp4
 ```
 
-Schemas reject unsupported URL schemes, malformed events, non-monotonic timelines,
-oversized logs, and impossible camera boxes.
+Schemas reject unsupported URL schemes, malformed events, non-monotonic timelines, oversized logs, and impossible camera boxes.
 
-Event timestamps share the frame `t_source` clock, declared by `t_source_unified: true`
-in `events.json` (the built-in recorder always writes it). Identical runs produce
-structurally/geometrically identical events.json with timestamps agreeing within ~150ms
-(not byte-identical). Two render-time gates protect the output:
+Event timestamps share the frame `t_source` clock, declared by `t_source_unified: true` in `events.json` (the built-in recorder always writes it). Identical runs produce structurally and geometrically identical `events.json` with timestamps agreeing within about 150ms (not byte-identical). Two render-time gates protect the output:
 
-- **Skew**: on a unified-clock take, events leading the footage by >250ms fail the render
-  (`SUPERCUT_ALLOW_SKEW=1` forces). Logs without the marker are treated as legacy
-  recorders whose clocks were never unified, and only warn.
-- **Capture health**: a take whose frame count falls far below its duration × fps is
-  refused — that footage renders as stills with a camera gliding over them. Average
-  source fps is printed on every `record`/`generate`/`render` run. To render a genuinely
-  sparse take (e.g. from an old change-driven recorder) set `SUPERCUT_ALLOW_SPARSE=1`.
-
-## Project principles
-
-- Real product footage beats mockups.
-- The event log is a public contract.
-- The non-AI `record` / `render` paths stay useful without an API key.
-- Defaults fail loudly on unsafe or ambiguous config.
+- **Skew**: on a unified-clock take, events leading the footage by more than 250ms fail the render (`SUPERCUT_ALLOW_SKEW=1` forces it). Logs without the marker are treated as legacy recorders and only warn.
+- **Capture health**: a take whose frame count falls far below its duration times fps is refused, because that footage renders as stills with a camera gliding over them. Average source fps is printed on every `record`, `generate` and `render` run. To render a genuinely sparse take, set `SUPERCUT_ALLOW_SPARSE=1`.
 
 ## Contributing
 
 ```bash
 npm run typecheck
 npm run test:fast
-npm run test:e2e          # needs Chromium + ffmpeg
+npm run test:e2e          # needs Chromium and ffmpeg
 npm audit --audit-level=moderate
 ```
 
-Keep PRs focused and add tests for behavior changes.
+Keep PRs focused and add tests for behavior changes. Agents working on this repo should read [AGENTS.md](AGENTS.md). Want a video of your app? Open a ["Film my app" issue](https://github.com/Co-Messi/supercut/issues/new?template=demo_request.md).
 
 ## License
 

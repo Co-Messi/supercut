@@ -214,9 +214,10 @@ describe("record E2E on fixture app", () => {
     // matching crawlApp(), which has always defaulted closed
     const out = mkdtempSync(join(tmpdir(), "supercut-default-"));
     dirs.push(out);
-    await expect(
-      record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false }),
-    ).rejects.toThrow(/private network/i);
+    const refusal = record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
+    await expect(refusal).rejects.toThrow(/private network/i);
+    // the refusal names the option a library caller sets to film a local app
+    await expect(refusal).rejects.toThrow(/allowPrivateNetwork: true/);
   }, 30_000);
 
   it("produces valid events.json + frames, twice, with identical scheduled timelines", async () => {

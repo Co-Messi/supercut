@@ -308,8 +308,20 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const captureFrames = opts.captureFrames ?? true;
   const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   const rng = makeRng(opts.seed ?? 1);
+  /** a caller who left the option unset gets the guard by default; its
+   *  refusal names the option that films a local app */
+  const explainDefault = (err: unknown): never => {
+    if (opts.allowPrivateNetwork === undefined && err instanceof Error && /private.network/i.test(err.message)) {
+      throw new Error(
+        `${err.message}. record() refuses private hosts unless allowPrivateNetwork: true is passed ` +
+          "(the CLI passes it unless --block-private-network is set)",
+        { cause: err },
+      );
+    }
+    throw err;
+  };
 
-  await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork);
+  await assertRecipeNavigationPolicy(recipe, allowPrivateNetwork).catch(explainDefault);
 
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
@@ -336,7 +348,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       const host = new URL(u).hostname;
       if (seenHosts.has(host)) continue;
       seenHosts.add(host);
-      const pinned = await resolveAndPinHost(u, { allowPrivateNetwork });
+      const pinned = await resolveAndPinHost(u, { allowPrivateNetwork }).catch(explainDefault);
       if (pinned) rules.push(pinned.hostResolverRule);
     }
     if (rules.length > 0) launchArgs.push(`--host-resolver-rules=${rules.join(",")}`);

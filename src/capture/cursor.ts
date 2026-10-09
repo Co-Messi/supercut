@@ -90,11 +90,19 @@ export function cursorPath(opts: PathOptions): CursorPoint[] {
   return points;
 }
 
+const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+
+/** user-perceived characters: an accented letter written with a combining
+ *  mark, a ZWJ emoji or a flag is one unit, typed as one */
+export function graphemes(text: string): string[] {
+  return Array.from(graphemeSegmenter.segment(text), (s) => s.segment);
+}
+
 export interface TypingPlan {
   /** pause after the focusing click, before the first key */
   beforeFirstKey: number;
   /** the gaps BETWEEN consecutive keys: keyDelays[i] is waited after
-   *  character i, before character i + 1 (length = characters − 1) */
+   *  grapheme i, before grapheme i + 1 (length = graphemes − 1) */
   keyDelays: number[];
   /** pause after the last key before pressing Enter (submit) */
   beforeEnter: number;
@@ -117,7 +125,7 @@ const KEY_SIGMA = 0.35;
  * ~300ms before Enter. Uniform per-char delays read as a metronome.
  */
 export function typingPlan(text: string, availableMs: number, rng: () => number): TypingPlan {
-  const chars = [...text];
+  const chars = graphemes(text);
   const beforeFirstKey = Math.round(250 + rng() * 150);
   const beforeEnter = Math.round(250 + rng() * 100);
   const breaks = chars.filter((c, i) => i > 0 && WORD_BREAK.test(chars[i - 1]!)).length;

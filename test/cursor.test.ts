@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { cursorPath, fittsMs, makeRng } from "../src/capture/cursor.js";
+import { cursorPath, fittsMs, graphemes, makeRng, typingPlan } from "../src/capture/cursor.js";
+
+describe("typing units are graphemes", () => {
+  it("splits text into user-perceived characters, not code points", () => {
+    // e + combining acute, a ZWJ emoji, a flag, plain ASCII
+    expect(graphemes("é👩‍💻🇸🇬ok")).toEqual(["é", "👩‍💻", "🇸🇬", "o", "k"]);
+    expect(graphemes("")).toEqual([]);
+  });
+
+  it("plans one gap between consecutive graphemes", () => {
+    const p = typingPlan("née 👩‍💻 ok", 5000, makeRng(3));
+    expect(p.keyDelays).toHaveLength(graphemes("née 👩‍💻 ok").length - 1);
+    expect(p.keyDelays.every((d) => Number.isFinite(d) && d >= 45)).toBe(true);
+  });
+});
 
 describe("seeded cursor paths", () => {
   const base = {

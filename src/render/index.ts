@@ -48,6 +48,9 @@ export interface RenderOptions {
   /** starts the render browser; defaults to full Chromium. A seam for tests
    *  and embedders (a custom executable, a remote browser). */
   launchBrowser?: () => Promise<Browser>;
+  /** render a take whose events.json lists failed scenes (partial footage).
+   *  Off by default; SUPERCUT_ALLOW_PARTIAL=1 opts in from the CLI. */
+  allowPartial?: boolean;
 }
 
 export interface RenderResult {
@@ -324,6 +327,20 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
   const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+
+  // Partial-take gate: the recorder lists the scenes it failed to perform.
+  // Rendering such a take silently ships a video missing those beats.
+  if (log.failed_scenes && log.failed_scenes.length > 0) {
+    const names = log.failed_scenes.map((n) => JSON.stringify(n)).join(", ");
+    const what = `the take is partial: scene(s) ${names} failed during capture, so the video would skip them`;
+    if (opts.allowPartial || process.env.SUPERCUT_ALLOW_PARTIAL === "1") {
+      console.error(`[render] WARNING: ${what} (continuing: SUPERCUT_ALLOW_PARTIAL=1)`);
+    } else {
+      throw new Error(
+        `render: ${what}. Re-record the take, or set SUPERCUT_ALLOW_PARTIAL=1 to render the scenes that were filmed.`,
+      );
+    }
+  }
 
   // Capture-health gate: refuse a take whose footage can't carry its own
   // timeline. Printed regardless of outcome so the one diagnostic that reveals

@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { record, type RecordResult } from "../capture/index.js";
-import { assessCaptureHealth, renderTake, resolveMusicTrack } from "../render/index.js";
+import { assertBackground, assessCaptureHealth, renderTake, resolveMusicTrack } from "../render/index.js";
 import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { assessCrawl, crawlApp, type PageDigest } from "./inventory.js";
@@ -349,6 +349,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   log("preflight…");
   // a bad --music must die here, not after the LLM crawl and capture spend
   resolveMusicTrack(opts.music);
+  // and so must a bad --bg: it would otherwise fail at render, after it all
+  assertBackground(opts.background);
   // a bad session file must die here too, before the crawl and any LLM call
   const storageState = opts.storageState ? assertStorageStateFile(opts.storageState) : undefined;
   if (storageState) log("   session: --storage-state is applied to the crawl and the capture");

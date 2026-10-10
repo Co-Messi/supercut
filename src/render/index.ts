@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { MAX_BUDGET_MS, parseEventLog, type EventLog } from "../schema/index.js";
-import { FADE_IN_MS, FADE_OUT_MS, planTake, validateFrameIndex, type FrameIndexEntry } from "./plan.js";
+import { buildBackground, FADE_IN_MS, FADE_OUT_MS, planTake, validateFrameIndex, type FrameIndexEntry } from "./plan.js";
 import { applyTakeAdjustments, hasAdjustments, type TakeAdjustments } from "./adjust.js";
 import { chromiumInstallCommand } from "../capture/browser-install.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
@@ -153,6 +153,17 @@ export function resolveBackgroundSpec(
   const isImage = existsSync(spec) && statSync(spec).isFile();
   if (!isImage && background === undefined) return { spec: "aurora", isImage: false };
   return { spec, isImage };
+}
+
+/**
+ * Fail now on a --bg that will fail at render time: an explicit name that is
+ * neither an image file, a bundled wallpaper, nor a procedural palette. A
+ * typo must die before the crawl, LLM and capture spend, not after them.
+ */
+export function assertBackground(background: string | undefined): void {
+  if (background === undefined) return;
+  const { spec, isImage } = resolveBackgroundSpec(background);
+  if (!isImage) buildBackground(spec, 16, 9);
 }
 
 /** content type for a captured frame file. The recorder writes JPEG since

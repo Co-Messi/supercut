@@ -11,7 +11,7 @@
 import { parseRecipe, type Recipe } from "../schema/index.js";
 import { extractJson, UNTRUSTED_RULES, wrapUntrusted, type ChatPart, type LlmClient } from "./llm.js";
 import { MUSIC_TRACKS, coerceSelector, type AppAnalysis } from "./analyze.js";
-import type { PageDigest } from "./inventory.js";
+import { dropLeakySelectors, type PageDigest } from "./inventory.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 // the enum gate lives HERE, not in the recipe schema: hand-written recipes
@@ -98,7 +98,10 @@ export async function writeRecipe(
     selectors: new Set(m.elements),
   }));
 
+  // leaky selectors (a secret or an identifier inside) never egress, even
+  // from a hand-built digest; see dropLeakySelectors
   const inventoryText = digests
+    .map(dropLeakySelectors)
     .map((d) => {
       const els = d.inventory
         .map(

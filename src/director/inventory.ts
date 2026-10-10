@@ -21,6 +21,27 @@ export function pageUrlHasSecret(url: string): boolean {
   return redactForPrompt(url) !== url;
 }
 
+/**
+ * True when a selector would carry a secret or a personal identifier into a
+ * prompt. Selectors are validation keys the model must copy verbatim, so they
+ * cannot be redacted; a selector built from an email in link text, or an id
+ * holding a token, is left out instead. Checked as written and with CSS
+ * escapes removed, since `\@` hides an email from a plain pattern.
+ */
+export function selectorLeaks(selector: string): boolean {
+  const unescaped = selector.replace(/\\(.)/g, "$1");
+  return redactForPrompt(selector) !== selector || redactForPrompt(unescaped) !== unescaped;
+}
+
+/** the digest without any element or region whose selector leaks */
+export function dropLeakySelectors(d: PageDigest): PageDigest {
+  return {
+    ...d,
+    inventory: d.inventory.filter((i) => !selectorLeaks(i.selector)),
+    regions: (d.regions ?? []).filter((r) => !selectorLeaks(r.selector)),
+  };
+}
+
 export interface InventoryItem {
   /** Playwright-compatible selector, verified to resolve on the page */
   selector: string;
@@ -451,12 +472,14 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     if (shot) screenshotB64 = shot.toString("base64");
   }
 
-  return {
+  // a selector the model would have to copy with a secret or an identifier
+  // in it never enters the inventory (it cannot be redacted)
+  return dropLeakySelectors({
     url: page.url(), title, headings, theme, inventory, regions,
     ...(accentColor ? { accentColor } : {}),
     ...(excludedDestructive.length ? { excludedDestructive } : {}),
     ...(screenshotB64 ? { screenshotB64 } : {}),
-  };
+  });
 }
 
 /**

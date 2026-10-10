@@ -7,7 +7,7 @@
  */
 import { z } from "zod";
 import { extractJson, UNTRUSTED_RULES, wrapUntrusted, type ChatPart, type LlmClient } from "./llm.js";
-import type { PageDigest } from "./inventory.js";
+import { dropLeakySelectors, type PageDigest } from "./inventory.js";
 import { redactForPrompt } from "../security/redaction.js";
 
 /** the bundled soundtrack library (assets/music/) — the director picks one as
@@ -127,7 +127,10 @@ export function validateAnalysis(raw: unknown, digests: PageDigest[]): AppAnalys
   return parsed;
 }
 
-function digestText(d: PageDigest): string {
+function digestText(raw: PageDigest): string {
+  // the crawl already drops leaky selectors; a hand-built digest is held to
+  // the same rule here, at the egress point
+  const d = dropLeakySelectors(raw);
   const inv = d.inventory
     .map((i) => `  \`${i.selector}\`  [${i.tag}] "${redactForPrompt(i.text)}"${i.href ? ` → ${redactForPrompt(i.href)}` : ""}${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
     .join("\n");

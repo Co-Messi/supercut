@@ -81,6 +81,12 @@ export async function writeRecipe(
   for (const d of digests) {
     byPage.set(d.url, new Map(d.inventory.map((i) => [i.selector, i.hidden === true])));
   }
+  // fields whose form submits through a destructive control, per page: they
+  // may be typed into, but Enter would press that control
+  const noSubmit = new Map<string, Set<string>>();
+  for (const d of digests) {
+    noSubmit.set(d.url, new Set(d.inventory.filter((i) => i.submitsDestructive).map((i) => i.selector)));
+  }
   // framable result regions per page — valid ONLY as focus_selector (camera
   // target), never as an action selector (they aren't click targets)
   const byPageRegions = new Map<string, Set<string>>();
@@ -95,7 +101,11 @@ export async function writeRecipe(
   const inventoryText = digests
     .map((d) => {
       const els = d.inventory
-        .map((i) => `  \`${i.selector}\`  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}`)
+        .map(
+          (i) =>
+            `  \`${i.selector}\`  [${i.tag}] "${redactForPrompt(i.text)}"${i.hidden ? "  (HIDDEN until revealed)" : ""}` +
+            (i.submitsDestructive ? "  (Enter submits a destructive form: type only, never submit)" : ""),
+        )
         .join("\n");
       const regions = (d.regions ?? []).length
         ? `\n  FRAMABLE REGIONS (focus_selector only — hold the camera here to show a result):\n` +
@@ -190,6 +200,12 @@ export async function writeRecipe(
               `opens it) before targeting it`,
           );
         }
+      }
+      if (a.kind === "type" && a.submit && a.selector && noSubmit.get(scene.entry.url)?.has(a.selector)) {
+        throw new Error(
+          `type into "${a.selector}" in scene "${scene.name}" sets submit: true, but its form submits through a ` +
+            `destructive control; type without submit, or pick another field`,
+        );
       }
       if (a.selector) priorSelectors.add(a.selector);
       // focus_selector is a camera hint: it must be a real crawled selector

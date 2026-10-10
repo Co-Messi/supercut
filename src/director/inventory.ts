@@ -4,10 +4,11 @@
  * (enforced in script.ts), so a hallucinated selector is impossible by
  * construction: it fails the whitelist check and bounces back for retry.
  */
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type Locator, type Page } from "playwright";
 import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndPinHost } from "../security/url-policy.js";
 import { installRequestGate, settleGatedRedirect } from "../security/browser-gate.js";
 import { redactForPrompt } from "../security/redaction.js";
+import { isDestructiveLabel } from "../security/destructive.js";
 
 /**
  * True when a page URL carries a secret (token/key/JWT) in its path or query.
@@ -29,6 +30,11 @@ export interface InventoryItem {
   /** present in DOM but not visible yet (modal, reveal-on-click form) —
    *  usable ONLY after an earlier action in the same scene reveals it */
   hidden?: boolean;
+  /** a text field whose form submits through a destructive control (its
+   *  default submit button, or its action URL, matches the policy): it may
+   *  be typed into, but a `type` with `submit: true` is refused, because
+   *  Enter would press that control */
+  submitsDestructive?: boolean;
 }
 
 /** A large, stable container the camera can FRAME to show a result (a graph,
@@ -91,45 +97,14 @@ export const cssIdent = (s: string): string => {
 const MAX_SIBLINGS_PER_BASE = 6;
 
 /**
- * Fail-safe-by-default destructive-action lexicon. The director scripts clicks
- * and typing on the LIVE app, so a prompt-injected page (or just an unlucky
- * "payoff" beat) could fire a real, irreversible action. We exclude any element
- * whose visible text / aria-label / value matches this from the inventory
- * entirely — so the LLM never even SEES a destructive control and structurally
- * cannot reference one (the script stage may only use inventory selectors).
- * Opt back in with `allowDestructive`. Word-boundary anchored so legitimate
- * non-destructive actions (Sign in, Submit, Add, Save, Open, View, Create,
- * Next, Continue) do NOT match.
- *
- * HONESTY: this filter is BEST-EFFORT and English-only. It matches visible
- * text / aria-label / value strings — it cannot catch icon-only controls,
- * non-English labels, or custom wording. Never rely on it as the only guard:
- * film against a disposable/staging environment, not production data.
+ * Fail-safe destructive-control filter. The director scripts clicks and typing
+ * on the LIVE app, so a prompt-injected page (or an unlucky "payoff" beat)
+ * could fire a real, irreversible action. Any element whose visible text,
+ * aria-label or value matches the shared policy (src/security/destructive.ts)
+ * is left out of the inventory entirely, so the script stage can never
+ * reference it. `allowDestructive` opts back in.
  */
-// Lexicon criterion: match a verb when firing it by accident on a live app is
-// costly AND hard to undo (loses data/state/access, moves money) — false-drop is
-// loud (logged with an opt-in flag), false-fire is a real, often irreversible
-// mutation. We do NOT match the hero-action words that carry most demos (send,
-// save, submit, search): dropping a chat app's "Send" would gut the video.
-// "publish" is deliberately OUT: it is the payoff beat for CMS/blog/deploy apps
-// and is reversible (unpublish exists), so a `<button>Publish</button>` must stay
-// filmable by default.
-export const DESTRUCTIVE_RE =
-  /\b(delete|remove|reset|deactivate|disable|archive|erase|wipe|destroy|unsubscribe|close\s+account|cancel\s+(subscription|account|plan)|pay|purchase|buy\s+now|checkout|place\s+order|withdraw|confirm\s+(payment|order)|revoke|transfer\s+(funds|money|ownership|account|domain)|regenerate|suspend|terminate|downgrade)\b/i;
-
-/**
- * PLAIN lexicon match: a label is destructive if it CONTAINS any DESTRUCTIVE_RE
- * verb — no border exemption. `_` is a regex word char, so `\b` never fires at
- * an underscore seam ("reset_config"); we normalize `_`→space first so
- * slug-joined verbs still match. This is deliberately over-inclusive: whether a
- * slug-shaped CONTENT name ("checkout-api") is kept or excluded is decided at
- * the filter site (a passive content row survives; an action control never
- * does), NOT here — a lexicon test alone can't tell a Delete button from a
- * service row.
- */
-export function isDestructiveLabel(s: string): boolean {
-  return DESTRUCTIVE_RE.test(s.replace(/_/g, " "));
-}
+export { DESTRUCTIVE_RE, isDestructiveLabel } from "../security/destructive.js";
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -271,6 +246,41 @@ async function probeTheme(page: Page): Promise<{ theme: "dark" | "light"; accent
   }
 }
 
+/**
+ * Labels that describe what submitting this field's form does: its default
+ * submit button (the first submitter in `form.elements`, which includes
+ * buttons outside the form joined by `form=`; Enter activates it), and the
+ * form's action path read as words. Empty when the field has no form.
+ */
+async function formSubmitLabels(el: Locator): Promise<string[]> {
+  return el
+    .evaluate((node) => {
+      const form = (node as HTMLInputElement).form;
+      if (!form) return [];
+      const out: string[] = [];
+      for (const c of Array.from(form.elements)) {
+        const submitter =
+          (c instanceof HTMLButtonElement && c.type === "submit") ||
+          (c instanceof HTMLInputElement && (c.type === "submit" || c.type === "image"));
+        if (!submitter) continue;
+        const h = c as HTMLElement;
+        for (const attr of ["aria-label", "value", "title", "alt"]) out.push(h.getAttribute(attr) ?? "");
+        out.push(h.innerText || h.textContent || "");
+        break;
+      }
+      const action = form.getAttribute("action");
+      if (action) {
+        try {
+          out.push(new URL(action, location.href).pathname.replace(/[/_.-]+/g, " "));
+        } catch {
+          /* an unparseable action has nothing to read */
+        }
+      }
+      return out.filter((s) => s.trim() !== "");
+    })
+    .catch(() => [] as string[]);
+}
+
 async function digestPage(page: Page, withScreenshot: boolean, allowDestructive = false): Promise<PageDigest> {
   const title = await page.title();
   const { theme, accentColor } = await probeTheme(page);
@@ -376,6 +386,12 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     if (seen.has(selector)) continue;
     seen.add(selector);
     if (matches > 1) siblingCount.set(base, (siblingCount.get(base) ?? 0) + 1);
+    // Enter in a field presses its form's default button: a field whose form
+    // submits through a destructive control may be typed into, never submitted
+    const submitsDestructive =
+      !allowDestructive &&
+      (tag === "input" || tag === "textarea" || tag === "select") &&
+      (await formSubmitLabels(el)).some((s) => isDestructiveLabel(s));
     inventory.push({
       selector, tag, text,
       bbox: box
@@ -383,6 +399,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
         : { x: 0, y: 0, w: 0, h: 0 },
       ...(href ? { href } : {}),
       ...(hidden ? { hidden: true } : {}),
+      ...(submitsDestructive ? { submitsDestructive: true } : {}),
     });
   }
 

@@ -255,6 +255,19 @@ input{font-size:20px;padding:10px;width:420px;margin:40px}</style></head><body>
   });
 </script></body></html>`;
 
+/** forms whose Enter submits through a destructive control (a destructive
+ *  default button, an outside `form=` button, a destructive action URL), next
+ *  to a harmless search form: the crawl must flag only the former */
+const FORMS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Forms</title>
+<style>body{font:16px sans-serif;padding:40px} input{font-size:18px;padding:10px;width:320px;margin:8px}
+button{font-size:16px;padding:10px 18px;margin:8px}</style></head><body>
+  <form><input id="ws-name" placeholder="Workspace name"><button type="submit">Delete workspace</button></form>
+  <form><input id="q" placeholder="Find a metric"><button type="submit">Search</button></form>
+  <form action="/workspace/delete"><input id="reason" placeholder="Tell us why"></form>
+  <form id="ext"><input id="amount" placeholder="Amount"></form>
+  <div><button form="ext" type="submit" id="outside">Transfer</button></div>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -296,6 +309,7 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/overlay") ? OVERLAY
       : req.url?.startsWith("/probe") ? PROBE
       : req.url?.startsWith("/keys") ? KEYS
+      : req.url?.startsWith("/forms") ? FORMS
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);

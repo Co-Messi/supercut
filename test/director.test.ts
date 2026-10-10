@@ -111,6 +111,25 @@ describe("script stage — the anti-hallucination gates", () => {
     expect(retryText).toContain("not on its entry page");
   });
 
+  it("refuses submit: true on a field whose form submits through a destructive control", async () => {
+    const guarded: PageDigest[] = digests.map((d) => ({
+      ...d,
+      inventory: d.inventory.map((i) => (i.selector === "#email" ? { ...i, submitsDestructive: true } : i)),
+    }));
+    const submitting = JSON.parse(validRecipeJson("#cta")) as { scenes: { actions: { submit?: boolean }[] }[] };
+    submitting.scenes[1]!.actions[0]!.submit = true;
+    // the plain type (no Enter) is the correction the gate accepts
+    const llm = new StubLlm([JSON.stringify(submitting), validRecipeJson("#cta")]);
+    const { recipe, attempts } = await writeRecipe(llm, analysis, guarded, "http://127.0.0.1:9999");
+    expect(attempts).toBe(2);
+    expect(recipe.scenes[1]!.actions[0]!.submit).toBeUndefined();
+    const retryText = llm.prompts[1]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(retryText).toContain("destructive control");
+    // the inventory line warns the model up front, too
+    const firstText = llm.prompts[0]!.user.map((p) => (p.type === "text" ? p.text : "")).join(" ");
+    expect(firstText).toMatch(/#email.*never submit/);
+  });
+
   it("rejects entry URLs that were never crawled", async () => {
     const evil = JSON.parse(validRecipeJson("#cta")) as { scenes: { entry: { url: string } }[] };
     evil.scenes[0]!.entry.url = "http://evil.example.com/";
@@ -354,21 +373,19 @@ describe("destructive-action guard (H1)", () => {
       "Next",
       "Continue",
       "Get started free",
-      // hero-action money moments that must stay filmable:
+      // hero-action moments that must stay filmable:
       "Send",
       "Send message",
+      "Send feedback",
       "Search flights",
-      // "publish" is reversible (unpublish exists) and is the payoff beat for
-      // CMS/blog/deploy apps — filmable by default, not in the lexicon
-      "Publish",
-      "Publish to production",
-      "Publish post",
-      // "transfer" is narrowed to money/ownership phrases — benign transfers stay filmable:
-      "Transfer to list",
-      "Transfer ticket",
-      "Transfer call",
     ]) {
       expect(DESTRUCTIVE_RE.test(label), `expected "${label}" NOT to match`).toBe(false);
+    }
+  });
+
+  it("treats shipping and every transfer as destructive: publish, deploy, merge, transfer", () => {
+    for (const label of ["Publish", "Publish to production", "Publish post", "Deploy", "Merge pull request", "Transfer to list", "Transfer ticket", "Transfer call"]) {
+      expect(DESTRUCTIVE_RE.test(label), `expected "${label}" to match`).toBe(true);
     }
   });
 

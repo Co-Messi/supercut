@@ -112,6 +112,22 @@ describe("inventory crawler on the fixture app", () => {
     expect(fleet.excludedDestructive).toContain("delete-log-2024");
   }, 60_000);
 
+  it("flags fields whose form submits through a destructive control, and only those", async () => {
+    const digests = await crawlApp(`${app.url}/forms`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const bySel = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));
+    // a destructive default button, a destructive action URL, an outside form= button
+    for (const sel of ["#ws-name", "#reason", "#amount"]) {
+      expect(bySel.get(sel), `${sel} must be inventoried`).toBeDefined();
+      expect(bySel.get(sel)!.submitsDestructive, `${sel} submits destructively`).toBe(true);
+    }
+    expect(bySel.get("#q")!.submitsDestructive).toBeUndefined();
+    // with the opt-in, nothing is flagged
+    const open = await crawlApp(`${app.url}/forms`, {
+      maxPages: 1, screenshots: false, allowPrivateNetwork: true, allowDestructive: true,
+    });
+    expect(open[0]!.inventory.some((i) => i.submitsDestructive)).toBe(false);
+  }, 60_000);
+
   it("refuses to film a page whose URL is itself a credential (token in the query)", async () => {
     // a URL is a validation key that can't be redacted, so a page whose URL
     // carries a secret is dropped rather than leaked — here it's the start page,

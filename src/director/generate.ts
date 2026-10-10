@@ -387,6 +387,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     if (excluded.length) {
       log(`   note: excluded ${excluded.length} destructive control(s) from filming — ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
     }
+    const noSubmit = digests.reduce((n, d) => n + d.inventory.filter((i) => i.submitsDestructive).length, 0);
+    if (noSubmit > 0) {
+      log(`   note: ${noSubmit} field(s) may be typed into but never submitted: their form submits through a destructive control.`);
+    }
 
     // analyze notes = source routes/summary + README/package.json. Both come
     // from the app's source (string literals, README, package.json) — exactly

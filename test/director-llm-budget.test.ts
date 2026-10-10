@@ -15,11 +15,12 @@ import {
  */
 
 type Reply =
-  | { kind: "ok"; content: string; usage?: number }
+  | { kind: "ok"; content: string; usage?: number; promptUsage?: number }
   | { kind: "empty"; finish?: string; usage?: number }
   | { kind: "status"; status: number; body?: string }
   | { kind: "timeout" }
-  | { kind: "refused" };
+  | { kind: "refused" }
+  | { kind: "reset" };
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -33,13 +34,16 @@ function install(replies: Reply[]) {
     const r = replies[Math.min(sentMax.length - 1, replies.length - 1)]!;
     if (r.kind === "timeout") throw new DOMException("The operation timed out.", "TimeoutError");
     if (r.kind === "refused") throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    if (r.kind === "reset") throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
     if (r.kind === "status") return new Response(r.body ?? "", { status: r.status });
     const message = r.kind === "ok" ? { content: r.content } : { content: "", reasoning_content: "thinking" };
     const finish = r.kind === "ok" ? "stop" : (r.finish ?? "length");
     return new Response(
       JSON.stringify({
         choices: [{ message, finish_reason: finish }],
-        ...(r.usage !== undefined ? { usage: { total_tokens: r.usage } } : {}),
+        ...(r.usage !== undefined
+          ? { usage: { total_tokens: r.usage, ...(r.kind === "ok" && r.promptUsage !== undefined ? { prompt_tokens: r.promptUsage } : {}) } }
+          : {}),
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
@@ -109,6 +113,57 @@ describe("run-level budget metering", () => {
     await expect(call(llm)).resolves.toBe("x");
     expect(sentMax).toEqual([8000, 16000, 8000]);
     expect(llm.meteredTokens).toBe(8020 + (promptTokens + 16000) + 100);
+  });
+});
+
+describe("metering failures after the request may have been sent", () => {
+  it("charges the worst case for a connection reset mid-request (the provider may have billed it)", async () => {
+    install([{ kind: "reset" }]);
+    const llm = new BudgetedLlmClient(inner(), 100_000);
+    await expect(call(llm)).rejects.toThrow(/network/);
+    expect(llm.meteredTokens).toBe(4 * (promptTokens + 8000));
+  });
+
+  it("charges the worst case for a 5xx, and nothing for a 429 or another 4xx (rejected unprocessed)", async () => {
+    install([{ kind: "status", status: 503 }]);
+    const a = new BudgetedLlmClient(inner(), 100_000);
+    await expect(call(a)).rejects.toThrow(/unavailable/);
+    expect(a.meteredTokens).toBe(4 * (promptTokens + 8000));
+
+    install([{ kind: "status", status: 429 }]);
+    const b = new BudgetedLlmClient(inner(), 100_000);
+    await expect(call(b)).rejects.toThrow(/unavailable/);
+    expect(b.meteredTokens).toBe(0);
+
+    install([{ kind: "status", status: 404 }]);
+    const c = new BudgetedLlmClient(inner(), 100_000);
+    await expect(call(c)).rejects.toThrow(/rejected/);
+    expect(c.meteredTokens).toBe(0);
+  });
+});
+
+describe("prompt estimates", () => {
+  const text = (t: string) => estimateTokens({ system: "", user: [{ type: "text", text: t }] } as ChatOptions);
+
+  it("counts about one token per CJK character, not one per four", () => {
+    const cjk = "数据".repeat(500); // 1000 Han characters
+    expect(text(cjk)).toBeGreaterThanOrEqual(1000);
+    expect(text("a".repeat(1000))).toBe(250);
+  });
+
+  it("learns a provider's real per-image cost and refuses a call it can no longer afford", async () => {
+    // a gpt-4o-mini style provider bills ~36k prompt tokens for one image
+    install([{ kind: "ok", content: "x", usage: 36_100, promptUsage: 36_050 }, { kind: "ok", content: "y", usage: 10 }]);
+    const vis = new OpenAICompatibleClient({
+      apiKey: "k", model: "m", baseUrl: "https://llm.example.com/v1", providerLabel: "custom", vision: true, retryBaseMs: 0,
+    });
+    const llm = new BudgetedLlmClient(vis, 300_000);
+    const img = { type: "image" as const, dataUrl: "data:image/jpeg;base64,AAAA" };
+    await llm.chat({ system: "s", user: [{ type: "text", text: "one" }, img], maxTokens: 100 });
+    // twelve more images at the learned ~36k each cannot fit what is left
+    await expect(
+      llm.chat({ system: "s", user: [{ type: "text", text: "twelve" }, ...Array(12).fill(img)], maxTokens: 100 }),
+    ).rejects.toBeInstanceOf(TokenBudgetExceededError);
   });
 });
 

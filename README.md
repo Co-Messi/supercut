@@ -155,7 +155,7 @@ SUPERCUT_VISION=true
 
 For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`. A provider-scoped key never leaves its provider. If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly: ambiguous config fails loudly rather than guessing.
 
-Every `generate` run has a hard LLM spend ceiling: 300000 tokens by default, tunable with `--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0` or `off` disables). Retries, escalations and timed-out attempts all count against it, and the run aborts with a per-stage breakdown if it would pass the ceiling.
+Every `generate` run has an LLM token ceiling: 300000 tokens by default, tunable with `--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0` or `off` disables). It is checked before every attempt, retries and escalations included: an attempt is sent only when its estimated prompt plus its `max_tokens` fits what is left, and the run stops with a per-stage breakdown when the next one would not. Each attempt is metered at the provider's reported usage, or at that worst case when the provider reports none; a timeout, a connection that broke after sending, and a 5xx are always charged the worst case. The prompt side is an estimate (images start at 2000 tokens each and rise to what the provider actually bills once a call reports it), so one call can run past its estimate; the run then stops at the next call. The ceiling counts tokens, not money.
 
 ## Backgrounds
 

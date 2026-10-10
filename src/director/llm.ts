@@ -27,12 +27,28 @@ export interface ChatOptions {
    *  max_tokens otherwise, including attempts that timed out). BudgetedLlmClient
    *  reads it after the call, success or failure. */
   spendMeter?: SpendMeter;
+  /** tokens one image is estimated to cost in this call's prompt; set by
+   *  BudgetedLlmClient from what the provider has actually billed */
+  imageTokenEstimate?: number;
 }
 
 /** per-call spend accumulator shared between BudgetedLlmClient and the inner client */
 export interface SpendMeter {
   spent: number;
+  /** prompt tokens the provider reported for the answering attempt, when it
+   *  reports them: lets the budget learn what an image really costs */
+  promptTokens?: number;
 }
+
+/** connection failures that happen before any request byte reaches the
+ *  provider (name resolution, a refused or unreachable host, a failed TLS
+ *  handshake): the only failures known to be unbilled */
+const NEVER_SENT = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "EAI_FAIL", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "EHOSTDOWN",
+  "UND_ERR_CONNECT_TIMEOUT", "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+]);
 
 export interface LlmClient {
   chat(opts: ChatOptions): Promise<string>;
@@ -203,8 +219,12 @@ export class OpenAICompatibleClient implements LlmClient {
           maxTokens = accepted;
           escalationRefused = true;
           if (++timeoutRetries > MAX_TIMEOUT_RETRIES) break;
+        } else if (!NEVER_SENT.has(cause?.code ?? "")) {
+          // a reset or a dropped connection can come after the request
+          // reached the provider, which may bill it: charge the worst case.
+          // Only failures known to precede sending are free.
+          charge(worstCase);
         }
-        // any other failure to connect never reached the provider: unbilled
         await backoff(attempt);
         continue;
       }
@@ -233,6 +253,7 @@ export class OpenAICompatibleClient implements LlmClient {
             ? (u?.prompt_tokens ?? 0) + (u?.completion_tokens ?? 0)
             : undefined);
         if (billed !== undefined) this._tokensUsed = (this._tokensUsed ?? 0) + billed;
+        if (u?.prompt_tokens !== undefined && opts.spendMeter) opts.spendMeter.promptTokens = u.prompt_tokens;
         // unreported usage: assume the attempt's worst case
         charge(billed ?? worstCase);
         accepted = Math.max(accepted, maxTokens);
@@ -280,6 +301,9 @@ export class OpenAICompatibleClient implements LlmClient {
         // malformed request at any size only burns attempts
         throw new Error(`LLM request rejected (${res.status}, ${this.label}):${detail}`);
       }
+      // a 5xx answered a request the provider received and may have
+      // processed: charge the worst case. A 429 is a refusal before any work.
+      if (res.status >= 500) charge(worstCase);
       lastErr = `${res.status}:${detail}`;
       await backoff(attempt);
     }
@@ -294,15 +318,19 @@ export type OpenRouterConfig = OpenAICompatibleConfig;
 /** Thrown when a run's cumulative token spend hits the hard budget. */
 export class TokenBudgetExceededError extends Error {}
 
-/** local estimation constants: ~4 chars/token for text, plus a flat per-image
- *  charge. The image constant is a CEILING, not a mean — it feeds the
- *  pre-send refusal, so it must round UP to the most expensive plausible
- *  provider for a 1920x1080 frame: OpenAI high-detail scales to 1365x768 →
- *  6 tiles → 6×170+85 ≈ 1105; Anthropic bills ≈ (w×h)/750 after scaling to
- *  1568 on the long edge ≈ 1840; Gemini differs again. 2000 covers all of
- *  them with margin and still leaves the 300k default budget plenty of room
- *  for a 12-image QC pass (~24k). Sized to the mean instead, the check waves
- *  through the exact overshoot it exists to refuse. */
+/** Local estimation constants. ASCII text runs about 4 characters per token
+ *  in every common tokenizer; other scripts run near one token per
+ *  character (CJK) or more (characters outside the BMP, such as emoji), so
+ *  each such character counts as one token, two outside the BMP: the safe
+ *  side for a pre-send check.
+ *
+ *  The image constant is the STARTING estimate for one 1920x1080 frame:
+ *  OpenAI high detail scales to 1365x768, 6 tiles, about 1105 tokens;
+ *  Anthropic bills about (w×h)/750 after scaling to 1568 on the long edge,
+ *  about 1840. Some models bill far more per image (gpt-4o-mini reports about
+ *  36k prompt tokens for the same frame), so after the first call that
+ *  carries images and reports prompt usage, BudgetedLlmClient raises the
+ *  estimate to the measured per-image cost for the rest of the run. */
 const CHARS_PER_TOKEN = 4;
 const IMAGE_TOKEN_ESTIMATE = 2_000;
 
@@ -311,25 +339,35 @@ const IMAGE_TOKEN_ESTIMATE = 2_000;
  *  would blow past the remaining budget BEFORE it is sent — a pre-call check
  *  of the running total alone lets one 12-image vision call overshoot an
  *  almost-spent budget arbitrarily. */
-export function estimateTokens(opts: ChatOptions): number {
-  let chars = opts.system.length;
+export function estimateTokens(opts: ChatOptions, imageTokens = opts.imageTokenEstimate ?? IMAGE_TOKEN_ESTIMATE): number {
+  let ascii = 0;
+  let other = 0;
+  const count = (s: string): void => {
+    for (const ch of s) {
+      const cp = ch.codePointAt(0)!;
+      if (cp < 0x80) ascii++;
+      else other += cp > 0xffff ? 2 : 1;
+    }
+  };
+  count(opts.system);
   let images = 0;
   for (const p of opts.user) {
-    if (p.type === "text") chars += p.text.length;
+    if (p.type === "text") count(p.text);
     else images++;
   }
-  return Math.ceil(chars / CHARS_PER_TOKEN) + images * IMAGE_TOKEN_ESTIMATE;
+  return Math.ceil(ascii / CHARS_PER_TOKEN) + other + images * imageTokens;
 }
 
 /**
- * Hard cost ceiling for a whole run. Wraps any LlmClient and refuses a call
- * when the metered total has reached the budget OR when the call's own
- * estimated prompt size would carry the total past it — so a misbehaving
- * model/retry loop is bounded instead of burning unbounded spend.
- * Metering prefers provider-reported usage; a provider that reports none is
- * metered at its worst case (prompt estimate plus max_tokens) so the cap holds
- * for custom endpoints, the case most likely to omit usage. budget <= 0
- * disables the cap (accounting still runs).
+ * Token ceiling for a whole run, enforced before every call and (through
+ * spendLimit) every attempt. Wraps any LlmClient and refuses a call when the
+ * metered total has reached the budget OR when the call's own estimated
+ * worst case would carry the total past it, so a misbehaving model or retry
+ * loop is bounded. Metering prefers provider-reported usage; a provider that
+ * reports none is metered at its worst case (prompt estimate plus
+ * max_tokens). The prompt side is an estimate, so one call can exceed it;
+ * the next call is then refused. budget <= 0 disables the cap (accounting
+ * still runs).
  */
 export class BudgetedLlmClient implements LlmClient {
   readonly label: string;
@@ -338,6 +376,9 @@ export class BudgetedLlmClient implements LlmClient {
   private readonly spentByStage = new Map<string, number>();
   /** provider-reported spend where available, local estimate where not */
   private metered = 0;
+  /** tokens one image costs this run's provider: the starting estimate until
+   *  a call with images reports its prompt usage, then the measured cost */
+  private imageRate = IMAGE_TOKEN_ESTIMATE;
 
   constructor(
     private readonly inner: LlmClient,
@@ -363,8 +404,10 @@ export class BudgetedLlmClient implements LlmClient {
     return [...this.spentByStage].map(([stage, n]) => `${stage} ${n}`).join(", ");
   }
 
-  async chat(opts: ChatOptions): Promise<string> {
+  async chat(callOpts: ChatOptions): Promise<string> {
+    const opts: ChatOptions = { ...callOpts, imageTokenEstimate: Math.max(this.imageRate, callOpts.imageTokenEstimate ?? 0) };
     const promptEstimate = estimateTokens(opts);
+    const images = opts.user.filter((p) => p.type === "image").length;
     // reserve the FIRST attempt's worst-case completion too: on reasoning
     // models the completion, not the prompt, dominates the bill. Retries and
     // max_tokens escalation (up to escalationCeiling()) are kept inside the
@@ -412,6 +455,13 @@ export class BudgetedLlmClient implements LlmClient {
     // a client that reports nothing at all is metered by the local estimate
     const reported = spentBy();
     record(reported > 0 ? reported : promptEstimate + Math.ceil(out.length / CHARS_PER_TOKEN));
+    // learn what an image really costs here, so the next call's pre-send
+    // check uses the provider's price, not the starting estimate
+    if (images > 0 && meter.promptTokens !== undefined) {
+      const textOnly = estimateTokens({ ...opts, user: opts.user.filter((p) => p.type === "text") }, 0);
+      const perImage = Math.ceil((meter.promptTokens - textOnly) / images);
+      if (perImage > this.imageRate) this.imageRate = perImage;
+    }
     return out;
   }
 }

@@ -36,7 +36,7 @@ Key generate flags:
   --dry-run         write recipe.json and stop before touching the app
   --yes             film without the confirmation prompt (required when there is no terminal)
   --out <dir>       where the take and video go (default out/generate)
-  --max-tokens <n>  hard LLM spend ceiling (default 300000, 0 or off disables)
+  --max-tokens <n>  LLM token ceiling, checked before every call (default 300000, 0 or off disables)
   --storage-state <file>    film signed in: a Playwright storage state (also on record)
   --block-private-network   refuse localhost and private addresses, for any target
   --allow-private-network   allow them even when the target is public (by default a
@@ -248,7 +248,7 @@ async function main(): Promise<number> {
           model: { type: "string" },
           "no-vision": { type: "boolean" },
           "env-file": { type: "string" },
-          // hard LLM spend ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
+          // LLM token ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
           // 0 or "off" disables, default 300000
           "max-tokens": { type: "string" },
           // preview: analyze + script only; print every action (incl. typed

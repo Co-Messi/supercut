@@ -32,7 +32,7 @@ import { quoteForTerminal, terminalSafe } from "../security/terminal.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
-/** default hard token budget for a whole run — generous for a normal run
+/** default token budget for a whole run — generous for a normal run
  *  (~15 calls at 8k output max), fatal only to runaway retry loops */
 const DEFAULT_MAX_TOKENS = 300_000;
 // stage retry ceilings, mirrored from analyze.ts / script.ts / qc.ts — used
@@ -71,7 +71,7 @@ export interface GenerateOptions {
    *  (Delete, Pay, …). OFF by default — fail-safe so a prompt-injected page
    *  can't steer a real harmful action on the live app. */
   allowDestructive?: boolean;
-  /** hard cumulative token ceiling for the run's LLM calls (prompt+completion,
+  /** cumulative token ceiling for the run's LLM calls (prompt+completion,
    *  provider-reported). 0 disables. Default: 300000. */
   maxTokens?: number;
   /** preview mode: run analyze + script, print the FULL action list (every

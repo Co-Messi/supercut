@@ -286,6 +286,51 @@ describe("typing", () => {
     expect(submit.keys.input[0]).toEqual(["deleteContentBackward", null]);
   }, 60_000);
 
+  type EditorState = { editor: string; notes: string; other: string };
+  async function typeInEditor(selector: string, text: string) {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([{
+          name: "edit", url: `${app.url}/editor`,
+          actions: [{ kind: "type", selector, text, duration_ms: 2200 }], hold_ms: 200,
+        }]),
+        outDir: outDir("editor"), seed: 5, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    const states = logs.filter((l) => l.ev === "state") as unknown as EditorState[];
+    const keys = logs.filter((l) => l.ev === "key") as unknown as { key: string; target: string }[];
+    return { res, last: states[states.length - 1], keys };
+  }
+
+  it("appends to a contentEditable editor: existing content survives, nothing is selected and deleted", async () => {
+    const { res, last, keys } = await typeInEditor("#editor", " Added.");
+    expect(res.failedScenes).toEqual([]);
+    expect(keys.map((k) => k.key)).not.toContain("Backspace");
+    expect(last?.editor).toContain("Seeded team notes.");
+    expect(last?.editor).toContain("Second paragraph.");
+    expect(last?.editor.trimEnd().endsWith("Added.")).toBe(true);
+    expect(last?.other).toBe("keep me");
+  }, 60_000);
+
+  it("replaces a prefilled textarea's text, and only that field's", async () => {
+    const { res, last } = await typeInEditor("#notes", "new note");
+    expect(res.failedScenes).toEqual([]);
+    expect(last?.notes).toBe("new note");
+    expect(last?.other).toBe("keep me");
+    expect(last?.editor).toContain("Seeded team notes.");
+  }, 60_000);
+
+  it("sends no keys when the target cannot take focus, and fails the scene", async () => {
+    // the press on #static is swallowed, so #other keeps focus: the keys would
+    // otherwise select and delete "keep me"
+    const { res, keys, last } = await typeInEditor("#static", "oops");
+    expect(res.failedScenes).toEqual(["edit"]);
+    expect(res.sceneErrors["edit"]).toMatch(/did not take focus/);
+    expect(keys).toEqual([]);
+    expect(last).toBeUndefined(); // no field changed
+    expect(res.eventLog.events.some((e) => e.type === "type")).toBe(false);
+  }, 60_000);
+
   it("types grapheme by grapheme: keys for what a keyboard has, one insert per other grapheme", async () => {
     const text = "née 👩‍💻!";
     const { submit, res } = await typeInto(`${app.url}/form`, text);

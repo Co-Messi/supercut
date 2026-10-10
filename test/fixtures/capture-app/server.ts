@@ -176,6 +176,27 @@ const COVERED = `<!doctype html><html><head><meta charset="utf-8"><title>Covered
   </script>
 </body></html>`;
 
+/** fields with content worth keeping: a rich text editor (contentEditable),
+ *  two prefilled textareas, and a static block that swallows the focusing
+ *  press. Reports every key and the fields' contents after each change. */
+const EDITOR = `<!doctype html><html><head><meta charset="utf-8"><title>Editor</title>${BASE_STYLE}${SEND}
+<style>#editor{border:1px solid #ccc;padding:12px;min-height:80px;width:640px}
+textarea{font-size:18px;width:420px;height:60px;display:block;margin:12px 0} #static{padding:16px;border:1px dashed #999;width:300px}</style></head><body>
+  <div id="editor" contenteditable="true"><p>Seeded team notes.</p><p>Second paragraph.</p></div>
+  <textarea id="notes">old note</textarea>
+  <textarea id="other" autofocus>keep me</textarea>
+  <div id="static" onmousedown="event.preventDefault()">Static summary block</div>
+  <script>
+    const state = () => send({ ev: "state",
+      editor: document.getElementById("editor").innerText,
+      notes: document.getElementById("notes").value,
+      other: document.getElementById("other").value });
+    addEventListener("keydown", (e) => send({ ev: "key", key: e.key, target: (e.target.id || e.target.tagName) }), true);
+    addEventListener("input", state, true);
+    addEventListener("load", () => document.getElementById("other").focus());
+  </script>
+</body></html>`;
+
 export interface CaptureApp {
   url: string;
   /** bodies POSTed to /log, oldest first */
@@ -214,6 +235,7 @@ export async function startCaptureApp(): Promise<CaptureApp> {
       case "/stall": return html(res, STALL);
       case "/moving": return html(res, MOVING);
       case "/covered": return html(res, COVERED);
+      case "/editor": return html(res, EDITOR);
       case "/slow-paint": {
         // the document commits on the first bytes; its first paint waits for the body
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });

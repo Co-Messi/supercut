@@ -227,7 +227,17 @@ export function pickMusic(
  * director is about to do to the live app; a prompt-injected `type` payload
  * has to survive being shown to a human first.
  */
-export function formatRecipePreview(recipe: Recipe): string[] {
+export function formatRecipePreview(
+  recipe: Recipe,
+  /** the crawled tag of a selector on a page, when known: says whether a type
+   *  clears the field first (its own input or textarea) or appends */
+  fieldTag?: (pageUrl: string, selector: string) => string | undefined,
+): string[] {
+  const typeEffect = (url: string, selector: string | undefined): string => {
+    const tag = selector ? fieldTag?.(url, selector) : undefined;
+    if (tag === undefined) return " (replaces existing text in an input or textarea, appends elsewhere)";
+    return tag === "input" || tag === "textarea" ? " (replaces existing text)" : " (appends to existing text)";
+  };
   const lines: string[] = [];
   for (const [i, scene] of recipe.scenes.entries()) {
     lines.push(
@@ -238,7 +248,9 @@ export function formatRecipePreview(recipe: Recipe): string[] {
       let desc = a.kind as string;
       if (a.kind === "goto" && a.url) desc += ` ${a.url}`;
       if (a.selector) desc += ` ${a.selector}`;
-      if (a.kind === "type") desc += ` "${a.text ?? ""}"${a.submit ? " then press Enter" : ""}`;
+      if (a.kind === "type") {
+        desc += ` "${a.text ?? ""}"${a.submit ? " then press Enter" : ""}${typeEffect(scene.entry.url, a.selector)}`;
+      }
       desc += ` (${a.duration_ms}ms${a.focus_selector ? `, focus ${a.focus_selector}` : ""})`;
       lines.push(`  · ${desc}`);
     }
@@ -414,7 +426,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     if (written.warning) log(`   warning: ${written.warning}`);
     // full action preview BEFORE the capture browser touches the app — every
     // selector and every typed string is on the record for the operator
-    for (const line of formatRecipePreview(recipe)) log(`   ${line}`);
+    const tags = new Map(digests.flatMap((d) => d.inventory.map((i) => [`${d.url} ${i.selector}`, i.tag] as const)));
+    for (const line of formatRecipePreview(recipe, (url, sel) => tags.get(`${url} ${sel}`))) log(`   ${line}`);
 
     if (opts.dryRun) {
       writeArtifacts({ dryRun: true });

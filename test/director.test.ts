@@ -896,6 +896,18 @@ describe("prompt-injection hardening (H6)", () => {
     expect(lines.some((l) => l.includes('scene 1 "signup" @ http://127.0.0.1:9999/'))).toBe(true);
     expect(lines.some((l) => l.includes("hold 600ms"))).toBe(true);
   });
+
+  it("formatRecipePreview says when a type replaces existing text and when it appends", async () => {
+    const { formatRecipePreview } = await import("../src/director/generate.js");
+    const recipe = JSON.parse(validRecipeJson("#cta")) as Recipe;
+    recipe.scenes[0]!.actions.push({ kind: "type", selector: "#notes", text: "hi", duration_ms: 1500 } as Recipe["scenes"][number]["actions"][number]);
+    const tags = new Map([["http://127.0.0.1:9999/ #email", "input"], ["http://127.0.0.1:9999/ #notes", "div"]]);
+    const lines = formatRecipePreview(recipe, (url, sel) => tags.get(`${url} ${sel}`));
+    expect(lines.find((l) => l.includes("type #email"))).toContain("(replaces existing text)");
+    expect(lines.find((l) => l.includes("type #notes"))).toContain("(appends to existing text)");
+    // without field information the preview still says a clear may happen
+    expect(formatRecipePreview(recipe).find((l) => l.includes("type #email"))).toContain("replaces existing text");
+  });
 });
 
 describe("low-tier audit fixes", () => {

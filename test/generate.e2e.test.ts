@@ -370,7 +370,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(report.dryRun).toBe(true);
     // the preview surfaces every action, including the full typed text + Enter
     const preview = logs.join("\n");
-    expect(preview).toContain('type #email "ada@lumon.dev" then press Enter');
+    expect(preview).toContain('type #email "ada@lumon.dev" then press Enter (replaces existing text)');
     expect(preview).toContain("click #cta");
   }, 120_000);
 

@@ -576,17 +576,65 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       );
   }
 
-  /** the focused element (through open shadow roots) is a text field or an
-   *  editable region that already holds text */
-  async function focusedFieldHasText(): Promise<boolean> {
+  /**
+   * Make the target ready for keys, or say why it is not. Keys go wherever
+   * focus is, so nothing is typed unless the focused element (through open
+   * shadow roots) is a text-entry element and is the target, inside it, or the
+   * contentEditable host the editable target lives in. Then:
+   *  - "replace": the focused element IS the target, an input or textarea
+   *    holding text. Select-all is scoped to that one field, so the caller may
+   *    clear it.
+   *  - "append": anything else. The caret moves to the end, so the typed text
+   *    follows what is there. Select-all is never used in a contentEditable
+   *    host: there it selects the whole document.
+   */
+  async function prepareField(selector: string): Promise<{ mode: "replace" | "append" } | { refused: string }> {
     return page
-      .evaluate(() => {
-        let el: Element | null = document.activeElement;
-        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value.length > 0;
-        return el instanceof HTMLElement && el.isContentEditable && (el.textContent ?? "").length > 0;
+      .locator(selector)
+      .first()
+      .evaluate((el) => {
+        let active: Element | null = document.activeElement;
+        while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+        const within = (node: Node | null, root: Node): boolean => {
+          for (let n: Node | null = node; n; n = n.parentNode ?? (n as ShadowRoot).host ?? null) {
+            if (n === root) return true;
+          }
+          return false;
+        };
+        const name = (e: Element | null): string =>
+          e ? e.tagName.toLowerCase() + (e.id ? `#${e.id}` : "") : "nothing";
+        const NOT_TEXT = new Set(["button", "submit", "reset", "checkbox", "radio", "file", "image", "color", "range", "hidden"]);
+        const isTextEntry = (e: Element | null): boolean =>
+          e instanceof HTMLTextAreaElement ||
+          (e instanceof HTMLInputElement && !NOT_TEXT.has(e.type)) ||
+          (e instanceof HTMLElement && e.isContentEditable);
+        const hostOfTarget =
+          active instanceof HTMLElement && active.isContentEditable && el instanceof HTMLElement && el.isContentEditable && within(el, active);
+        if (!active || active === document.body || !(within(active, el) || hostOfTarget)) {
+          return { refused: `${name(active)} has focus instead` };
+        }
+        if (!isTextEntry(active)) return { refused: `the focused ${name(active)} is not a text field` };
+        if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+          if (active === el && active.value.length > 0) return { mode: "replace" as const };
+          try {
+            active.setSelectionRange(active.value.length, active.value.length);
+          } catch {
+            /* email and number inputs have no selection API; the caret stays */
+          }
+          return { mode: "append" as const };
+        }
+        // contentEditable: caret at the end of the target, or of the focused
+        // editor when the target wraps it
+        const node = active !== el && within(active, el) ? active : el;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        return { mode: "append" as const };
       })
-      .catch(() => false);
+      .catch((err: unknown) => ({ refused: err instanceof Error ? err.message.split("\n")[0]! : String(err) }));
   }
 
   type MutationsApi = {
@@ -775,9 +823,14 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           // schedule shifts (timestamp canon) — never a pasted-in string.
           const rhythm = typingPlan(text, remaining, rng);
           await sleep(rhythm.beforeFirstKey);
-          // the action types `text` into the field, not after what was there:
-          // select-all then delete, as real keys, so the app sees an edit
-          if (await focusedFieldHasText()) {
+          const field = await prepareField(a.selector);
+          if ("refused" in field) {
+            throw new Error(`"${a.selector}" did not take focus after the click (${field.refused}), so no keys were sent`);
+          }
+          // in its own input or textarea, the action types `text` instead of
+          // what was there: select-all then delete, as real keys, so the app
+          // sees an edit. Everywhere else the text is appended.
+          if (field.mode === "replace") {
             await page.keyboard.press("ControlOrMeta+a");
             await sleep(CLEAR_BEAT_MS);
             await page.keyboard.press("Backspace");

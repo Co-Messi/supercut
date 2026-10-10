@@ -37,6 +37,9 @@ vi.mock("../src/security/url-policy.js", async (importOriginal) => {
     ...actual, // gateWebSockets et al stay REAL
     assertSafeNavigationUrl: vi.fn(async () => {}),
     resolveAndPinHost: vi.fn(async () => undefined),
+    // the default posture classifies the TARGET the same way: "localhost" is
+    // the public app, 127.0.0.1 is private
+    urlResolvesPrivate: vi.fn(async (raw: string) => new URL(raw).hostname !== "localhost"),
     createRequestGate: vi.fn((opts: { allowPrivateNetwork: boolean }) =>
       actual.createRequestGate({
         ...opts,
@@ -159,6 +162,46 @@ describe("request gate wiring through record() (H4/H5)", () => {
     // the pinning path is touched when the guard is off
     expect(vi.mocked(createRequestGate)).not.toHaveBeenCalled();
     expect(vi.mocked(resolveAndPinHost)).not.toHaveBeenCalled();
+  }, 60_000);
+});
+
+describe("default posture (allowPrivateNetwork unset): decided by the target", () => {
+  const reset = () => {
+    vi.clearAllMocks();
+    probe.requests.length = 0;
+    probe.upgrades.length = 0;
+  };
+
+  it("record, public target: the guard engages, so the page's private fetch and WebSocket never leave the browser", async () => {
+    reset();
+    const out = mkdtempSync(join(tmpdir(), "supercut-default-public-"));
+    dirs.push(out);
+    const res = await record({
+      recipe: probeRecipe(`http://localhost:${new URL(app.url).port}`), outDir: out, seed: 1, captureFrames: false,
+    });
+    expect(res.failedScenes).toEqual([]);
+    expect(probe.requests).toEqual([]);
+    expect(probe.upgrades).toEqual([]);
+    expect(vi.mocked(createRequestGate)).toHaveBeenCalledWith(expect.objectContaining({ allowPrivateNetwork: false }));
+  }, 60_000);
+
+  it("record, private target: its private requests stay allowed (a local frontend calling a local API)", async () => {
+    reset();
+    const out = mkdtempSync(join(tmpdir(), "supercut-default-private-"));
+    dirs.push(out);
+    const res = await record({ recipe: probeRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
+    expect(res.failedScenes).toEqual([]);
+    expect(probe.requests.some((u) => u.startsWith("/hit"))).toBe(true);
+    expect(vi.mocked(createRequestGate)).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it("crawl, public target: the page's private fetch never leaves the browser", async () => {
+    reset();
+    const fetchTarget = `http://127.0.0.1:${probe.port}/hit-crawl`;
+    await crawlApp(`http://localhost:${new URL(app.url).port}/probe?fetch=${encodeURIComponent(fetchTarget)}`, {
+      maxPages: 1, screenshots: false,
+    });
+    expect(probe.requests.filter((u) => u.startsWith("/hit-crawl"))).toEqual([]);
   }, 60_000);
 });
 

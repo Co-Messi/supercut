@@ -16,17 +16,24 @@ supercut drives a real browser against the URL you give it. It performs real cli
 
 ## Private network guard
 
-Filming your own local dev app is the main use case, so localhost, RFC1918 and link-local addresses are allowed by default. For an untrusted or public target, add `--block-private-network`. It rejects localhost, RFC1918, link-local and cloud-metadata addresses, and validates every redirect hop.
+The posture is decided once per run from the target, the same way in the CLI and in the `generate()`, `record()` and `crawlApp()` library calls:
+
+- A private or localhost target (`http://localhost:3000`, `http://192.168.1.20`) is your own app, so it and its requests to other private addresses are allowed. A frontend on `:3000` that calls an API on `:8000` keeps working.
+- A target that resolves to a public address gets the guard by default: its pages cannot reach localhost, RFC1918, link-local or cloud-metadata addresses. A target that cannot be resolved gets the guard too.
+- `--block-private-network` engages the guard for any target, and refuses a private target outright. Use it for an untrusted target.
+- `--allow-private-network` turns the guard off, even for a public target (for example a staging site that loads assets from a VPN host).
 
 ```bash
 supercut generate --url https://untrusted.example --block-private-network
 ```
 
-`--allow-private-network` is a deprecated no-op kept for compatibility.
+With the guard on, a target's private subresources are refused, and so is every redirect hop that leads to one.
 
 With the guard on, every in-flight browser request is checked against the policy before it leaves the browser. That covers navigations from clicked links and submits, `fetch` and XHR, images, scripts, and WebSocket connections, and it covers every redirect hop of each request. To see redirect hops at all, supercut makes the guarded requests itself (from Node), checks each `Location` before following it, and hands the browser the final response. A click that ends on a blocked or private page fails the scene instead of filming an error page. Service workers are blocked while the guard is on.
 
 ### Costs and limits of the guard
+
+These apply to every run whose target resolves public, unless `--allow-private-network` is passed.
 
 - A redirected page is reached through a one line stub page that replaces itself with the redirect target, so the page ends up at the right URL and the target is still fetched only once. A `307` or `308` chain that ends in a `POST` cannot be replayed that way and renders at the URL that was requested.
 - Responses are buffered, not streamed. A response that never completes (a long poll or server-sent events endpoint) fails after 30 seconds.

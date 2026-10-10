@@ -10,6 +10,7 @@ import { installRequestGate, settleGatedRedirect } from "../security/browser-gat
 import { redactForPrompt } from "../security/redaction.js";
 import { isDestructiveLabel } from "../security/destructive.js";
 import { isSameSite } from "../security/site.js";
+import { resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 
 /**
  * True when a page URL carries a secret (token/key/JWT) in its path or query.
@@ -507,7 +508,9 @@ export async function crawlApp(
   const maxPages = opts.maxPages ?? 3;
   const screenshots = opts.screenshots ?? true;
   const allowDestructive = opts.allowDestructive ?? false;
-  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
+  // unset: a private target keeps its private requests, a public one gets the
+  // guard (see network-policy.ts); the same default as generate() and record()
+  const { allowPrivateNetwork } = await resolvePrivateNetworkPolicy(appUrl, opts.allowPrivateNetwork);
   await assertSafeNavigationUrl(appUrl, { allowPrivateNetwork });
 
   // guard ON: resolve-and-pin the target host so the browser connects to the

@@ -36,6 +36,7 @@ import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/inde
 import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { NavigationLog } from "./navigation.js";
 import { isSameSite } from "../security/site.js";
+import { resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 import {
   GATED_REDIRECT_HEADER,
   installRequestGate,
@@ -204,14 +205,11 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
-  /** Allow localhost/RFC1918/link-local navigation. Defaults to FALSE: the
-   *  library fails closed and callers opt in. Every caller in this repo
-   *  (generate(), the CLI) passes the value explicitly — the CLI allows by
-   *  default and --block-private-network opts the guard in — so the default
-   *  exists only for external embedders, and for them the safe direction is
-   *  closed (matching crawlApp()'s default). With the guard on, the recipe's
-   *  URLs are policy-checked, the target hosts are DNS resolve-and-pinned,
-   *  and every in-flight request is gated. */
+  /** Private-network posture. true allows everything; false engages the
+   *  guard (recipe URLs policy-checked, hosts DNS resolve-and-pinned, every
+   *  in-flight request gated). Unset, the same default as generate() and
+   *  crawlApp(): no guard when the recipe's app_url is private or localhost,
+   *  the guard when it resolves public (src/security/network-policy.ts). */
   allowPrivateNetwork?: boolean;
   /** path to a Playwright storage state file: the capture runs signed in.
    *  Only the path is handed to the browser; the contents never reach the
@@ -331,15 +329,17 @@ async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork:
 export async function record(opts: RecordOptions): Promise<RecordResult> {
   const { recipe, outDir } = opts;
   const captureFrames = opts.captureFrames ?? true;
-  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
+  // unset: a private app_url is the user's own app (private requests stay
+  // allowed); a public one gets the guard (see network-policy.ts)
+  const { allowPrivateNetwork } = await resolvePrivateNetworkPolicy(recipe.app_url, opts.allowPrivateNetwork);
   const rng = makeRng(opts.seed ?? 1);
-  /** a caller who left the option unset gets the guard by default; its
-   *  refusal names the option that films a local app */
+  /** a caller who left the option unset and filmed a public app gets the
+   *  guard; its refusal names the option that lifts it */
   const explainDefault = (err: unknown): never => {
     if (opts.allowPrivateNetwork === undefined && err instanceof Error && /private.network/i.test(err.message)) {
       throw new Error(
-        `${err.message}. record() refuses private hosts unless allowPrivateNetwork: true is passed ` +
-          "(the CLI passes it unless --block-private-network is set)",
+        `${err.message}. The recipe's app_url resolves to a public address, so private addresses are blocked; ` +
+          "pass allowPrivateNetwork: true (--allow-private-network) to allow them",
         { cause: err },
       );
     }

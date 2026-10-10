@@ -37,13 +37,15 @@ Key generate flags:
   --out <dir>       where the take and video go (default out/generate)
   --max-tokens <n>  hard LLM spend ceiling (default 300000, 0 or off disables)
   --storage-state <file>    film signed in: a Playwright storage state (also on record)
-  --block-private-network   refuse localhost and private addresses (for untrusted targets)
+  --block-private-network   refuse localhost and private addresses, for any target
+  --allow-private-network   allow them even when the target is public (by default a
+                            public target cannot reach private addresses)
 
 generate needs an LLM key; record and render need none.
 Run \`supercut generate --help\` for every generate flag.`;
 
 const RECORD_USAGE =
-  "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--storage-state <file>] [--block-private-network]";
+  "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--storage-state <file>] [--block-private-network | --allow-private-network]";
 const RENDER_USAGE =
   "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
   "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
@@ -52,7 +54,7 @@ const GENERATE_USAGE =
   "usage: supercut generate --url <running app URL> [--repo <path>] [--app <name>] [--out <dir>] " +
   "[--bg <stage>] [--music <bundled track|audio file|off>] [--seed <n>] [--model <id>] " +
   "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] [--skip-preflight] [--storage-state <file>] " +
-  "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
+  "[--block-private-network | --allow-private-network] [--allow-destructive] [--no-vision] [--yes]";
 
 /** parseArgs with plain-language failures. Positionals are accepted by the
  *  parse and rejected here with the usage line, since node's own error for a
@@ -86,9 +88,21 @@ function parseBudget(raw: string, source: string, usage: string): number {
   return raw.toLowerCase() === "off" ? 0 : nonNegativeInt(raw, source, usage, ' or "off"');
 }
 
-const DEPRECATED_PRIVATE_NOTE =
-  "--allow-private-network is deprecated and ignored; private/localhost is allowed by default. " +
-  "Use --block-private-network to restrict.";
+/**
+ * The private-network posture from the two flags. Neither: the default, which
+ * allows a private or localhost target and its private requests, and guards
+ * a target that resolves public. --block-private-network: the strict guard
+ * for any target. --allow-private-network: no guard, even for a public
+ * target. Both at once is a contradiction and fails.
+ */
+function privateNetworkFlag(values: { "block-private-network"?: boolean; "allow-private-network"?: boolean }, usage: string): boolean | undefined {
+  if (values["block-private-network"] && values["allow-private-network"]) {
+    throw new CliError("--block-private-network and --allow-private-network contradict each other; pick one", usage);
+  }
+  if (values["block-private-network"]) return false;
+  if (values["allow-private-network"]) return true;
+  return undefined;
+}
 
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
@@ -114,7 +128,7 @@ async function main(): Promise<number> {
           seed: { type: "string" },
           "storage-state": { type: "string" },
           "block-private-network": { type: "boolean" },
-          "allow-private-network": { type: "boolean" }, // deprecated no-op
+          "allow-private-network": { type: "boolean" },
           help: { type: "boolean", short: "h" },
         },
         RECORD_USAGE,
@@ -126,7 +140,7 @@ async function main(): Promise<number> {
       if (!values.recipe) throw new CliError("missing --recipe", RECORD_USAGE);
       // flags are validated before any file is read
       const seed = values.seed === undefined ? 1 : nonNegativeInt(values.seed, "--seed", RECORD_USAGE);
-      if (values["allow-private-network"]) console.error(DEPRECATED_PRIVATE_NOTE);
+      const allowPrivateNetwork = privateNetworkFlag(values, RECORD_USAGE);
 
       const { readFileSync } = await import("node:fs");
       const { parseRecipe } = await import("../schema/index.js");
@@ -158,7 +172,8 @@ async function main(): Promise<number> {
       const t0 = Date.now();
       const storageState = values["storage-state"] ? await storageStateOrUsage(values["storage-state"], RECORD_USAGE) : undefined;
       const res = await record({
-        recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"],
+        recipe, outDir, seed,
+        ...(allowPrivateNetwork !== undefined ? { allowPrivateNetwork } : {}),
         ...(storageState ? { storageState } : {}),
       }).catch(
         (err: unknown) => {
@@ -245,10 +260,10 @@ async function main(): Promise<number> {
           // signed in. Only its path is passed on.
           "storage-state": { type: "string" },
           help: { type: "boolean", short: "h" },
-          // private/localhost is ALLOWED BY DEFAULT: filming your own local
-          // dev app is the #1 use case. --block-private-network opts into the
-          // SSRF guard (for untrusted/public targets). --allow-private-network
-          // is kept as a deprecated no-op for back-compat.
+          // private network posture (see privateNetworkFlag): by default a
+          // private target is allowed and a public one is guarded;
+          // --block-private-network guards any target, --allow-private-network
+          // guards none
           "block-private-network": { type: "boolean" },
           "allow-private-network": { type: "boolean" },
           // fail-safe OFF: destructive controls (Delete, Pay, ...) are excluded
@@ -270,7 +285,7 @@ async function main(): Promise<number> {
         values["max-tokens"] !== undefined && values["max-tokens"].trim() !== ""
           ? parseBudget(values["max-tokens"], "--max-tokens", GENERATE_USAGE)
           : undefined;
-      if (values["allow-private-network"]) console.error(DEPRECATED_PRIVATE_NOTE);
+      const allowPrivateNetwork = privateNetworkFlag(values, GENERATE_USAGE);
       // The action preview only protects anyone if a human can stop it. With
       // no terminal to ask on (CI, a coding agent, piped stdin) do not quietly
       // film a model-written recipe: refuse before any crawl or LLM spend
@@ -341,8 +356,8 @@ async function main(): Promise<number> {
         ...(values.bg ? { background: values.bg } : {}),
         ...(values.music ? { music: values.music } : {}),
         ...(seed !== undefined ? { seed } : {}),
-        // default ALLOW; only --block-private-network engages the SSRF guard
-        allowPrivateNetwork: !values["block-private-network"],
+        // unset: private targets allowed, public targets guarded
+        ...(allowPrivateNetwork !== undefined ? { allowPrivateNetwork } : {}),
         // default OFF; --allow-destructive opts into filming destructive controls
         allowDestructive: !!values["allow-destructive"],
         ...(maxTokens !== undefined ? { maxTokens } : {}),
@@ -356,10 +371,10 @@ async function main(): Promise<number> {
       });
       if (values["dry-run"]) {
         // the suggested command must preserve the security posture of THIS
-        // run: record defaults to allowing private networks, so a dry run
-        // made under --block-private-network has to say so in the follow-up
+        // run: an explicit network flag and the session carry over
         const followUp = dryRunFollowUpCommand(values.out ?? "out/generate", {
-          blockPrivateNetwork: !!values["block-private-network"],
+          blockPrivateNetwork: allowPrivateNetwork === false,
+          allowPrivateNetwork: allowPrivateNetwork === true,
           ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),
         });
         console.log(`\nsupercut: dry run complete. Review the recipe, then film it with:\n  ${followUp}`);

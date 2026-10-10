@@ -55,7 +55,7 @@ frames/*             the frames (JPEG or PNG)
 
 - `record` and `render` stay keyless. They must never call an LLM or need an API key. Only `generate` does.
 - The event log is a public contract. Schemas are strict and reject malformed input loudly.
-- Private and localhost targets are allowed by default; `--block-private-network` engages the SSRF guard. Do not weaken the guard when it is on.
+- Private and localhost targets are allowed by default, with their private requests; a target that resolves public gets the SSRF guard by default (`src/security/network-policy.ts`). `--block-private-network` engages the guard for any target, `--allow-private-network` turns it off. The CLI and the `generate()`, `record()` and `crawlApp()` defaults agree. Do not weaken the guard when it is on.
 - Destructive controls are excluded from filming by default (`--allow-destructive` opts in).
 - Recipes are capped at 60 seconds of estimated video.
 - The LLM budget is a hard ceiling for the whole run. Every billed attempt, including retries and timeouts, is metered: at the provider's reported usage when it gives one, otherwise (and always for a timed-out attempt) at its worst case, prompt estimate plus `max_tokens`.

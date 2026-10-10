@@ -25,7 +25,8 @@ import { deterministicChecks, visionQc, visionVerdictsOrNone, type SceneVerdict 
 import { AllScenesCutAfterTakeError, filmWithRetakes, MAX_RETAKES, type FilmResult } from "./retakes.js";
 import { hasAdjustments, NO_ADJUSTMENTS, type TakeAdjustments } from "../render/adjust.js";
 import { writeRecipe } from "./script.js";
-import { assertSafeNavigationUrl, urlResolvesPrivate } from "../security/url-policy.js";
+import { assertSafeNavigationUrl } from "../security/url-policy.js";
+import { publicTargetNote, resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
@@ -59,9 +60,11 @@ export interface GenerateOptions {
   vision?: boolean;
   /** @deprecated use vision:false */
   noVision?: boolean;
-  /** allow localhost/RFC1918 navigation. Defaults to TRUE — filming your own
-   *  local dev app is the primary use case. Pass false to engage the SSRF
-   *  guard (untrusted/public targets). */
+  /** Private-network posture. Unset (the default, shared with record() and
+   *  crawlApp()): a private or localhost target is your own app, so it and
+   *  its private requests are allowed; a target that resolves public gets
+   *  the SSRF guard, so its pages cannot reach private addresses. true allows
+   *  everything; false engages the guard for any target. */
   allowPrivateNetwork?: boolean;
   /** opt-in: let the director see (and therefore script) destructive controls
    *  (Delete, Pay, …). OFF by default — fail-safe so a prompt-injected page
@@ -286,11 +289,12 @@ export function shellQuote(arg: string): string {
  */
 export function dryRunFollowUpCommand(
   outDir: string,
-  opts: { blockPrivateNetwork?: boolean; storageState?: string } = {},
+  opts: { blockPrivateNetwork?: boolean; allowPrivateNetwork?: boolean; storageState?: string } = {},
 ): string {
   return (
     `supercut record --recipe ${shellQuote(join(outDir, "recipe.json"))}` +
     (opts.blockPrivateNetwork ? " --block-private-network" : "") +
+    (opts.allowPrivateNetwork && !opts.blockPrivateNetwork ? " --allow-private-network" : "") +
     // a signed-in recipe filmed without its session films the login wall
     (opts.storageState ? ` --storage-state ${shellQuote(opts.storageState)}` : "")
   );
@@ -341,15 +345,16 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   const storageState = opts.storageState ? assertStorageStateFile(opts.storageState) : undefined;
   if (storageState) log("   session: --storage-state is applied to the crawl and the capture");
   if (opts.skipPreflight) log("   note: --skip-preflight — not probing the app URL before the crawl");
-  await preflight(opts.url, opts.allowPrivateNetwork ?? true, {
+  // one posture for the whole run (preflight, crawl, every take), decided
+  // from the target when the caller did not choose
+  const { allowPrivateNetwork, reason: networkReason } = await resolvePrivateNetworkPolicy(opts.url, opts.allowPrivateNetwork);
+  if (networkReason === "public-target") log(`   ${publicTargetNote(opts.url)}`);
+  await preflight(opts.url, allowPrivateNetwork, {
     ...(opts.skipPreflight ? { skipReachability: true } : {}),
     // dry runs never render — don't fail the preview on a missing ffmpeg
     ...(opts.dryRun ? { skipRenderDeps: true } : {}),
     log: (m) => log(`   ${m}`),
   });
-  if ((opts.allowPrivateNetwork ?? true) && !(await urlResolvesPrivate(opts.url))) {
-    log("hint: target resolves to a public address — pass --block-private-network when filming untrusted targets");
-  }
 
   // Everything the run learns is kept here so the finalizer can write it on
   // ANY exit: the runs that fail (aborted capture, sparse capture, stage
@@ -411,7 +416,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     const digests: PageDigest[] = await crawlApp(opts.url, {
       maxPages,
       screenshots: vision,
-      allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
+      allowPrivateNetwork,
       seedUrls,
       allowDestructive: opts.allowDestructive ?? false,
       ...(storageState ? { storageState } : {}),
@@ -473,7 +478,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       throw new Error(
         `capture cancelled — nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
           `review or edit it, then film it with: ${dryRunFollowUpCommand(opts.outDir, {
-            blockPrivateNetwork: !(opts.allowPrivateNetwork ?? true),
+            blockPrivateNetwork: opts.allowPrivateNetwork === false,
+            allowPrivateNetwork: opts.allowPrivateNetwork === true,
             ...(opts.storageState ? { storageState: opts.storageState } : {}),
           })}`,
       );
@@ -487,7 +493,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       rmSync(takeDir, { recursive: true, force: true });
       log(`③ record: take ${index} (${filming.scenes.length} scenes)…`);
       const result = await record({
-        recipe: filming, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
+        recipe: filming, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork,
         ...(storageState ? { storageState } : {}),
       });
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);

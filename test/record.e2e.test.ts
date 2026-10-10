@@ -208,17 +208,14 @@ describe("record E2E on fixture app", () => {
     ).rejects.toThrow(/private network/i);
   }, 30_000);
 
-  it("record() fails closed when allowPrivateNetwork is omitted (library default)", async () => {
-    // the CLI and generate() both pass the value explicitly; the default only
-    // ever reaches external embedders, and for them it must be the guard ON —
-    // matching crawlApp(), which has always defaulted closed
+  it("record() with allowPrivateNetwork unset films a local target: the default the CLI, generate() and crawlApp() share", async () => {
+    // a private or localhost target is the user's own app; only a target that
+    // resolves public gets the guard by default (request-gate.e2e covers it)
     const out = mkdtempSync(join(tmpdir(), "supercut-default-"));
     dirs.push(out);
-    const refusal = record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
-    await expect(refusal).rejects.toThrow(/private network/i);
-    // the refusal names the option a library caller sets to film a local app
-    await expect(refusal).rejects.toThrow(/allowPrivateNetwork: true/);
-  }, 30_000);
+    const res = await record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
+    expect(res.failedScenes).toEqual([]);
+  }, 60_000);
 
   it("produces valid events.json + frames, twice, with identical scheduled timelines", async () => {
     const recipe = demoRecipe(app.url);

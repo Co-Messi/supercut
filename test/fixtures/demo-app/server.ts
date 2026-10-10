@@ -282,6 +282,9 @@ const CRUD = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Cus
     <tr id="row-initech"><td>Initech</td><td>7 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
   </tbody></table>
   <div id="card" data-testid="danger-card"><button style="width:200px;height:90px">Delete</button></div>
+  <div style="height:2000px"></div>
+  <div id="far-card" data-testid="far-card" style="width:240px;height:120px;border:1px solid #ccc;display:flex;align-items:center;justify-content:center">
+    <span>Danger zone</span><button style="width:200px;height:90px">Delete workspace</button></div>
 </body></html>`;
 
 /** a responsive page: one control exists only at the filmed width (1920),

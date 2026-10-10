@@ -124,8 +124,10 @@ describe("inventory crawler on the fixture app", () => {
     expect(inv.some((i) => i.text === "Edit")).toBe(true);
     // a camera control is not destructive
     expect(inv.some((i) => i.selector === "#reset-view")).toBe(true);
-    // a container whose centre is its Delete button would press it: excluded
+    // a container whose centre is its Delete button would press it: excluded,
+    // below the fold too (the recorder scrolls it into view and presses there)
     expect(inv.some((i) => i.selector === "#card")).toBe(false);
+    expect(inv.some((i) => i.selector === "#far-card")).toBe(false);
   }, 60_000);
 
   it("disambiguates rows of a 2,000-row table with one lookup each, not one probe per row", async () => {

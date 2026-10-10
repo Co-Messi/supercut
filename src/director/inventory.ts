@@ -357,16 +357,21 @@ async function containerLabels(el: Locator): Promise<{ own: string; centre: stri
       if (!node.querySelector(INTERACTIVE)) return null;
       const clone = node.cloneNode(true) as Element;
       for (const n of Array.from(clone.querySelectorAll(INTERACTIVE))) n.remove();
+      // by geometry, not hit-testing: the container may sit below the fold,
+      // where elementFromPoint sees nothing, and the recorder scrolls it into
+      // view before pressing its centre
       const r = node.getBoundingClientRect();
-      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      const control = hit && node.contains(hit) && hit !== node ? hit.closest(INTERACTIVE) : null;
-      const centre =
-        control && node.contains(control) && control !== node
-          ? [control.getAttribute("aria-label"), (control as HTMLElement).innerText, control.getAttribute("value")]
-              .filter((s): s is string => !!s && s.trim() !== "")
-              .join(" ")
-          : null;
-      return { own: (clone.textContent ?? "").replace(/\s+/g, " ").trim(), centre: centre || null };
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const labels: string[] = [];
+      for (const control of Array.from(node.querySelectorAll(INTERACTIVE))) {
+        const b = control.getBoundingClientRect();
+        if (b.width <= 0 || b.height <= 0 || cx < b.left || cx > b.right || cy < b.top || cy > b.bottom) continue;
+        for (const s of [control.getAttribute("aria-label"), (control as HTMLElement).innerText, control.getAttribute("value")]) {
+          if (s && s.trim() !== "") labels.push(s.trim());
+        }
+      }
+      return { own: (clone.textContent ?? "").replace(/\s+/g, " ").trim(), centre: labels.join(" ") || null };
     })
     .catch(() => null);
 }

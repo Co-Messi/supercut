@@ -336,8 +336,8 @@ interface WebSocketRouteLike {
  * handlers installed = Playwright forwards frames both ways untouched);
  * blocked sockets are never connected and close with 1008 (policy violation).
  *
- * Feature-detected rather than assumed: the declared dependency floor is ^1.53.0
- * so routeWebSocket is always there in practice, but a caller running an
+ * Feature-detected rather than assumed: the pinned Playwright has
+ * routeWebSocket, so it is always there in practice, but a caller running an
  * unexpected build must WARN that WebSockets are ungated, not crash. Returns
  * true when the gate was installed.
  */

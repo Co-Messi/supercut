@@ -41,6 +41,8 @@ npm run build
 node dist/cli/index.js generate --url http://127.0.0.1:3000
 ```
 
+Is your app behind a login? See [Filming a signed-in app](#filming-a-signed-in-app): without a session, supercut sees only the sign-in page.
+
 Any command accepts `--help`. Examples below write the command as plain `supercut ...`: run it as `npx @co-messi/supercut ...`, or `node dist/cli/index.js ...` from a source checkout.
 
 No key? The keyless path works standalone against the bundled demo app:
@@ -113,6 +115,18 @@ Based on each project's public description at the time of writing. Check them be
 ## Safety
 
 supercut drives and may mutate the app you point it at. Film staging or local data, never production. Destructive controls are excluded by default on a best effort basis: a control whose label contains a word from the policy list (Delete, Reset, Pay, Buy, Subscribe, Upgrade, Transfer, Publish, Deploy, Merge, Log out and more; the full list is in `src/security/destructive.ts` and the agent skill) is never filmed, and a field whose form submits through such a control can be typed into but never submitted. `generate` prints every action before filming and asks first, and `--block-private-network` engages an SSRF guard for untrusted targets. With `--yes` nobody reviews the actions first, so the filter is the only automated guard. Full details are in [SECURITY.md](SECURITY.md).
+
+## Filming a signed-in app
+
+supercut starts from a fresh browser with no cookies, so an app behind a login shows only its sign-in page. Save a session once with Playwright, then pass it to `generate` or `record`:
+
+```bash
+npx playwright codegen --save-storage=auth.json http://localhost:3000   # sign in, then close the window
+supercut generate --url http://localhost:3000 --storage-state auth.json
+supercut record --recipe recipe.json --storage-state auth.json
+```
+
+The file holds live session cookies: use a staging account, keep it out of git, and delete it when you are done. supercut hands only its path to the browser, so its contents never reach the LLM, the take directory, `director-report.json` or the logs. Without a session, `generate` refuses a start page that settles on another site (an identity provider's sign-in page looks like this), and stops before any LLM call when the crawl finds nothing to click or only a sign-in form. An http to https upgrade or an apex to `www.` redirect of the same site is fine. `record` fails a scene whose entry page settles on another site, which is what an expired session looks like.
 
 ## LLM provider setup
 

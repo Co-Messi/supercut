@@ -444,7 +444,9 @@ describe("preflight status handling", () => {
     const srv = createServer((req, res) => {
       const code = Number(/^\/s\/(\d{3})/.exec(req.url ?? "")?.[1] ?? 200);
       res.writeHead(code, { "content-type": "text/html; charset=utf-8" });
-      res.end("<!doctype html><html><body><h1>status page</h1></body></html>");
+      // one control, so a run that gets past preflight also gets past the
+      // crawl's nothing-to-film check and reaches the LLM
+      res.end('<!doctype html><html><body><h1>status page</h1><button id="go">Open dashboard</button></body></html>');
     });
     await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
     const { port } = srv.address() as { port: number };

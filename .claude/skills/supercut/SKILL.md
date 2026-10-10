@@ -39,6 +39,8 @@ curl -sS -o /dev/null -w "%{http_code}\n" http://localhost:3000/
 
 Start the dev server in the background if it is not running, and stop only the process you started when you are done. Make sure the port belongs to this app and not to something else.
 
+If the app needs a login, supercut sees only the sign-in page. Ask the user to save a session for a staging account with `npx playwright codegen --save-storage=auth.json <app url>` (they sign in, then close the window), and pass `--storage-state auth.json` to `record`. Never type real credentials into the app yourself, never read or print the file, and keep it out of git. `record` fails a scene whose entry page lands on another site, which is what a missing or expired session looks like.
+
 ### 3. Read the app
 
 Work out what the product is and which 2 to 4 moments sell it.
@@ -122,6 +124,8 @@ Show the actions list and get a yes (safety rule 4). Then:
 ```bash
 npx @co-messi/supercut record --recipe recipe.json --out out/take
 ```
+
+For an app behind a login, add `--storage-state auth.json` (step 2).
 
 `record` exits nonzero if any scene failed, and prints which. A failed scene usually means a wrong selector, a wrong URL, or another app on that port. Fix the recipe and record again. Do not render a partial take unless the user agrees.
 

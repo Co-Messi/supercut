@@ -9,6 +9,7 @@ import { assertSafeNavigationUrl, createRequestGate, gateWebSockets, resolveAndP
 import { installRequestGate, settleGatedRedirect } from "../security/browser-gate.js";
 import { redactForPrompt } from "../security/redaction.js";
 import { isDestructiveLabel } from "../security/destructive.js";
+import { isSameSite } from "../security/site.js";
 
 /**
  * True when a page URL carries a secret (token/key/JWT) in its path or query.
@@ -35,6 +36,9 @@ export interface InventoryItem {
    *  be typed into, but a `type` with `submit: true` is refused, because
    *  Enter would press that control */
   submitsDestructive?: boolean;
+  /** an <input>'s type attribute (text when absent); lets the crawl tell a
+   *  sign-in form (a password field) from the app */
+  inputType?: string;
 }
 
 /** A large, stable container the camera can FRAME to show a result (a graph,
@@ -105,6 +109,41 @@ const MAX_SIBLINGS_PER_BASE = 6;
  * reference it. `allowDestructive` opts back in.
  */
 export { DESTRUCTIVE_RE, isDestructiveLabel } from "../security/destructive.js";
+
+export { isSameSite };
+
+const AUTH_TEXT_RE =
+  /\b(?:sign[\s-]*(?:in|up)|log[\s-]*in|login|register|create\s+(?:an\s+|your\s+)?account|forgot|reset\s+password|password|passcode|e-?mail|username|user\s+name|remember\s+me|continue\s+with|single\s+sign|sso|privacy|terms|help|back)\b/i;
+const AUTH_HREF_RE = /(?:^|\/)(?:login|log-in|signin|sign-in|signup|sign-up|register|forgot|reset|auth|sso|oauth|account\/(?:new|create))\b/i;
+
+function isAuthItem(i: InventoryItem): boolean {
+  if (i.tag === "input" || i.tag === "select") return true;
+  return AUTH_TEXT_RE.test(i.text) || (!!i.href && AUTH_HREF_RE.test(i.href));
+}
+
+/**
+ * Whether a crawl found anything worth paying an LLM for. Returns why not, or
+ * undefined when it did. Refused: no interactable element on any page, or
+ * every crawled page is a sign-in form (a password field, and nothing but
+ * fields and sign-in links). Both mean the app is behind a login, and both
+ * are known before any LLM call.
+ */
+export function assessCrawl(digests: PageDigest[], opts: { hadSession?: boolean } = {}): string | undefined {
+  const how = opts.hadSession
+    ? "The --storage-state session may have expired or belong to another site; save a fresh one"
+    : "To film a signed-in app, save a session (`npx playwright codegen --save-storage=auth.json <app url>`) and pass --storage-state auth.json";
+  const pages = digests.map((d) => d.url).join(", ") || "(no page)";
+  if (digests.every((d) => d.inventory.length === 0)) {
+    return `the crawl found no interactable elements on ${pages}, so there is nothing to film. ${how}.`;
+  }
+  const loginOnly = digests.every(
+    (d) => d.inventory.some((i) => i.inputType === "password") && d.inventory.every(isAuthItem),
+  );
+  if (loginOnly) {
+    return `the crawl found only a sign-in form on ${pages}; supercut cannot film behind a login without a session. ${how}.`;
+  }
+  return undefined;
+}
 
 // links the crawler must NOT navigate to: file downloads (PDF/zip/images/docs),
 // and non-http protocols. Navigating to a PDF triggers a download that crashes
@@ -400,6 +439,7 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
       ...(href ? { href } : {}),
       ...(hidden ? { hidden: true } : {}),
       ...(submitsDestructive ? { submitsDestructive: true } : {}),
+      ...(tag === "input" ? { inputType: ((await el.getAttribute("type").catch(() => null)) ?? "text").toLowerCase() } : {}),
     });
   }
 
@@ -436,12 +476,14 @@ export async function crawlApp(
      *  the inventory. OFF by default — fail-safe so the director can't script a
      *  real harmful action on the live app. */
     allowDestructive?: boolean;
+    /** path to a Playwright storage state file: the crawl runs signed in.
+     *  Only the path is handed to the browser; the contents go nowhere else. */
+    storageState?: string;
   } = {},
 ): Promise<PageDigest[]> {
   const maxPages = opts.maxPages ?? 3;
   const screenshots = opts.screenshots ?? true;
   const allowDestructive = opts.allowDestructive ?? false;
-  const origin = new URL(appUrl).origin;
   const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
   await assertSafeNavigationUrl(appUrl, { allowPrivateNetwork });
 
@@ -458,10 +500,12 @@ export async function crawlApp(
     // guard ON: service workers are blocked — a registered worker's fetches
     // are not routed through the context, which would hand the page an
     // ungated network channel
-    const page = await browser.newPage({
+    const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
       ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
+      ...(opts.storageState ? { storageState: opts.storageState } : {}),
     });
+    const page = await context.newPage();
     const digests: PageDigest[] = [];
     const visited = new Set<string>();
 
@@ -495,14 +539,15 @@ export async function crawlApp(
       }
     }
 
-    // start page first, then source-derived routes (same-origin only), then
+    // start page first, then source-derived routes (same site only), then
     // link-discovered pages. Seeds ensure functional panels get crawled even
     // when no <a href> points to them.
-    const queue = [appUrl, ...(opts.seedUrls ?? []).filter((u) => {
-      try { return new URL(u).origin === origin; } catch { return false; }
-    })];
+    const queue = [appUrl, ...(opts.seedUrls ?? []).filter((u) => isSameSite(appUrl, u))];
+    let first = true;
     while (queue.length > 0 && digests.length < maxPages) {
       const target = queue.shift()!;
+      const isStart = first;
+      first = false;
       // Pathname + search: pathname-only collapses query-routed
       // pages (/search?q=a vs ?q=b) and SPA filter/detail views, so the crawler
       // would skip real money-moment pages. Hash is excluded (same document).
@@ -511,8 +556,9 @@ export async function crawlApp(
       if (visited.has(key)) continue;
       visited.add(key);
 
-      // a single bad page (download, timeout, redirect off-origin) must not
-      // kill the whole crawl — skip it and keep going
+      // a single bad page (a download, a timeout, a page that settles on
+      // another site) is skipped and the crawl keeps going; the start page is
+      // the exception (see below)
       try {
         await assertSafeNavigationUrl(target, { allowPrivateNetwork });
         // guard ON: a redirected navigation first lands on the gate's stub,
@@ -529,6 +575,21 @@ export async function crawlApp(
         await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: page.url() });
       } catch (err) {
         if (digests.length === 0 && queue.length === 0) throw err; // start page must load
+        continue;
+      }
+      // A page that settled on another site (an identity provider's sign-in
+      // page, most often) is not the app: filming it would type into a real
+      // login form. Same-site moves (http to https, apex to www) are fine.
+      if (!isSameSite(target, page.url())) {
+        if (isStart) {
+          throw new Error(
+            `the start page ${appUrl} settled on ${new URL(page.url()).origin}, another site (a sign-in page ` +
+              `on an identity provider looks like this). supercut films only the app's own pages. To film a ` +
+              `signed-in app, save a session with \`npx playwright codegen --save-storage=auth.json ${appUrl}\` ` +
+              `and pass --storage-state auth.json`,
+          );
+        }
+        console.error(`  skipped ${u.pathname}: it settled on ${new URL(page.url()).origin}, another site`);
         continue;
       }
       const digest = await digestPage(page, screenshots, allowDestructive);
@@ -553,8 +614,8 @@ export async function crawlApp(
       for (const item of digest.inventory) {
         if (!item.href) continue;
         try {
-          const linked = new URL(item.href, target);
-          if (linked.origin === origin && isCrawlable(linked) && !visited.has(linked.pathname + linked.search)) {
+          const linked = new URL(item.href, digest.url);
+          if (isSameSite(appUrl, linked.href) && isCrawlable(linked) && !visited.has(linked.pathname + linked.search)) {
             await assertSafeNavigationUrl(linked.href, { allowPrivateNetwork });
             queue.push(linked.href);
           }

@@ -18,7 +18,8 @@ import { record, type RecordResult } from "../capture/index.js";
 import { assessCaptureHealth, renderTake, resolveMusicTrack } from "../render/index.js";
 import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
-import { crawlApp, type PageDigest } from "./inventory.js";
+import { assessCrawl, crawlApp, type PageDigest } from "./inventory.js";
+import { assertStorageStateFile } from "../capture/session.js";
 import { BudgetedLlmClient, type LlmClient } from "./llm.js";
 import { deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
 import { AllScenesCutAfterTakeError, filmWithRetakes, MAX_RETAKES, type FilmResult } from "./retakes.js";
@@ -78,6 +79,11 @@ export interface GenerateOptions {
    *  bare-fetch probe misjudges (aggressive UA gating, unusual status codes at
    *  `/`); the ffmpeg check and all URL policy checks still run. */
   skipPreflight?: boolean;
+  /** path to a Playwright storage state file (cookies and localStorage of a
+   *  signed-in session), applied to the crawl and to every take. Only the
+   *  path is handed to the browser: the contents never reach a prompt, the
+   *  take directory, director-report.json or a log line. */
+  storageState?: string;
   /** asked once, after the action preview is printed and before the capture
    *  browser first touches the app; resolving false cancels the run (the
    *  recipe is still written). The CLI supplies it when a human can answer
@@ -278,10 +284,15 @@ export function shellQuote(arg: string): string {
  * user who asked for the guard and then runs exactly what the tool printed
  * must not silently lose it.
  */
-export function dryRunFollowUpCommand(outDir: string, opts: { blockPrivateNetwork?: boolean } = {}): string {
+export function dryRunFollowUpCommand(
+  outDir: string,
+  opts: { blockPrivateNetwork?: boolean; storageState?: string } = {},
+): string {
   return (
     `supercut record --recipe ${shellQuote(join(outDir, "recipe.json"))}` +
-    (opts.blockPrivateNetwork ? " --block-private-network" : "")
+    (opts.blockPrivateNetwork ? " --block-private-network" : "") +
+    // a signed-in recipe filmed without its session films the login wall
+    (opts.storageState ? ` --storage-state ${shellQuote(opts.storageState)}` : "")
   );
 }
 
@@ -326,6 +337,9 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   log("preflight…");
   // a bad --music must die here, not after the LLM crawl and capture spend
   resolveMusicTrack(opts.music);
+  // a bad session file must die here too, before the crawl and any LLM call
+  const storageState = opts.storageState ? assertStorageStateFile(opts.storageState) : undefined;
+  if (storageState) log("   session: --storage-state is applied to the crawl and the capture");
   if (opts.skipPreflight) log("   note: --skip-preflight — not probing the app URL before the crawl");
   await preflight(opts.url, opts.allowPrivateNetwork ?? true, {
     ...(opts.skipPreflight ? { skipReachability: true } : {}),
@@ -400,6 +414,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
       seedUrls,
       allowDestructive: opts.allowDestructive ?? false,
+      ...(storageState ? { storageState } : {}),
     });
     log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
     // LOUD, never silent: if we excluded destructive controls, say which — so a
@@ -412,6 +427,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     if (noSubmit > 0) {
       log(`   note: ${noSubmit} field(s) may be typed into but never submitted: their form submits through a destructive control.`);
     }
+    // nothing to film (an empty page, a login wall) is known now, before any
+    // LLM call: stop here rather than pay the analyze stage to find out
+    const unfilmable = assessCrawl(digests, { hadSession: !!storageState });
+    if (unfilmable) throw new Error(`generate: ${unfilmable}`);
 
     // analyze notes = source routes/summary + README/package.json. Both come
     // from the app's source (string literals, README, package.json) — exactly
@@ -455,6 +474,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
         `capture cancelled — nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
           `review or edit it, then film it with: ${dryRunFollowUpCommand(opts.outDir, {
             blockPrivateNetwork: !(opts.allowPrivateNetwork ?? true),
+            ...(opts.storageState ? { storageState: opts.storageState } : {}),
           })}`,
       );
     }
@@ -466,7 +486,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       const takeDir = join(opts.outDir, `take-${index}`);
       rmSync(takeDir, { recursive: true, force: true });
       log(`③ record: take ${index} (${filming.scenes.length} scenes)…`);
-      const result = await record({ recipe: filming, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
+      const result = await record({
+        recipe: filming, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true,
+        ...(storageState ? { storageState } : {}),
+      });
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
       if (result.aborted) {
         throw new Error(

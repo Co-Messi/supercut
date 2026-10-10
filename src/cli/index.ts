@@ -36,13 +36,14 @@ Key generate flags:
   --yes             film without the confirmation prompt (required when there is no terminal)
   --out <dir>       where the take and video go (default out/generate)
   --max-tokens <n>  hard LLM spend ceiling (default 300000, 0 or off disables)
+  --storage-state <file>    film signed in: a Playwright storage state (also on record)
   --block-private-network   refuse localhost and private addresses (for untrusted targets)
 
 generate needs an LLM key; record and render need none.
 Run \`supercut generate --help\` for every generate flag.`;
 
 const RECORD_USAGE =
-  "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]";
+  "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--storage-state <file>] [--block-private-network]";
 const RENDER_USAGE =
   "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
   "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
@@ -50,7 +51,7 @@ const RENDER_USAGE =
 const GENERATE_USAGE =
   "usage: supercut generate --url <running app URL> [--repo <path>] [--app <name>] [--out <dir>] " +
   "[--bg <stage>] [--music <bundled track|audio file|off>] [--seed <n>] [--model <id>] " +
-  "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] [--skip-preflight] " +
+  "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] [--skip-preflight] [--storage-state <file>] " +
   "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
 
 /** parseArgs with plain-language failures. Positionals are accepted by the
@@ -111,6 +112,7 @@ async function main(): Promise<number> {
           recipe: { type: "string" },
           out: { type: "string" },
           seed: { type: "string" },
+          "storage-state": { type: "string" },
           "block-private-network": { type: "boolean" },
           "allow-private-network": { type: "boolean" }, // deprecated no-op
           help: { type: "boolean", short: "h" },
@@ -154,7 +156,11 @@ async function main(): Promise<number> {
       const outDir = values.out ?? "out/take";
       console.log(`recording ${recipe.scenes.length} scene(s) from ${recipe.app_url} → ${outDir}`);
       const t0 = Date.now();
-      const res = await record({ recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"] }).catch(
+      const storageState = values["storage-state"] ? await storageStateOrUsage(values["storage-state"], RECORD_USAGE) : undefined;
+      const res = await record({
+        recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"],
+        ...(storageState ? { storageState } : {}),
+      }).catch(
         (err: unknown) => {
           throw describeRecordError(err);
         },
@@ -235,6 +241,9 @@ async function main(): Promise<number> {
           // skip the HTTP reachability probe (bare fetch, no browser UA), for
           // apps it misjudges; the ffmpeg + URL policy checks still run
           "skip-preflight": { type: "boolean" },
+          // a Playwright storage state file: the crawl and every take run
+          // signed in. Only its path is passed on.
+          "storage-state": { type: "string" },
           help: { type: "boolean", short: "h" },
           // private/localhost is ALLOWED BY DEFAULT: filming your own local
           // dev app is the #1 use case. --block-private-network opts into the
@@ -273,6 +282,9 @@ async function main(): Promise<number> {
         );
         return 1;
       }
+      const storageState = values["storage-state"]
+        ? await storageStateOrUsage(values["storage-state"], GENERATE_USAGE)
+        : undefined;
       const { loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
@@ -336,6 +348,7 @@ async function main(): Promise<number> {
         ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(values["dry-run"] ? { dryRun: true } : {}),
         ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
+        ...(storageState ? { storageState } : {}),
         // a human at a terminal gets the last word between the printed action
         // preview and the first real click; --yes proceeds without asking (a
         // non-TTY stdin without --yes was refused above)
@@ -347,6 +360,7 @@ async function main(): Promise<number> {
         // made under --block-private-network has to say so in the follow-up
         const followUp = dryRunFollowUpCommand(values.out ?? "out/generate", {
           blockPrivateNetwork: !!values["block-private-network"],
+          ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),
         });
         console.log(`\nsupercut: dry run complete. Review the recipe, then film it with:\n  ${followUp}`);
         return 0;
@@ -362,6 +376,17 @@ async function main(): Promise<number> {
     default:
       console.error(`unknown command "${command}"\n\n${HELP}`);
       return 1;
+  }
+}
+
+/** --storage-state: a readable Playwright storage state file, or a usage
+ *  error that names the problem without quoting the file */
+async function storageStateOrUsage(path: string, usage: string): Promise<string> {
+  const { assertStorageStateFile } = await import("../capture/session.js");
+  try {
+    return assertStorageStateFile(path);
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err), usage);
   }
 }
 

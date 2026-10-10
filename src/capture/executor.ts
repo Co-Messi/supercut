@@ -35,6 +35,7 @@ import { chromium, type CDPSession, type Page, type Response } from "playwright"
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { NavigationLog } from "./navigation.js";
+import { isSameSite } from "../security/site.js";
 import {
   GATED_REDIRECT_HEADER,
   installRequestGate,
@@ -212,6 +213,10 @@ export interface RecordOptions {
    *  URLs are policy-checked, the target hosts are DNS resolve-and-pinned,
    *  and every in-flight request is gated. */
   allowPrivateNetwork?: boolean;
+  /** path to a Playwright storage state file: the capture runs signed in.
+   *  Only the path is handed to the browser; the contents never reach the
+   *  take directory or a log line. */
+  storageState?: string;
 }
 
 export interface RecordResult {
@@ -243,11 +248,24 @@ function ceilToFrame(ms: number): number {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** a scene entry answered with an HTTP error is not the app: most often the
- *  app is not running at that URL, or another server holds the port */
-function entryPageError(url: string, response: Response | null): string | undefined {
+ *  app is not running at that URL, or another server holds the port. One that
+ *  settled on another site is not the app either: a sign-in page on an
+ *  identity provider, when a session is missing or has expired. */
+function entryPageError(url: string, response: Response | null, settled: string): string | undefined {
   const status = response?.status() ?? 0;
-  if (status < 400) return undefined;
-  return `entry page ${url} returned ${status}; is your app running there, and is something else using that port?`;
+  if (status >= 400) {
+    return `entry page ${url} returned ${status}; is your app running there, and is something else using that port?`;
+  }
+  if (!isSameSite(url, settled)) {
+    let where = settled;
+    try {
+      where = new URL(settled).origin;
+    } catch {
+      /* keep the raw URL */
+    }
+    return `entry page ${url} settled on ${where}, another site; a sign-in redirect looks like this (pass a fresh --storage-state)`;
+  }
+  return undefined;
 }
 
 /** same document URL (normalized; a differing fragment still counts as a
@@ -908,11 +926,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // guard ON: service workers are blocked — a registered worker's fetches
     // are not routed through the context, which would hand the page an
     // ungated network channel
-    page = await browser.newPage({
+    const context = await browser.newContext({
       viewport: VIEWPORT,
       deviceScaleFactor: DPR,
       ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
+      ...(opts.storageState ? { storageState: opts.storageState } : {}),
     });
+    page = await context.newPage();
     // guard ON: gate EVERY in-flight request (clicked links, Enter submits,
     // subresources) and every redirect hop of each — assertSafeNavigationUrl
     // only covers entry/goto URLs known from the recipe, but a click on an
@@ -1030,7 +1050,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
     // an error page is not worth filming: the opening scene fails and the
     // take ends before the screencast starts
-    const firstEntryError = entryPageError(firstScene.entry.url, firstResponse);
+    const firstEntryError = entryPageError(firstScene.entry.url, firstResponse, page.url());
     if (firstEntryError) failScene(firstScene.name, firstEntryError, true);
     else await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
@@ -1100,7 +1120,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             try {
               const response = await gotoReady(page, scene.entry.url);
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
-              const entryError = entryPageError(scene.entry.url, response);
+              const entryError = entryPageError(scene.entry.url, response, page.url());
               if (entryError) throw new Error(entryError);
               await sleep(SETTLE_MS);
               pageDirty = false;

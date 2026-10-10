@@ -112,7 +112,7 @@ export interface TypingPlan {
 const WORD_BREAK = /[\s.,@!?;:/\-_]/;
 const KEY_FLOOR_MS = 45;
 const KEY_MEAN_MAX_MS = 100;
-const KEY_MEAN_MIN_MS = 60;
+export const KEY_MEAN_MIN_MS = 60;
 const WORD_BREAK_FACTOR = 1.8;
 /** log-normal spread of inter-key intervals (σ of the underlying normal) */
 const KEY_SIGMA = 0.35;

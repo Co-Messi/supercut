@@ -48,6 +48,29 @@ const PAYOFF_DWELL_MS = 2_400;
 const ZOOM_OUT_SETTLE_MS = 1_700;
 /** below this an action can't even complete its cursor travel */
 export const MIN_ACTION_MS = 200;
+/*
+ * A type action takes as long as its typing, whatever its duration_ms says:
+ * the recorder overruns a short slot and the schedule shifts. These mirror the
+ * executor (shortest cursor travel 250ms, press settle 100ms, press hold 70ms)
+ * and cursor.ts typingPlan (up to 400ms before the first key, a mean gap
+ * between keys of at least 60ms, up to 350ms before Enter).
+ */
+/** the press that focuses the field, and the beat before the first key */
+export const MIN_TYPE_ACTION_MS = 250 + 100 + 70 + 400;
+/** the fastest mean gap between two keys */
+export const MIN_KEY_GAP_MS = 60;
+/** the beat before Enter, for a type with submit */
+export const ENTER_BEAT_MS = 350;
+/** typed text longer than this is not a launch-video beat */
+export const MAX_TYPED_TEXT = 500;
+
+const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** the least time a type action of `text` takes on video, its slot aside */
+export function minTypeActionMs(text: string, submit: boolean): number {
+  const keys = [...segmenter.segment(text)].length;
+  return MIN_TYPE_ACTION_MS + MIN_KEY_GAP_MS * Math.max(0, keys - 1) + (submit ? ENTER_BEAT_MS : 0);
+}
 
 /** recipes drive a real local browser — never allow file:/javascript:/etc. */
 const finite = z.number().finite();
@@ -65,7 +88,7 @@ export const action = z
     kind: z.enum(["goto", "click", "type", "scroll", "hover", "wait"]),
     selector: z.string().min(1).optional(),
     url: httpUrl.optional(),
-    text: z.string().optional(),
+    text: z.string().max(MAX_TYPED_TEXT).optional(),
     /** type only: press Enter after typing. Many query/search inputs reveal
      *  their payoff (results, a graph, a detail panel) only on submit — without
      *  this the robot types into a box and the product never actually runs. */
@@ -131,9 +154,15 @@ export class RecipeValidationError extends Error {
   }
 }
 
+/** an action's time on video: its slot, or for a type the typing it takes
+ *  when that is longer */
+function actionMs(a: Action): number {
+  return a.kind === "type" ? Math.max(a.duration_ms, minTypeActionMs(a.text ?? "", a.submit === true)) : a.duration_ms;
+}
+
 function sceneDuration(s: Scene): number {
-  const prelude = s.entry.prelude.reduce((sum, a) => sum + a.duration_ms, 0);
-  const actions = s.actions.reduce((sum, a) => sum + a.duration_ms, 0);
+  const prelude = s.entry.prelude.reduce((sum, a) => sum + actionMs(a), 0);
+  const actions = s.actions.reduce((sum, a) => sum + actionMs(a), 0);
   return prelude + actions + s.hold_ms;
 }
 
@@ -164,7 +193,7 @@ export function takeTailMs(r: Recipe): number {
       const dwell = payoff ? PAYOFF_DWELL_MS : BEAT_DWELL_MS;
       tail = Math.max(tail, dwell + ZOOM_OUT_SETTLE_MS - after);
     }
-    after += a.duration_ms;
+    after += actionMs(a);
   }
   return tail;
 }

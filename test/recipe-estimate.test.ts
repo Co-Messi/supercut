@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 import { PRE_ROLL_MS, SETTLE_MS } from "../src/capture/executor.js";
 import { FOCUS_DWELL_MS, SETTLE_TAIL_MS, TAIL_MS, ZOOM_DWELL_MS } from "../src/render/plan.js";
 import {
+  ENTER_BEAT_MS,
   estimatedTakeMs,
+  MIN_KEY_GAP_MS,
+  MIN_TYPE_ACTION_MS,
+  minTypeActionMs,
   parseRecipe,
   RELOAD_ALLOWANCE_MS,
   SCENE_CHANGE_MS,
@@ -90,5 +94,41 @@ describe("take overhead model", () => {
     const demo = parseRecipe(JSON.parse(readFileSync(join(import.meta.dirname, "..", "examples", "demo.recipe.json"), "utf8")));
     // measured: 11.83s rendered on localhost (reload about 400ms)
     expect(estimatedTakeMs(demo)).toBeGreaterThanOrEqual(11_833);
+  });
+});
+
+describe("typed text in the estimate", () => {
+  const type = (text: string, ms: number, submit = false): Step => ({
+    kind: "type", selector: "#q", text, duration_ms: ms, ...(submit ? { submit } : {}),
+  });
+
+  it("a type action counts at least as long as typing its text takes", () => {
+    const text = "x".repeat(101); // 100 gaps between keys
+    const floor = minTypeActionMs(text, false);
+    expect(floor).toBe(MIN_TYPE_ACTION_MS + 100 * MIN_KEY_GAP_MS);
+    expect(minTypeActionMs(text, true)).toBe(floor + ENTER_BEAT_MS);
+    // a 1s slot for 101 keys is not 1s of video
+    expect(totalBudgetMs(recipe([type(text, 1000)], 0))).toBe(floor);
+    // a slot longer than the typing keeps its own length
+    expect(totalBudgetMs(recipe([type("hi", 3000)], 0))).toBe(3000);
+  });
+
+  it("mirrors the recorder's fastest typing pace", async () => {
+    const { KEY_MEAN_MIN_MS } = await import("../src/capture/cursor.js");
+    expect(MIN_KEY_GAP_MS).toBe(KEY_MEAN_MIN_MS);
+  });
+
+  it("counts graphemes, not UTF-16 units: an emoji sequence is one key", () => {
+    const emoji = String.fromCodePoint(0x1f469, 0x200d, 0x1f4bb);
+    expect(minTypeActionMs(`${emoji}!`, false)).toBe(MIN_TYPE_ACTION_MS + MIN_KEY_GAP_MS);
+  });
+
+  it("refuses a recipe whose typing alone would run past 60 seconds", () => {
+    expect(() => recipe([type("y".repeat(480), 1000)], 0)).not.toThrow(); // under the cap
+    expect(() => recipe([type("y".repeat(480), 1000), type("z".repeat(480), 1000)], 0)).toThrow(/ceiling/);
+  });
+
+  it("caps typed text at 500 characters", () => {
+    expect(() => recipe([type("a".repeat(501), 30_000)], 0)).toThrow();
   });
 });

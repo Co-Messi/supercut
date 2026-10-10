@@ -90,6 +90,8 @@ export interface RenderReportInput {
 export interface RenderReport {
   status: "planned" | "rendered" | "failed";
   error?: string;
+  /** the generate run this render belongs to (director-report.json runId) */
+  runId?: string;
   take: string;
   output: string;
   summary: string;

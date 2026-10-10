@@ -65,6 +65,18 @@ describe("custom provider parameters", () => {
   });
 });
 
+describe("rate limits", () => {
+  it("waits as long as a 429's Retry-After asks before trying again", async () => {
+    const sent = install((_b, n) =>
+      n === 1 ? new Response("slow down", { status: 429, headers: { "retry-after": "1" } }) : ok("{}"),
+    );
+    const t0 = Date.now();
+    await expect(ask(client())).resolves.toBe("{}");
+    expect(sent).toHaveLength(2);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900); // retryBaseMs is 0: only Retry-After waits
+  });
+});
+
 describe("custom provider vision default", () => {
   it("is off unless SUPERCUT_VISION says the model takes images (a text-only local model would fail mid-run)", () => {
     const base = { SUPERCUT_PROVIDER: "custom", SUPERCUT_API_KEY: "k", SUPERCUT_MODEL: "m", SUPERCUT_LLM_BASE_URL: "https://llm.example.com/v1" };

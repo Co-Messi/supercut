@@ -126,6 +126,11 @@ function isPrivateIPv6(x: number[]): boolean {
     return isPrivateIPv4(hextetsToIPv4(g, hh));
   }
   if (a === 0x2002) return isPrivateIPv4(hextetsToIPv4(b, c)); // 6to4 (2002::/16)
+  // SIIT IPv4-translated (::ffff:0:a.b.c.d, ::ffff:0:0/96): judge the IPv4
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0xffff && f === 0) return isPrivateIPv4(hextetsToIPv4(g, hh));
+  // local-use NAT64 (64:ff9b:1::/48, RFC 8215) translates into a site's own
+  // network, so any address in it is private
+  if (a === 0x64 && b === 0xff9b && c === 1) return true;
   return false;
 }
 

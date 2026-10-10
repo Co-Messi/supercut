@@ -11,6 +11,7 @@
  * starts on a config that was doomed from the beginning.
  */
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -379,6 +380,18 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   const verdictLog: SceneVerdict[][] = [];
   /** QC holds and zooms applied to the rendered take (never re-filmed) */
   let renderAdjustments: TakeAdjustments = NO_ADJUSTMENTS;
+  /** ties director-report.json to the render-report.json of the same run */
+  const runId = randomUUID();
+  /** wall time per stage, ms (re-takes add to record and qc) */
+  const timings: Record<string, number> = {};
+  const timed = async <T>(stage: string, run: () => Promise<T>): Promise<T> => {
+    const t0 = Date.now();
+    try {
+      return await run();
+    } finally {
+      timings[stage] = (timings[stage] ?? 0) + (Date.now() - t0);
+    }
+  };
   let usageLogged = false;
   const logUsage = (): void => {
     if (usageLogged) return;
@@ -390,7 +403,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     writeFileSync(
       join(opts.outDir, "director-report.json"),
       JSON.stringify(
-        { analysis, recipe, retakes, takes: retakes + 1, verdictLog, renderAdjustments, llm: opts.llm.label, ...extra },
+        { runId, analysis, recipe, retakes, takes: retakes + 1, verdictLog, renderAdjustments, timings, llm: opts.llm.label, ...extra },
         null,
         2,
       ),
@@ -425,14 +438,14 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       `   LLM plan: ≤${maxPages} page(s) to crawl, vision ${vision ? "on" : "off"}, ` +
         `≤${callCeiling} LLM call(s), token budget ${budget > 0 ? budget : "off"} (--max-tokens / SUPERCUT_MAX_TOKENS)`,
     );
-    const digests: PageDigest[] = await crawlApp(opts.url, {
+    const digests: PageDigest[] = await timed("crawl", () => crawlApp(opts.url, {
       maxPages,
       screenshots: vision,
       allowPrivateNetwork,
       seedUrls,
       allowDestructive: opts.allowDestructive ?? false,
       ...(storageState ? { storageState } : {}),
-    });
+    }));
     log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
     // LOUD, never silent: if we excluded destructive controls, say which — so a
     // user whose hero action got filtered knows why and can opt back in.
@@ -459,13 +472,14 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
         .filter((s): s is string => Boolean(s))
         .map(redactForPrompt)
         .join("\n\n") || undefined;
-    analysis = await analyzeApp(llm, digests, notes);
+    analysis = await timed("analyze", () => analyzeApp(llm, digests, notes));
     log(`   product: ${analysis.product_summary.slice(0, 100)}`);
     for (const m of analysis.money_moments) log(`   moment: ${m.title}`);
 
     log("② script: writing recipe…");
     llm.stage = "script";
-    const written = await writeRecipe(llm, analysis, digests, opts.url);
+    const understood = analysis;
+    const written = await timed("script", () => writeRecipe(llm, understood, digests, opts.url));
     recipe = written.recipe;
     log(`   recipe valid after ${written.attempts} attempt(s): ${recipe.scenes.length} scenes`);
     if (written.warning) log(`   warning: ${written.warning}`);
@@ -504,10 +518,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       const takeDir = join(opts.outDir, `take-${index}`);
       rmSync(takeDir, { recursive: true, force: true });
       log(`③ record: take ${index} (${filming.scenes.length} scenes)…`);
-      const result = await record({
+      const result = await timed("record", () => record({
         recipe: filming, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork,
         ...(storageState ? { storageState } : {}),
-      });
+      }));
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
       if (result.aborted) {
         throw new Error(
@@ -556,7 +570,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
 
     let film: FilmResult;
     try {
-      film = await filmWithRetakes({ recipe, maxRetakes: MAX_RETAKES, recordTake, qc: qcTake, log, verdictLog });
+      film = await filmWithRetakes({
+        recipe, maxRetakes: MAX_RETAKES, recordTake, log, verdictLog,
+        qc: (result, takeDir) => timed("qc", () => qcTake(result, takeDir)),
+      });
     } catch (err) {
       if (!(err instanceof AllScenesCutAfterTakeError)) throw err;
       // Refusing to render an empty video is right; discarding a recorded,
@@ -599,14 +616,16 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
           formatSceneErrors(result.sceneErrors),
       );
     }
-    const renderRes = await renderTake({
+    const renderRes = await timed("render", () => renderTake({
       takeDir,
       outFile,
+      runId,
       ...(partial ? { allowPartial: true } : {}),
       ...(opts.background ? { background: opts.background } : {}),
       ...(music.spec ? { music: music.spec } : {}),
       ...(hasAdjustments(adjustments) ? { adjust: adjustments } : {}),
-    });
+    }));
+    writeArtifacts(); // the report gains the render's timing
     log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
     // a take a re-take replaced is hundreds of MB of frames no video uses:
     // once the video exists, only the rendered take is kept

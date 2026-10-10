@@ -277,6 +277,14 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(report.analysis.money_moments).toHaveLength(2);
     expect(report.recipe.music_track).toBe("daybreak");
     expect(llm.calls).toBe(3); // analyze + script + vision QC — no silent extra spend
+    // one id ties the director report to its render report, and each stage's
+    // wall time is on record
+    expect(report.runId).toMatch(/^[0-9a-f-]{36}$/);
+    const renderReport = JSON.parse(readFileSync(join(outDir, "render-report.json"), "utf8"));
+    expect(renderReport.runId).toBe(report.runId);
+    for (const stage of ["crawl", "analyze", "script", "record", "qc", "render"]) {
+      expect(report.timings[stage], stage).toBeGreaterThan(0);
+    }
   }, 300_000);
 
   it("a hold-only QC verdict is applied at render time: the app is filmed once, and consent states the bound", async () => {

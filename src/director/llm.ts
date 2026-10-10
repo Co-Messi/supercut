@@ -118,6 +118,20 @@ function providerSaid(body: string): string {
   return ` provider said: ${text.length > 200 ? `${text.slice(0, 200)}...` : text}`;
 }
 
+/** the longest Retry-After honoured: a provider asking for minutes is
+ *  better reported than waited out */
+const MAX_RETRY_AFTER_MS = 60_000;
+
+/** a Retry-After header (seconds, or an HTTP date) as a wait in ms, capped;
+ *  undefined when absent or unreadable */
+export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const value = header.trim();
+  const ms = /^\d+(\.\d+)?$/.test(value) ? Number(value) * 1000 : Date.parse(value) - now;
+  if (!Number.isFinite(ms)) return undefined;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, ms));
+}
+
 function isTimeoutOrAbort(err: unknown): boolean {
   const name = (err as { name?: string } | null)?.name;
   const causeName = (err as { cause?: { name?: string } } | null)?.cause?.name;
@@ -348,7 +362,11 @@ export class OpenAICompatibleClient implements LlmClient {
       // processed: charge the worst case. A 429 is a refusal before any work.
       if (res.status >= 500) charge(worstCase);
       lastErr = `${res.status}:${detail}`;
-      await backoff(attempt);
+      // a provider that says when to come back is believed (capped), so a
+      // rate limit is not hammered by the linear backoff
+      const wait = retryAfterMs(res.headers.get("retry-after"));
+      if (wait !== undefined) await new Promise((r) => setTimeout(r, wait));
+      else await backoff(attempt);
     }
     throw new Error(`LLM unavailable (${this.label}): ${lastErr}`);
   }

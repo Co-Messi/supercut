@@ -71,6 +71,8 @@ export interface RenderOptions {
   /** QC holds and zooms applied to the take before planning; the take on
    *  disk is not changed */
   adjust?: TakeAdjustments;
+  /** the generate run this render belongs to, written into render-report.json */
+  runId?: string;
 }
 
 export interface RenderResult {
@@ -462,6 +464,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     limitMs: MAX_BUDGET_MS,
     source: { frames: frameIndex.length, avgFps: health.avgSourceFps, failedScenes: log.failed_scenes ?? [] },
   });
+  if (opts.runId) report.runId = opts.runId;
   const writeReport = (patch: Partial<RenderReport>): void => {
     Object.assign(report, patch);
     try {

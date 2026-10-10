@@ -70,6 +70,10 @@ describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
     "http://[2002:c0a8:0101::]/", // 6to4 of 192.168.1.1
     "http://[::127.0.0.1]/", // IPv4-compatible loopback
     "http://[0:0:0:0:0:ffff:7f00:1]/", // fully expanded mapped loopback
+    "http://[::ffff:0:a9fe:a9fe]/", // SIIT IPv4-translated (::ffff:0:0/96) metadata
+    "http://[::ffff:0:7f00:1]/", // SIIT IPv4-translated loopback
+    "http://[64:ff9b:1::a9fe:a9fe]/", // local-use NAT64 prefix 64:ff9b:1::/48
+    "http://[64:ff9b:1:ffff::1]/",
   ];
   for (const url of blocked) {
     it(`blocks ${url}`, async () => {
@@ -82,6 +86,7 @@ describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
     "http://100.128.0.1/", // just above CGNAT
     "http://198.20.0.1/", // just above 198.18/15
     "http://[64:ff9b::808:808]/", // NAT64 of public 8.8.8.8
+    "http://[::ffff:0:808:808]/", // SIIT of public 8.8.8.8
     "http://[2002:808:808::1]/", // 6to4 of public 8.8.8.8
     "http://[2606:4700::1111]/", // ordinary global unicast
   ];

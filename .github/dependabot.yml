@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # runtime and dev dependencies; playwright is pinned exactly, so its bumps
+  # arrive here as PRs that run the whole CI suite (browser e2e included)
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  # the SHA-pinned actions in .github/workflows
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

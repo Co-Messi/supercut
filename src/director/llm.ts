@@ -7,6 +7,8 @@
  * inject a stub and the whole generate pipeline runs without any API key.
  */
 import { randomBytes } from "node:crypto";
+import { redactForPrompt } from "../security/redaction.js";
+import { terminalSafe } from "../security/terminal.js";
 
 export type ChatPart =
   | { type: "text"; text: string }
@@ -97,6 +99,25 @@ export function escalationCeiling(maxTokens: number): number {
  *  request, which no change of size can fix) */
 const OUTPUT_SIZE_COMPLAINT = /max[_ -]?(completion[_ -]?)?tokens|too (big|large|many|long)|exceed|maximum|context|limit/i;
 
+/** a 400 that refuses `max_tokens` itself (OpenAI's reasoning models) */
+const MAX_TOKENS_UNSUPPORTED =
+  /max_completion_tokens|unsupported parameter:?\s*['"`]?max_tokens|['"`]?max_tokens['"`]?\s+(?:is\s+)?not\s+supported/i;
+
+/** " provider said: …" from a JSON error body's message, shortened, with
+ *  secrets redacted and control characters escaped; "" when there is none */
+function providerSaid(body: string): string {
+  let message: unknown;
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown } | string; message?: unknown };
+    message = typeof parsed.error === "string" ? parsed.error : (parsed.error?.message ?? parsed.message);
+  } catch {
+    return "";
+  }
+  if (typeof message !== "string" || message.trim() === "") return "";
+  const text = terminalSafe(redactForPrompt(message.trim()));
+  return ` provider said: ${text.length > 200 ? `${text.slice(0, 200)}...` : text}`;
+}
+
 function isTimeoutOrAbort(err: unknown): boolean {
   const name = (err as { name?: string } | null)?.name;
   const causeName = (err as { cause?: { name?: string } } | null)?.cause?.name;
@@ -120,6 +141,12 @@ export class OpenAICompatibleClient implements LlmClient {
   private readonly baseUrl: string;
   private readonly vision: boolean;
   private readonly retryBaseMs: number;
+  /** the completion-size parameter this endpoint accepts: max_tokens, until
+   *  a model refuses it and asks for max_completion_tokens */
+  private tokenParam: "max_tokens" | "max_completion_tokens" = "max_tokens";
+  /** whether to send response_format for JSON calls, until the endpoint
+   *  refuses it */
+  private jsonMode = true;
   readonly label: string;
   /** best-effort token accounting: sum of provider-reported usage across calls.
    *  Stays undefined until the FIRST response that carries a usage block, so a
@@ -159,8 +186,8 @@ export class OpenAICompatibleClient implements LlmClient {
     let timeoutRetries = 0;
     const bodyFor = (max: number) => ({
       model: this.model,
-      max_tokens: max,
-      ...(opts.json ? { response_format: { type: "json_object" } } : {}),
+      [this.tokenParam]: max,
+      ...(opts.json && this.jsonMode ? { response_format: { type: "json_object" } } : {}),
       messages: [
         { role: "system", content: opts.system },
         { role: "user", content },
@@ -281,10 +308,26 @@ export class OpenAICompatibleClient implements LlmClient {
         continue;
       }
       // the raw provider response can echo prompt text or account metadata.
-      // It is read to classify the error, but only surfaced when
-      // SUPERCUT_VERBOSE is set; otherwise keep status + provider label.
-      const snippet = (await res.text()).slice(0, 300);
-      const detail = process.env.SUPERCUT_VERBOSE ? ` ${snippet}` : "";
+      // It is read to classify the error, and surfaced whole only when
+      // SUPERCUT_VERBOSE is set. The provider's own error message (the
+      // `error.message` field) is shown shortened and redacted, so a
+      // rejection says why without the raw body.
+      const full = await res.text();
+      const snippet = full.slice(0, 300);
+      const detail = process.env.SUPERCUT_VERBOSE ? ` ${snippet}` : providerSaid(full);
+      if (res.status === 400 && this.tokenParam === "max_tokens" && MAX_TOKENS_UNSUPPORTED.test(snippet)) {
+        // a reasoning model wants max_completion_tokens: ask again with it,
+        // and keep asking that way for the rest of the run
+        this.tokenParam = "max_completion_tokens";
+        lastErr = `400: max_tokens not supported, retrying with max_completion_tokens`;
+        continue;
+      }
+      if (res.status === 400 && opts.json && this.jsonMode && /response_format/i.test(snippet)) {
+        // the endpoint has no JSON mode: the prompt already asks for JSON only
+        this.jsonMode = false;
+        lastErr = `400: response_format not supported, retrying without it`;
+        continue;
+      }
       if (res.status === 400 && maxTokens > accepted && OUTPUT_SIZE_COMPLAINT.test(snippet)) {
         // the provider caps output below the escalated size: go back to the
         // largest size it accepted and stop escalating (retry, don't fail)

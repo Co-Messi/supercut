@@ -169,7 +169,10 @@ export function resolveProvider(
   if (!model) throw new Error("SUPERCUT_MODEL is required when SUPERCUT_PROVIDER=custom");
 
   const envVision = parseVision(env.SUPERCUT_VISION);
-  const vision = overrides.vision ?? envVision ?? (provider !== "deepseek");
+  // vision is on only where the default model takes images (OpenRouter's
+  // default); a custom endpoint is often a text-only local model, so it opts
+  // in with SUPERCUT_VISION=true instead of failing mid-run
+  const vision = overrides.vision ?? envVision ?? (provider === "openrouter");
   if (provider === "deepseek" && vision) {
     throw new Error("vision cannot be enabled for DeepSeek text-only models; use OpenRouter/custom vision model or SUPERCUT_VISION=false");
   }

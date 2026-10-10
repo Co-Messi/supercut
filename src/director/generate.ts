@@ -11,7 +11,7 @@
  * starts on a config that was doomed from the beginning.
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { record, type RecordResult } from "../capture/index.js";
@@ -305,15 +305,17 @@ export function dryRunFollowUpCommand(
   );
 }
 
-function repoNotes(repoPath: string): string | undefined {
+/** The repo's README.md or package.json, for the analyze prompt. Only a
+ *  regular file is read: a symlink (README.md pointing at ~/.aws/credentials
+ *  in a hostile repo) is skipped, as the source walk skips them. */
+export function repoNotes(repoPath: string): string | undefined {
   for (const f of ["README.md", "readme.md", "package.json"]) {
     const p = join(repoPath, f);
-    if (existsSync(p)) {
-      try {
-        return readFileSync(p, "utf8").slice(0, 4000);
-      } catch {
-        /* unreadable — next */
-      }
+    try {
+      if (!lstatSync(p).isFile()) continue;
+      return readFileSync(p, "utf8").slice(0, 4000);
+    } catch {
+      /* missing or unreadable: next */
     }
   }
   return undefined;

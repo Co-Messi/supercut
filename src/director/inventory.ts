@@ -466,20 +466,20 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
       if (!box) continue; // can't disambiguate a hidden duplicate — skip, don't guess
       // cap per base so one long table can't crowd out the rest of the page
       if ((siblingCount.get(base) ?? 0) >= MAX_SIBLINGS_PER_BASE) continue;
-      // Pick the closest nth-match; a strict ±2px test can miss
-      // on sub-pixel rendering and silently fall back to nth=1 = wrong element).
-      // Cap the accepted distance so we never inventory a wildly-off element.
-      const MAX_OFFSET_PX = 20;
-      let bestNth = -1;
-      let bestDist = Infinity;
-      for (let k = 1; k <= matches; k++) {
-        const b = await page.locator(`:nth-match(${selector}, ${k})`).boundingBox().catch(() => null);
-        if (!b) continue;
-        const d = Math.hypot(b.x - box.x, b.y - box.y);
-        if (d < bestDist) { bestDist = d; bestNth = k; }
-      }
-      if (bestNth < 0 || bestDist > MAX_OFFSET_PX) continue; // no confident match — skip
-      selector = `:nth-match(${selector}, ${bestNth})`;
+      // the element's own position among the selector's matches (document
+      // order, the order :nth-match counts in), found by identity in one round
+      // trip: probing each match's box cost one CDP call per match, thousands
+      // on a long table
+      const handle = await el.elementHandle().catch(() => null);
+      const nth = handle
+        ? await page
+            .locator(selector)
+            .evaluateAll((nodes, target) => (nodes as Element[]).indexOf(target as Element) + 1, handle)
+            .catch(() => 0)
+        : 0;
+      await handle?.dispose().catch(() => {});
+      if (nth < 1) continue; // not among the matches: skip rather than guess
+      selector = `:nth-match(${selector}, ${nth})`;
     }
 
     if (seen.has(selector)) continue;

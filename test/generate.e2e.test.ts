@@ -128,6 +128,19 @@ describe("inventory crawler on the fixture app", () => {
     expect(inv.some((i) => i.selector === "#card")).toBe(false);
   }, 60_000);
 
+  it("disambiguates rows of a 2,000-row table with one lookup each, not one probe per row", async () => {
+    const t0 = Date.now();
+    const digests = await crawlApp(`${app.url}/big`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const elapsed = Date.now() - t0;
+    const rows = digests[0]!.inventory.filter((i) => i.selector.includes('[data-testid="event-row"]'));
+    expect(rows.map((r) => r.selector)).toEqual(
+      [1, 2, 3, 4, 5, 6].map((k) => `:nth-match([data-testid="event-row"], ${k})`),
+    );
+    expect(rows.map((r) => r.text)).toEqual([1, 2, 3, 4, 5, 6].map((k) => `Event ${k}`));
+    // probing every match cost thousands of CDP round trips per row
+    expect(elapsed).toBeLessThan(8_000);
+  }, 120_000);
+
   it("crawls at the viewport the recorder films, so responsive controls are judged as filmed", async () => {
     const digests = await crawlApp(`${app.url}/wide`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     const inv = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));

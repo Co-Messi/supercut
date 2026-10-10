@@ -1,5 +1,7 @@
 # Spike Results — 2026-06-11
 
+> **Historical.** These are the pre-build experiments, kept as a record. Production does not follow their capture verdict: the recorder captures CDP screencast **JPEG q92** frames at 2x DPR, kept at about 60 fps by a repaint beacon, and writes each distinct frame once (see `src/capture/executor.ts`). PNG frames from older takes still render.
+
 Both pre-build experiments from the design doc (Next Steps step 2). Numbers
 measured on macOS arm64, Chrome/Chromium 148, Node 22.22.
 

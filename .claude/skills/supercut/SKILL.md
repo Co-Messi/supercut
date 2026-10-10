@@ -25,7 +25,7 @@ The pipeline is: you write `recipe.json`, then `supercut record` films it, then 
 npx @co-messi/supercut doctor
 ```
 
-If npm cannot find `@co-messi/supercut` (it is not published yet), use a source checkout instead: `git clone https://github.com/Co-Messi/supercut`, then `npm ci && npm run build` inside it, and run `node <checkout>/dist/cli/index.js` wherever these steps say `npx @co-messi/supercut`.
+`@co-messi/supercut` is on npm, so `npx` fetches it on first use. To run a source checkout instead (to try an unreleased fix): `git clone https://github.com/Co-Messi/supercut`, then `npm ci && npm run build` inside it, and run `node <checkout>/dist/cli/index.js` wherever these steps say `npx @co-messi/supercut`.
 
 It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright's Chromium. Fix whatever it reports, using the exact command it prints: the Chromium command runs supercut's own copy of Playwright (`node "<its path>/cli.js" install chromium`). Do not substitute `npx playwright install chromium`: inside an app that has its own Playwright it installs that app's browser version, which supercut cannot use.
 

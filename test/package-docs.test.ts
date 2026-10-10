@@ -15,6 +15,17 @@ describe("agent skill and plugin packaging", () => {
     for (const b of blocks) expect(() => parseRecipe(JSON.parse(b))).not.toThrow();
   });
 
+  it("the skill uses the published package, not a claim that it is unpublished", () => {
+    expect(skill).not.toMatch(/not published/i);
+    expect(skill).toMatch(/^npx @co-messi\/supercut doctor$/m);
+  });
+
+  it("the spike results say they are history, not the production capture path", () => {
+    const spike = read("spikes/RESULTS.md");
+    expect(spike.split("\n").slice(0, 8).join("\n")).toMatch(/historical/i);
+    expect(spike).toMatch(/JPEG q92/);
+  });
+
   it("the skill has frontmatter naming itself", () => {
     expect(skill).toMatch(/^---\nname: supercut\ndescription: .+\n---/);
   });

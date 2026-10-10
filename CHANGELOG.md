@@ -2,6 +2,61 @@
 
 All notable changes to this project are recorded here. The format follows Keep a Changelog.
 
+## Unreleased
+
+Fixes for the 2026-10-09 adversarial review.
+
+### Added
+
+- `--storage-state <file>` on `generate` and `record`: a saved Playwright session signs the crawl and every take in. Only the file's path reaches the browser; its contents never reach a prompt, the take, the reports or the logs. README has a "Filming a signed-in app" section.
+- `--allow-private-network` is a real option again: it lets a public target reach private addresses (see Behaviour changes).
+- `director-report.json` records a run id, the wall time of each stage, the number of takes and the QC adjustments applied at render time; `render-report.json` carries the same run id.
+- Dependabot updates for npm dependencies and GitHub Actions.
+
+### Changed
+
+- One destructive-control policy (`src/security/destructive.ts`) for `generate` and the agent skill, widened to money and irreversible verbs (Buy, Sell, Subscribe, Upgrade, Payment, Transfer, Send money, Order now, Checkout, Refund, Charge, Merge, Deploy, Publish, Approve, Restart, Discard, Clear all, Empty trash, Purge, Drop, Log out, Sign out, Leave team, Ban, Uninstall, Disconnect, Cancel order and more). View-only controls such as "Clear filters" and "Reset view" stay filmable.
+- QC re-takes happen only to drop a scene, at most once, so each action runs at most twice per run, and the confirmation question says so. Hold and zoom patches are applied to the recorded take at render time, without filming again.
+- The crawl runs at the recorder's 1920x1080 viewport, reads source routes from Next.js apps only, and takes source routes and discovered links in turn.
+- The token ceiling is checked before every attempt and charges the worst case for any failure after the request may have been sent (a reset connection, a 5xx). Prompt estimates count CJK and other non-ASCII characters as a token each, and the per-image estimate rises to what the provider actually bills.
+- The CLI's default output directory is `supercut-out/`.
+- `playwright` is pinned to 1.60.0, the version CI tests.
+- Releases publish through npm trusted publishing with provenance, only after the whole CI suite passes on the tagged commit. CI also runs on Node 24.
+
+### Fixed
+
+- A click hit-tests the press point right before pressing, re-aims once if the target moved, and fails the scene instead of pressing whatever covered it. The logged click is where the press landed.
+- `type` sends keys only to a focused text field that is the target, clears only its own input or textarea, and appends in a rich text editor instead of selecting the whole document.
+- A field whose form submits through a destructive control can be typed into but never submitted.
+- A table row with a nested Delete button is judged by its own label, so admin tables stay filmable.
+- A vision QC failure after capture renders the recorded take instead of ending the run; the QC prompt wraps scene names in the untrusted markers.
+- An unknown `--bg` fails at preflight, before any spend.
+- Typed text counts toward the 60 second estimate at the time typing takes, and is capped at 500 characters. Patched recipes are re-validated against the cap.
+- A crawl or a take whose page settles on another site (an identity provider's sign-in page) is refused; a crawl that found nothing to click or only a sign-in form stops before any LLM call.
+- `:nth-match` disambiguation looks an element up by identity in one call (a 2,000-row table crawled in 40.7s now takes 2.5s).
+- Custom endpoints that refuse `max_tokens` or `response_format` are asked again without them, and a rejection prints the provider's message.
+- Superseded takes are deleted after the video renders, and an interrupted render removes its temporary stream.
+- The tarball check is an allowlist and rejects `" 2"` sync-conflict copies.
+
+### Security
+
+- Selectors that would carry an email or a token into a prompt are left out of the inventory.
+- Action previews and every log line built from model or page text escape terminal control characters.
+- A `.env` read from the current directory that redirects the LLM endpoint or turns the token ceiling off prints a warning naming the file and the variable.
+- `--repo` notes never follow a symlinked README, and secret assignments with prefixed key names (`aws_secret_access_key`) are redacted.
+- The crawl never requests a link whose path reads as destructive (`/logout`).
+- The private-network policy also covers SIIT (`::ffff:0:0/96`) and local-use NAT64 (`64:ff9b:1::/48`) addresses.
+
+### Behaviour changes for existing users
+
+- A target that resolves to a public address now gets the private-network guard by default: its pages cannot reach localhost or private addresses, requests go through the guard (buffered, a 30 second limit for responses that never finish, service workers blocked). Pass `--allow-private-network` for the old behaviour. A localhost or private target is unchanged. The `record()` and `crawlApp()` library defaults now match the CLI: a private target is filmed without passing `allowPrivateNetwork`.
+- More labels are destructive, including Publish, Deploy, Merge and every Transfer; pass `--allow-destructive` to film them.
+- Vision is off by default for a custom provider; set `SUPERCUT_VISION=true` for a model that takes images.
+- Default output moved from `out/` to `supercut-out/`.
+- At most one QC re-take instead of three; a shorter hold suggested by QC is not applied.
+- `confirmCapture` (library) receives `{ maxPerformances }`.
+- Recipes with long typed text may now exceed the 60 second estimate and fail validation.
+
 ## 0.1.0 (2026-10-09)
 
 First public release of `@co-messi/supercut`.

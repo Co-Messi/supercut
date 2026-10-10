@@ -209,6 +209,41 @@ describe("scene entry", () => {
   }, 60_000);
 });
 
+describe("aiming", () => {
+  it("re-aims at a target that moved while the cursor travelled, and never presses what took its place", async () => {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([{ name: "moving", url: `${app.url}/moving`, actions: [click("#target", 1500)] }]),
+        outDir: outDir("moving"), seed: 4, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    expect(res.failedScenes).toEqual([]);
+    const pressed = logs.filter((l) => l.ev === "down").map((l) => l.id);
+    expect(pressed).toEqual(["target"]);
+    expect(logs.filter((l) => l.ev === "click").map((l) => l.id)).toEqual(["target"]);
+    // the logged click is where the press happened: the target's NEW place
+    const ev = res.eventLog.events.find((e) => e.type === "click");
+    expect(ev?.type === "click" && ev.selector).toBe("#target");
+    if (ev?.type !== "click") throw new Error("no click event");
+    expect(ev.point[1]).toBeGreaterThanOrEqual(ev.bbox[1]);
+    expect(ev.point[1]).toBeLessThanOrEqual(ev.bbox[1] + ev.bbox[3]);
+    expect(ev.bbox[1]).toBeGreaterThan(200); // pushed down by the 240px banner
+  }, 60_000);
+
+  it("fails the scene instead of pressing an overlay that covers the target, and logs no click", async () => {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([{ name: "covered", url: `${app.url}/covered`, actions: [click("#target", 1500)] }]),
+        outDir: outDir("covered"), seed: 4, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    expect(res.failedScenes).toEqual(["covered"]);
+    expect(res.sceneErrors["covered"]).toMatch(/did not land on "#target"/);
+    expect(logs.filter((l) => l.ev === "down" || l.ev === "click")).toEqual([]);
+    expect(res.eventLog.events.some((e) => e.type === "click")).toBe(false);
+  }, 60_000);
+});
+
 type Keys = { down: string[]; press: string[]; up: string[]; input: [string, string | null][] };
 
 async function typeInto(url: string, text: string) {

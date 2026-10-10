@@ -70,6 +70,8 @@ export const PRE_ROLL_MS = 1_000;
  *  end of the travel reads as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
+/** the short corrective move when the target moved during the main travel */
+const REAIM_TRAVEL_MS = 300;
 /** events.json `failed_scenes` bounds (event-log schema) */
 const MAX_FAILED_SCENES = 100;
 const MAX_FAILED_SCENE_NAME = 200;
@@ -524,6 +526,56 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     return { x: box.x, y: box.y, w: box.width, h: box.height };
   }
 
+  /**
+   * Hit-test the press point against the target, immediately before the
+   * press. The cursor travels for most of the action's slot, and a live page
+   * moves meanwhile (a re-sorted list, a toast, an overlay), so the box read
+   * before the travel is stale. Passes when the topmost element at (x, y),
+   * descending through open shadow roots, is the target or inside it in the
+   * composed tree. A target that is itself an iframe passes when the iframe is
+   * on top. On a miss it reports the target's current centre, so the caller
+   * can re-aim, and what is in the way, so a failure says why.
+   */
+  async function aimCheck(
+    selector: string,
+    x: number,
+    y: number,
+  ): Promise<{ ok: boolean; box: [number, number, number, number]; center: [number, number]; blocker: string }> {
+    return page
+      .locator(selector)
+      .first()
+      .evaluate(
+        (el, pt) => {
+          const deepHit = (px: number, py: number): Element | null => {
+            let hit = document.elementFromPoint(px, py);
+            while (hit?.shadowRoot) {
+              const inner = hit.shadowRoot.elementFromPoint(px, py);
+              if (!inner || inner === hit) break;
+              hit = inner;
+            }
+            return hit;
+          };
+          const lands = (hit: Element | null): boolean => {
+            for (let n: Node | null = hit; n; n = n.parentNode ?? (n as ShadowRoot).host ?? null) {
+              if (n === el) return true;
+            }
+            return false;
+          };
+          const r = el.getBoundingClientRect();
+          const hit = deepHit(pt.x, pt.y);
+          const name = (e: Element | null): string =>
+            e ? e.tagName.toLowerCase() + (e.id ? `#${e.id}` : "") : "nothing";
+          return {
+            ok: lands(hit),
+            box: [r.left, r.top, r.width, r.height] as [number, number, number, number],
+            center: [r.left + r.width / 2, r.top + r.height / 2] as [number, number],
+            blocker: name(hit),
+          };
+        },
+        { x, y },
+      );
+  }
+
   /** the focused element (through open shadow roots) is a text field or an
    *  editable region that already holds text */
   async function focusedFieldHasText(): Promise<boolean> {
@@ -644,13 +696,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "hover":
       case "type": {
         if (!a.selector) throw new Error(`${a.kind} action requires selector`);
-        const box = await targetBox(a.selector);
+        let box = await targetBox(a.selector);
         // targetBox burns unbounded wall time (waitFor + scroll + settle) —
         // rebase the action's timeline to observed NOW so cursor + events sit
         // where the footage actually shows the page reacting, not where the
         // schedule hoped it would.
         const startT = Math.max(scheduledT, observedNow());
-        const target = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+        let target = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
         const travelBudget = Math.max(250, a.duration_ms * 0.7);
         const points = cursorPath({
           from: { ...cursor }, to: target, targetWidth: box.w,
@@ -658,11 +710,42 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         });
         await moveCursor(points, startT);
         const armed = a.kind !== "hover" && !a.zoom ? await armMutationObserver() : false;
-        const pathEndT = startT + (points[points.length - 1]?.t ?? 0);
-        if (a.kind === "click" || a.kind === "type") await sleep(PRESS_SETTLE_MS);
+        let pathEndT = startT + (points[points.length - 1]?.t ?? 0);
+        if (a.kind === "click" || a.kind === "type") {
+          await sleep(PRESS_SETTLE_MS);
+          // the press goes where the target is NOW, or nowhere: a stale point
+          // can land on whatever moved into it (another row, a toast's button)
+          let aim = await aimCheck(a.selector, target.x, target.y);
+          if (!aim.ok) {
+            // re-aim once at the target's current place (scrolled back into
+            // view if the page moved it out)
+            const fresh = await targetBox(a.selector);
+            const reaimT = Math.max(observedNow(), pathEndT);
+            target = { x: fresh.x + fresh.w / 2, y: fresh.y + fresh.h / 2 };
+            const fix = cursorPath({
+              from: { ...cursor }, to: target, targetWidth: fresh.w, maxDurationMs: REAIM_TRAVEL_MS, rng,
+            });
+            await moveCursor(fix, reaimT);
+            pathEndT = reaimT + (fix[fix.length - 1]?.t ?? 0);
+            await sleep(PRESS_SETTLE_MS);
+            aim = await aimCheck(a.selector, target.x, target.y);
+            if (!aim.ok) {
+              throw new Error(
+                `the press did not land on "${a.selector}": ${aim.blocker} is at the press point ` +
+                  `(the page moved or covered the target), so nothing was pressed`,
+              );
+            }
+          }
+          // log the box that was actually pressed, not the one read before travel
+          box = { x: aim.box[0], y: aim.box[1], w: aim.box[2], h: aim.box[3] };
+        }
         const dispatchT = observedNow();
 
         if (a.kind === "click" || a.kind === "type") {
+          // the hold between press and release is a few frames; a layout
+          // change inside it can still move what the release lands on. The
+          // browser then fires `click` on the common ancestor, never on an
+          // unrelated element, so the window is narrow and accepted.
           await cdp.send("Input.dispatchMouseEvent", {
             type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1,
           });

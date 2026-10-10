@@ -44,4 +44,14 @@ describe("secret assignments with a prefixed key name", () => {
     }
     expect(redactForPrompt("the token bucket refills")).toBe("the token bucket refills");
   });
+
+  it("does not mistake a flag or a short value under such a name for a secret (URLs stay filmable)", async () => {
+    const { pageUrlHasSecret } = await import("../src/director/inventory.js");
+    for (const url of ["http://x/?password_reset=1", "http://x/list?pageToken=abc", "http://x/?show_secrets=0", "http://x/?token_type=bearer"]) {
+      expect(pageUrlHasSecret(url), url).toBe(false);
+    }
+    expect(pageUrlHasSecret("http://x/cb?access_token=abcdef1234567890")).toBe(true);
+    // a bare key name keeps the old rule: any value is redacted
+    expect(redactForPrompt("password: hunter")).not.toContain("hunter");
+  });
 });

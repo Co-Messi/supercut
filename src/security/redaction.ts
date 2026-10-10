@@ -24,11 +24,15 @@ const BEARER_TOKEN = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const OPENAI_STYLE_KEY = /\bsk-[A-Za-z0-9_-]{10,}\b/g;
 const LONG_HEX = /\b[a-f0-9]{32,}\b/gi;
+// a bare secret key name: any value is redacted
+const SECRET_ASSIGNMENT = /\b(api[_-]?key|token|password|secret|bearer)\s*[:=]\s*([^\s,;"']+)/gi;
 // the key name may carry a prefix or suffix (aws_secret_access_key,
 // DB_PASSWORD, github_token): `_` is a word character, so a bare \b before
-// "secret" never fires inside such a name
-const SECRET_ASSIGNMENT =
-  /\b([A-Za-z0-9_-]*?(?:api[_-]?key|access[_-]?key|token|password|passwd|secret|bearer)[A-Za-z0-9_-]*)\s*[:=]\s*([^\s,;"']+)/gi;
+// "secret" never fires inside such a name. Such a name is also often a flag
+// or a page cursor (password_reset=1, show_secrets=0, pageToken=abc), so the
+// value must look like a secret: 8 or more characters
+const PREFIXED_SECRET_ASSIGNMENT =
+  /\b([A-Za-z0-9_-]*?(?:api[_-]?key|access[_-]?key|token|password|passwd|secret|bearer)[A-Za-z0-9_-]*)\s*[:=]\s*([^\s,;"'&]{8,})/gi;
 
 export function redactForPrompt(text: string): string {
   return text
@@ -46,5 +50,6 @@ export function redactForPrompt(text: string): string {
     .replace(EMAIL, "[REDACTED_EMAIL]")
     .replace(OPENAI_STYLE_KEY, "[REDACTED_KEY]")
     .replace(LONG_HEX, "[REDACTED_TOKEN]")
+    .replace(PREFIXED_SECRET_ASSIGNMENT, (_m, key: string) => `${key}=[REDACTED]`)
     .replace(SECRET_ASSIGNMENT, (_m, key: string) => `${key}=[REDACTED]`);
 }

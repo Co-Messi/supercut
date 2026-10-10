@@ -19,8 +19,9 @@ jobs:
         run: |
           test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
       # a version already on npm (for example one published by hand) keeps its
-      # tag and release: the publish job is skipped rather than failing on it.
-      # A failed lookup counts as unpublished, so the publish runs and fails loudly.
+      # tag and release: CI and the publish job are skipped rather than failing
+      # on it. A failed lookup counts as unpublished, so the publish runs and
+      # fails loudly.
       - name: version already on npm
         id: npm
         run: |
@@ -33,26 +34,39 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
-  publish:
+  # the whole CI suite (typecheck and unit tests on every supported Node, the
+  # browser e2e suite, the packed-install smoke test) on the tagged commit
+  # itself: a tag on a commit that never passed CI cannot publish
+  ci:
     needs: check
     if: needs.check.outputs.published != 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: [check, ci]
+    if: needs.check.outputs.published != 'true'
     runs-on: ubuntu-latest
-    # least privilege: read the repo, and mint the OIDC token npm provenance needs
+    # a deployment environment, so required reviewers can be added to it in
+    # the repository settings without editing this file
+    environment: npm-publish
+    # npm trusted publishing (OIDC): no stored npm token. The id-token lets
+    # npm verify this workflow, and npm attaches provenance automatically.
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # no dependency cache in a release build
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
-          cache: npm
+          node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run build
       - run: npm run check:pack
-      # unit suite only: the browser e2e suite runs in CI on every push
-      - run: npx vitest run --exclude '**/*.e2e.test.ts'
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # trusted publishing needs npm CLI 11.5.1 or later and Node 22.14.0 or
+      # later (npm's documentation); the npm version is pinned here so the
+      # runner's bundled npm cannot fall below it
+      - run: npx --yes npm@11.6.2 publish --access public

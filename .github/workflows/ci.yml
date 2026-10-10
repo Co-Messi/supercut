@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # the release workflow calls this whole suite on the tagged commit and
+  # publishes only when every job passed
+  workflow_call:
 
 permissions:
   contents: read

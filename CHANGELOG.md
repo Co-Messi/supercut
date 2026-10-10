@@ -15,7 +15,7 @@ First public release of `@co-messi/supercut`.
 - Bundled backgrounds (seven wallpapers, four procedural palettes) and four original instrumental music tracks.
 - Provider setup for DeepSeek, OpenRouter and any OpenAI-compatible endpoint, with a hard per-run LLM token budget (300000 by default).
 - Coding agent integration with no API key: a Claude Code skill (`.claude/skills/supercut`) and a plugin manifest, so `/plugin marketplace add Co-Messi/supercut` then `/plugin install supercut@supercut` works.
-- `SECURITY.md`, `AGENTS.md`, a release workflow with npm provenance, and a packed-install smoke test in CI.
+- `SECURITY.md`, `AGENTS.md`, a tag-triggered release workflow, and a packed-install smoke test in CI. 0.1.0 itself was published by hand and carries no npm provenance attestation.
 - A "Film my app" issue template.
 
 ### Changed

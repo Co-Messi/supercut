@@ -66,9 +66,9 @@ describe("provider resolution", () => {
     expect(process.env.SUPERCUT_MODEL).toBe("original");
   });
 
-  it("custom provider refuses to fall back to a provider-scoped key (H3)", () => {
+  it("custom provider refuses to fall back to a provider-scoped key", () => {
     // a leftover DeepSeek key must never be sent as a bearer token to an
-    // arbitrary custom base URL — this used to resolve silently
+    // arbitrary custom base URL: the config must refuse, not resolve silently
     expect(() =>
       resolved({
         SUPERCUT_PROVIDER: "custom",
@@ -87,7 +87,7 @@ describe("provider resolution", () => {
     ).toThrow(/SUPERCUT_API_KEY is required/);
   });
 
-  describe("base-URL override never redirects a provider-scoped key (H-new-3)", () => {
+  describe("base-URL override never redirects a provider-scoped key", () => {
     const foreign = "https://gateway.example/v1";
 
     it("auto-detected deepseek refuses a foreign SUPERCUT_LLM_BASE_URL", () => {

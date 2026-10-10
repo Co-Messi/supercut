@@ -14,7 +14,7 @@ describe("typingPlan: human keystroke timing", () => {
     expect(typingPlan(text, 5000, makeRng(9))).toEqual(typingPlan(text, 5000, makeRng(9)));
   });
 
-  it("averages ~100ms per key with real variation — not a metronome", () => {
+  it("averages ~100ms per key with real variation, not a metronome", () => {
     const p = typingPlan(text, 60_000, makeRng(1));
     expect(p.keyDelays).toHaveLength([...text].length - 1);
     expect(mean(p.keyDelays)).toBeGreaterThan(85);

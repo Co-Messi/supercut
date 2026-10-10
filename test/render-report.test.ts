@@ -88,7 +88,7 @@ describe("render log lines", () => {
       bitrateLine(1, 2, 3),
       overLimitWarning(70_000, 60_000)!,
     ];
-    for (const s of strings) expect(s).not.toMatch(/[–—]/);
+    for (const s of strings) expect(s).not.toMatch(/[\u2013\u2014]/);
   });
 });
 

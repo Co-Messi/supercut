@@ -7,7 +7,7 @@ import type { EventLog } from "../src/schema/index.js";
 
 /**
  * Malformed take directories must be refused by renderTake BEFORE any
- * browser/encode work — these are the inputs a third-party recorder (or a
+ * browser/encode work, these are the inputs a third-party recorder (or a
  * hand-edit) is most likely to get wrong. All of these throw during the
  * fail-fast validation phase, so no browser is needed.
  */

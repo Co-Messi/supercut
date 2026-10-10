@@ -52,7 +52,7 @@ describe("analysis validation", () => {
     expect(() => validateAnalysis({ ...validAnalysis(), music_track: "institutional-01" }, digests)).toThrow();
     expect(() => validateAnalysis({ ...validAnalysis(), music_track: "off" }, digests)).toThrow();
     const missing = validAnalysis();
-    delete missing.music_track; // required — the director always ships a pick
+    delete missing.music_track; // required, the director always ships a pick
     expect(() => validateAnalysis(missing, digests)).toThrow();
   });
 
@@ -67,7 +67,7 @@ describe("analysis validation", () => {
     expect(coerceSelector("#totally-invented", valid)).toBe("#totally-invented");
   });
 
-  it("does NOT prefix-heal a real-selector remainder — a hallucinated sibling stays rejected", () => {
+  it("does NOT prefix-heal a real-selector remainder, a hallucinated sibling stays rejected", () => {
     const valid = new Set(["#cta"]);
     // #cta-danger / #cta2 start with the valid #cta but the tail is selector
     // continuation, not display annotation → returned as-is → the gate rejects them
@@ -87,7 +87,7 @@ describe("analysis validation", () => {
 });
 
 describe("relative page_url coercion (query-distinct pages)", () => {
-  // two crawled URLs sharing a pathname but different search — the crawler keys
+  // two crawled URLs sharing a pathname but different search, the crawler keys
   // pages on pathname+search, so these are two distinct digests
   const ambiguous: PageDigest[] = [
     { url: "http://127.0.0.1:9999/results?view=chart", title: "Chart", headings: ["Chart"],
@@ -111,7 +111,7 @@ describe("relative page_url coercion (query-distinct pages)", () => {
   }
 
   it("throws (never silently rewrites) when a bare relative path is ambiguous across query-distinct pages", () => {
-    // "/results" maps to BOTH crawled URLs — coercing would pick one at random
+    // "/results" maps to BOTH crawled URLs, coercing would pick one at random
     expect(() => validateAnalysis(analysisFor("/results"), ambiguous)).toThrow(/ambiguous/i);
   });
 
@@ -150,7 +150,7 @@ describe("coerceSelector never heals into a non-whitelisted selector", () => {
   it("never heals a descendant-combinator remainder into its ancestor", () => {
     const valid = new Set(["main"]);
     // these are DIFFERENT elements (a descendant), not "main" + a display
-    // annotation — the '='/'>'/class continuation breaks the annotation shape,
+    // annotation, the '='/'>'/class continuation breaks the annotation shape,
     // so they are returned as-is and the whitelist gate rejects them
     expect(coerceSelector("main [role=button]", valid)).toBe("main [role=button]");
     expect(coerceSelector("main > .row", valid)).toBe("main > .row");

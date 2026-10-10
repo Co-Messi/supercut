@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 
 /**
- * Fixture demo app — the app supercut films in tests and demos.
+ * Fixture demo app, the app supercut films in tests and demos.
  *
  * A fake SaaS ("Lumon Metrics") with two routes:
  *   /      landing: headline, CTA button, signup form
@@ -40,7 +40,7 @@ const LANDING = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon M
       <input id="email" type="email" placeholder="you@company.com" autocomplete="off">
       <button id="join">Join</button>
     </div>
-    <div id="joined">✓ You're in — check your inbox.</div>
+    <div id="joined">✓ You're in, check your inbox.</div>
   </main>
   <script>
     document.getElementById("cta").addEventListener("click", () => {
@@ -53,7 +53,7 @@ const LANDING = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon M
   </script>
 </body></html>`;
 
-const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Dashboard</title><style>
+const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Dashboard</title><style>
   :root { --ink:#16161a; --accent:#2563eb; --bg:#fafaf7 }
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
@@ -69,7 +69,7 @@ const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — 
   li:hover { border-color:var(--accent); transform:translateX(4px) }
   li .tag { color:var(--accent); font-weight:600; font-size:14px }
 </style></head><body>
-  <header>Lumon Metrics — Live Dashboard</header>
+  <header>Lumon Metrics, Live Dashboard</header>
   <div class="grid">
     <div class="card"><div class="label">Active users</div><div class="num" id="n1">0</div></div>
     <div class="card"><div class="label">Events / sec</div><div class="num" id="n2">0</div></div>
@@ -91,10 +91,10 @@ const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — 
 </body></html>`;
 
 /** third route: a query panel whose big result region is revealed only on
- *  click — exercises the changed-region (MutationObserver) focus fallback.
+ *  click, exercises the changed-region (MutationObserver) focus fallback.
  *  The click also fires a transient toast (bottom-right, auto-removed after
  *  400ms): a vanished overlay must never end up inside the framed result. */
-const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Query</title><style>
+const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Query</title><style>
   :root { --ink:#16161a; --accent:#2563eb; --bg:#fafaf7 }
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
@@ -123,19 +123,19 @@ const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
-/** fourth route: a DARK service-fleet dashboard shaped like real ops tools —
+/** fourth route: a DARK service-fleet dashboard shaped like real ops tools,
  *  six PASSIVE rows sharing one data-testid (each must survive as a distinct
  *  :nth-match entry), live-ticking latencies (text-based selectors self-
  *  invalidate), and destructive controls that must ALL be excluded: a <button>,
  *  an inline-onclick div, a bare <button>Delete-all</button>, a PASSIVE
- *  destructive-slug row (<li>delete-log-2024</li> — we can't prove it's inert,
+ *  destructive-slug row (<li>delete-log-2024</li>, we can't prove it's inert,
  *  so it's fail-safe excluded), and a framework-wired "danger-row" div whose
  *  click is bound via addEventListener with NO onclick attr and NO cursor/
- *  tabindex/role signal at all — excluded purely by its destructive label. The
- *  dark surface is painted on a #root wrapper while body/html stay transparent —
+ *  tabindex/role signal at all, excluded purely by its destructive label. The
+ *  dark surface is painted on a #root wrapper while body/html stay transparent,
  *  the React/Next shape a body-only theme probe misreads "light", so this
  *  exercises the largest-surface probe. */
-const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Fleet</title><style>
+const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Fleet</title><style>
   :root { --ink:#e8eaf2; --accent:#5b8cff; --surface:#0b0e14 }
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif }
@@ -182,9 +182,9 @@ const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
 
 /** fifth route: a LIGHT app with a full-viewport translucent modal backdrop
  *  (rgba(0,0,0,.55) over ≥60% of the screen). The backdrop out-covers the body
- *  but is NOT the page ground — the theme probe must skip non-opaque layers and
+ *  but is NOT the page ground, the theme probe must skip non-opaque layers and
  *  still report "light", not be fooled "dark" by the overlay. */
-const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Overlay</title><style>
+const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Overlay</title><style>
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif; background:#fafaf7; color:#16161a }
   main { max-width:880px; margin:80px auto; padding:0 32px }
@@ -200,11 +200,11 @@ const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon �
 </body></html>`;
 
 /** SSRF-probe page for the request-gate wiring tests: fires a fetch() and a
- *  WebSocket at attacker-chosen targets from the query string — exactly the
+ *  WebSocket at attacker-chosen targets from the query string, exactly the
  *  in-flight requests the guard must stop that no recipe URL check can see.
  *  `link` renders a clickable/crawlable <a id="hop"> to an attacker-chosen
  *  href (e.g. a same-origin /redirect that 302s somewhere private). */
-const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Probe</title></head><body>
+const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Probe</title></head><body>
   <h1 id="t">probe page</h1><div id="status">pending</div>
   <script>
     const qs = new URLSearchParams(location.search);
@@ -230,11 +230,11 @@ const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
-/** sixth route: an input that reports how it was operated — pointer settle
- *  before the press, press hold, keystroke times, Enter — to POST /keylog,
+/** sixth route: an input that reports how it was operated, pointer settle
+ *  before the press, press hold, keystroke times, Enter, to POST /keylog,
  *  so the capture stage's human-timing behaviour is testable end to end.
  *  Placed below the fold so reaching it needs a scroll-into-view. */
-const KEYS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Keys</title>
+const KEYS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Keys</title>
 <style>body{margin:0;font:16px sans-serif} .spacer{height:1700px}
 input{font-size:20px;padding:10px;width:420px;margin:40px}</style></head><body>
 <div class="spacer"></div>
@@ -255,12 +255,71 @@ input{font-size:20px;padding:10px;width:420px;margin:40px}</style></head><body>
   });
 </script></body></html>`;
 
+/** forms whose Enter submits through a destructive control (a destructive
+ *  default button, an outside `form=` button, a destructive action URL), next
+ *  to a harmless search form: the crawl must flag only the former */
+const FORMS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Forms</title>
+<style>body{font:16px sans-serif;padding:40px} input{font-size:18px;padding:10px;width:320px;margin:8px}
+button{font-size:16px;padding:10px 18px;margin:8px}</style></head><body>
+  <form><input id="ws-name" placeholder="Workspace name"><button type="submit">Delete workspace</button></form>
+  <form><input id="q" placeholder="Find a metric"><button type="submit">Search</button></form>
+  <form action="/workspace/delete"><input id="reason" placeholder="Tell us why"></form>
+  <form id="ext"><input id="amount" placeholder="Amount"></form>
+  <div><button form="ext" type="submit" id="outside">Transfer</button></div>
+</body></html>`;
+
+/** an admin table: every row carries its own Edit and Delete buttons. The
+ *  rows must stay filmable (judged by their own label), the Delete buttons
+ *  must not. A card whose centre IS its Delete button is not a safe row. */
+const CRUD = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Customers</title>
+<style>body{font:16px sans-serif;padding:40px} table{border-collapse:collapse;width:900px} td{padding:14px;border-bottom:1px solid #eee}
+#card{width:240px;height:120px;border:1px solid #ccc;display:flex;align-items:center;justify-content:center;margin-top:24px}</style></head><body>
+  <h1>Customers</h1>
+  <button id="reset-view">Reset view</button>
+  <table><tbody>
+    <tr id="row-acme"><td>Acme Corp</td><td>12 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
+    <tr id="row-globex"><td>Globex</td><td>40 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
+    <tr id="row-initech"><td>Initech</td><td>7 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
+  </tbody></table>
+  <div id="card" data-testid="danger-card"><button style="width:200px;height:90px">Delete</button></div>
+  <div style="height:2000px"></div>
+  <div id="far-card" data-testid="far-card" style="width:240px;height:120px;border:1px solid #ccc;display:flex;align-items:center;justify-content:center">
+    <span>Danger zone</span><button style="width:200px;height:90px">Delete workspace</button></div>
+</body></html>`;
+
+/** a responsive page: one control exists only at the filmed width (1920),
+ *  another only below 1400. The crawl must see the layout that is filmed. */
+const WIDE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Wide</title>
+<style>body{font:16px sans-serif;padding:40px} #wide-only{display:none} #narrow-only{display:inline-block}
+@media (min-width: 1600px) { #wide-only{display:inline-block} }
+@media (min-width: 1400px) { #narrow-only{display:none} }</style></head><body>
+  <h1>Responsive</h1>
+  <button id="wide-only">Open the side panel</button>
+  <button id="narrow-only">Open the menu</button>
+</body></html>`;
+
+/** a long table: `rows` rows (2,000 by default) share one data-testid */
+const BIG = (rows: number) => `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Big</title>
+<style>body{font:14px sans-serif;padding:20px} li{padding:4px}</style></head><body><h1>Events</h1><ul>
+${Array.from({ length: rows }, (_, i) => `<li data-testid="event-row">Event ${i + 1}</li>`).join("")}
+</ul></body></html>`;
+
+/** navigation links, some of which mutate on GET: the crawl must never
+ *  request those, whether the label or only the path gives them away */
+const NAV = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Nav</title></head><body>
+  <h1>Settings</h1>
+  <a href="/dash">Dashboard</a>
+  <a href="/logout">Log out</a>
+  <a href="/session/sign-out">Leave</a>
+  <a href="/history/clear-all">History</a>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
   /** bodies POSTed to /keylog by the /keys page, oldest first */
   keylogs: unknown[];
-  /** GET count per path (query stripped) — proves whether a page reloaded */
+  /** GET count per path (query stripped), proves whether a page reloaded */
   hits: Map<string, number>;
 }
 
@@ -296,6 +355,12 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/overlay") ? OVERLAY
       : req.url?.startsWith("/probe") ? PROBE
       : req.url?.startsWith("/keys") ? KEYS
+      : req.url?.startsWith("/forms") ? FORMS
+      : req.url?.startsWith("/crud") ? CRUD
+      : req.url?.startsWith("/wide") ? WIDE
+      : req.url?.startsWith("/big")
+        ? BIG(Math.min(5000, Number(new URL(req.url, "http://fixture.invalid").searchParams.get("rows") ?? 2000)))
+      : req.url?.startsWith("/nav") ? NAV
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);

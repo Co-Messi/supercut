@@ -70,6 +70,10 @@ describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
     "http://[2002:c0a8:0101::]/", // 6to4 of 192.168.1.1
     "http://[::127.0.0.1]/", // IPv4-compatible loopback
     "http://[0:0:0:0:0:ffff:7f00:1]/", // fully expanded mapped loopback
+    "http://[::ffff:0:a9fe:a9fe]/", // SIIT IPv4-translated (::ffff:0:0/96) metadata
+    "http://[::ffff:0:7f00:1]/", // SIIT IPv4-translated loopback
+    "http://[64:ff9b:1::a9fe:a9fe]/", // local-use NAT64 prefix 64:ff9b:1::/48
+    "http://[64:ff9b:1:ffff::1]/",
   ];
   for (const url of blocked) {
     it(`blocks ${url}`, async () => {
@@ -82,6 +86,7 @@ describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
     "http://100.128.0.1/", // just above CGNAT
     "http://198.20.0.1/", // just above 198.18/15
     "http://[64:ff9b::808:808]/", // NAT64 of public 8.8.8.8
+    "http://[::ffff:0:808:808]/", // SIIT of public 8.8.8.8
     "http://[2002:808:808::1]/", // 6to4 of public 8.8.8.8
     "http://[2606:4700::1111]/", // ordinary global unicast
   ];
@@ -93,7 +98,7 @@ describe("private ranges beyond the RFC1918 basics (roast Low)", () => {
 });
 
 describe("resolve-and-pin (DNS-rebinding defense)", () => {
-  it("returns undefined for IP-literal hosts — nothing to rebind", async () => {
+  it("returns undefined for IP-literal hosts, nothing to rebind", async () => {
     await expect(resolveAndPinHost("http://127.0.0.1:3000/", { allowPrivateNetwork: true })).resolves.toBeUndefined();
     await expect(resolveAndPinHost("http://[::1]:3000/", { allowPrivateNetwork: true })).resolves.toBeUndefined();
     // alt-encodings of an IP are still IP literals, not rebindable hostnames
@@ -133,7 +138,7 @@ describe("navigationRequestAllowed (in-flight route gate)", () => {
     expect(await navigationRequestAllowed("http://127.0.0.1:3000/", { allowPrivateNetwork: true })).toBe(true);
   });
 
-  it("never throws — malformed and non-http URLs are simply blocked", async () => {
+  it("never throws, malformed and non-http URLs are simply blocked", async () => {
     expect(await navigationRequestAllowed("not a url")).toBe(false);
     expect(await navigationRequestAllowed("file:///etc/passwd", { allowPrivateNetwork: true })).toBe(false);
   });
@@ -145,12 +150,12 @@ describe("urlResolvesPrivate (advisory hint)", () => {
     await expect(urlResolvesPrivate("http://[::1]/")).resolves.toBe(true);
   });
 
-  it("never throws — malformed input is simply not private", async () => {
+  it("never throws, malformed input is simply not private", async () => {
     await expect(urlResolvesPrivate("not a url")).resolves.toBe(false);
   });
 });
 
-describe("request gate — every request type, not just navigations (H4)", () => {
+describe("request gate, every request type, not just navigations", () => {
   it("blocks a subresource request to a private host while the guard is on", async () => {
     const gate = createRequestGate({ allowPrivateNetwork: false });
     // the SSRF classic: a crawled page fetch()es cloud metadata / loopback
@@ -190,7 +195,7 @@ describe("request gate — every request type, not just navigations (H4)", () =>
     expect(lookups).toEqual(["internal.corp", "cdn.example"]);
   });
 
-  it("an ALLOW verdict expires: a host that later resolves private is re-checked, not trusted for the run (H-new-2)", async () => {
+  it("an ALLOW verdict expires: a host that later resolves private is re-checked, not trusted for the run", async () => {
     let t = 0;
     let privateNow = false;
     const lookups: string[] = [];
@@ -232,7 +237,7 @@ describe("request gate — every request type, not just navigations (H4)", () =>
     expect(await gate.allows("http://flaky.example/x.js")).toBe(false);
   });
 
-  it("never caches a verdict derived from a failed lookup — the next request re-resolves", async () => {
+  it("never caches a verdict derived from a failed lookup, the next request re-resolves", async () => {
     // rebinding shape: NXDOMAIN at first check, then the name starts resolving
     // to a private address. The failure must deny AND be forgotten, so the
     // fresh lookup sees the private address instead of a frozen verdict.
@@ -242,7 +247,7 @@ describe("request gate — every request type, not just navigations (H4)", () =>
       isPrivateHost: async () => {
         calls++;
         if (calls === 1) throw new Error("getaddrinfo ENOTFOUND rebinder.example");
-        return true; // now resolves — and it is private
+        return true; // now resolves, and it is private
       },
     });
     expect(await gate.allows("http://rebinder.example/steal")).toBe(false); // unverifiable → deny
@@ -266,7 +271,7 @@ describe("request gate — every request type, not just navigations (H4)", () =>
   });
 });
 
-describe("WebSocket gate — upgrades bypass route interception", () => {
+describe("WebSocket gate, upgrades bypass route interception", () => {
   /** minimal fake of Playwright's routeWebSocket surface: capture the handler,
    *  then feed it fake WebSocketRoute objects and observe connect vs close */
   function fakeWsTarget() {

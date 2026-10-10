@@ -29,10 +29,25 @@ describe("library entry point", () => {
   });
 });
 
+describe("dependency pins", () => {
+  // capture depends on CDP screencast timing, routeWebSocket and route.fetch
+  // semantics, and each Playwright version needs its own browser download: a
+  // user must get the version CI tested, not whatever 1.x is newest
+  it("pins playwright to the exact version the lockfile tests", () => {
+    const deps = (pkg as { dependencies?: Record<string, string> }).dependencies ?? {};
+    expect(deps.playwright).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as {
+      packages: Record<string, { version?: string; dependencies?: Record<string, string> }>;
+    };
+    expect(lock.packages["node_modules/playwright"]?.version).toBe(deps.playwright);
+    expect(lock.packages[""]?.dependencies?.playwright).toBe(deps.playwright);
+  });
+});
+
 describe("publish guard", () => {
   // npm always packs README* whatever `files` says, so a stray README.md.bak
   // (or any other backup/secret swept into dist/) ships unless the pack is
-  // checked at publish time — CI's check runs on a clean checkout, not on the
+  // checked at publish time, CI's check runs on a clean checkout, not on the
   // laptop that actually runs `npm publish`
   it("prepublishOnly builds, then asserts the tarball's contents", () => {
     const pre = pkg.scripts?.prepublishOnly ?? "";

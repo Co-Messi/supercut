@@ -1,4 +1,6 @@
-# Spike Results — 2026-06-11
+# Spike Results, 2026-06-11
+
+> **Historical.** These are the pre-build experiments, kept as a record. Production does not follow their capture verdict: the recorder captures CDP screencast **JPEG q92** frames at 2x DPR, kept at about 60 fps by a repaint beacon, and writes each distinct frame once (see `src/capture/executor.ts`). PNG frames from older takes still render.
 
 Both pre-build experiments from the design doc (Next Steps step 2). Numbers
 measured on macOS arm64, Chrome/Chromium 148, Node 22.22.
@@ -11,10 +13,10 @@ Animated 1920×1080 page at 2x DPR (3840×2160 raw frames), 8s sample.
 |---|---|---|---|---|---|
 | CDP screencast JPEG q90 | 25.3 | 18.4 ms | 118 KB | 175 MB | ✗ too slow (JPEG encode throttles) |
 | **CDP screencast PNG** | **56.1** | **6.9 ms** | 197 KB | 648 MB | **✓ PRIMARY** |
-| beginFrame virtual-time | — | — | — | — | ✗ dead (below) |
+| beginFrame virtual-time |, |, |, |, | ✗ dead (below) |
 
 - **PNG screencast is the primary capture path.** 56 fps sustained at 4K,
-  lossless, sharp (sample frame verified: 11px text fully legible —
+  lossless, sharp (sample frame verified: 11px text fully legible,
   `out/capture-A-png-sample.png`). Conformed to the 60fps grid by
   nearest-frame hold per Event-Log Schema v0. Real-time: a 60s take costs
   60s wall-clock (within the ≤2 min capture budget). ~650MB intermediate is
@@ -38,18 +40,18 @@ through a spring-zoom transform into 1920×1080. Budget: 3,600 frames ≤ 6 min
 | Candidate | ms/frame | 60s take renders in | Verdict |
 |---|---|---|---|
 | Pure-JS CPU (Node, nearest-neighbor) | 88.3 | 5.3 min | ✗ technically passes, zero headroom at floor quality |
-| **Chromium-hosted (OffscreenCanvas + WebCodecs)** | **9.6** (incl. H.264 encode) | **0.6 min** | **✓ PRIMARY — 10x headroom** |
+| **Chromium-hosted (OffscreenCanvas + WebCodecs)** | **9.6** (incl. H.264 encode) | **0.6 min** | **✓ PRIMARY, 10x headroom** |
 
 - **Chromium-hosted compositor is the primary render runtime** (decision #6's
   spike candidate, confirmed). GPU `drawImage` compositing is effectively free;
   composite + `avc1.640028` (H.264 High) hardware/native encode sustains
-  ~104 fps output. wgpu-in-Node moot — eliminated without testing (native-deps
+  ~104 fps output. wgpu-in-Node moot, eliminated without testing (native-deps
   wall + Chromium already provides the GPU).
 - **H.264 High profile encode is natively supported** by `VideoEncoder` in
-  full headless Chromium on macOS — final MP4 may not even need an ffmpeg
+  full headless Chromium on macOS, final MP4 may not even need an ffmpeg
   transcode (mux via Mediabunny in-page or ffmpeg as muxer only).
 
-## Operational gotchas (cost an hour — don't rediscover)
+## Operational gotchas (cost an hour, don't rediscover)
 
 1. **WebCodecs requires a secure context.** `about:blank` and `data:` pages
    have `isSecureContext === false` → `VideoEncoder is not defined`. Serve the
@@ -57,7 +59,7 @@ through a spring-zoom transform into 1920×1080. Budget: 3,600 frames ≤ 6 min
 2. **Playwright's default headless shell has NO WebCodecs at all** (stripped
    build). Capture can use the shell (screencast is CDP-side), but the render
    stage must launch the full Chromium: `chromium.launch({ channel: "chromium" })`.
-3. **`tsx` cannot run `page.evaluate` callbacks with helpers** — esbuild
+3. **`tsx` cannot run `page.evaluate` callbacks with helpers**, esbuild
    injects `__name` which doesn't exist in-page (`__name is not defined`).
    Run spike/render code with `node --experimental-strip-types`, or keep
    evaluate bodies helper-free.
@@ -69,5 +71,5 @@ through a spring-zoom transform into 1920×1080. Budget: 3,600 frames ≤ 6 min
 - Render stage: full Chromium page on localhost http; decode captured
   footage in-page (WebCodecs `VideoDecoder`) → composite → `VideoEncoder`
   H.264 → mux. **No raw-frame transport between Node and the page.**
-  Budget confirmed: ~0.6 min/render — frees ~5 min of the 15-min pipeline
+  Budget confirmed: ~0.6 min/render, frees ~5 min of the 15-min pipeline
   budget for QC/retakes.

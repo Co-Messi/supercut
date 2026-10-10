@@ -2,6 +2,7 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { ZodError } from "zod";
 import { doctor } from "./doctor.js";
+import { terminalSafe } from "../security/terminal.js";
 import {
   CliError,
   describeArgsError,
@@ -32,17 +33,20 @@ Usage:
 Key generate flags:
   --url <url>       the running app to film (required)
   --repo <path>     the app's source, so the director films real routes
-  --dry-run         write recipe.json and stop before touching the app
+  --dry-run         crawl (page loads only), write recipe.json, stop before any click or typing
   --yes             film without the confirmation prompt (required when there is no terminal)
-  --out <dir>       where the take and video go (default out/generate)
-  --max-tokens <n>  hard LLM spend ceiling (default 300000, 0 or off disables)
-  --block-private-network   refuse localhost and private addresses (for untrusted targets)
+  --out <dir>       where the take and video go (default supercut-out/generate)
+  --max-tokens <n>  LLM token ceiling, checked before every call (default 300000, 0 or off disables)
+  --storage-state <file>    film signed in: a Playwright storage state (also on record)
+  --block-private-network   refuse localhost and private addresses, for any target
+  --allow-private-network   allow them even when the target is public (by default a
+                            public target cannot reach private addresses)
 
 generate needs an LLM key; record and render need none.
 Run \`supercut generate --help\` for every generate flag.`;
 
 const RECORD_USAGE =
-  "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--block-private-network]";
+  "usage: supercut record --recipe <recipe.json> [--out <dir>] [--seed <n>] [--storage-state <file>] [--block-private-network | --allow-private-network]";
 const RENDER_USAGE =
   "usage: supercut render --take <take dir from record> [--out <file.mp4>] " +
   "[--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper|<image path>] " +
@@ -50,8 +54,8 @@ const RENDER_USAGE =
 const GENERATE_USAGE =
   "usage: supercut generate --url <running app URL> [--repo <path>] [--app <name>] [--out <dir>] " +
   "[--bg <stage>] [--music <bundled track|audio file|off>] [--seed <n>] [--model <id>] " +
-  "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] [--skip-preflight] " +
-  "[--block-private-network] [--allow-destructive] [--no-vision] [--yes]";
+  "[--env-file <file>] [--max-tokens <n|off>] [--dry-run] [--skip-preflight] [--storage-state <file>] " +
+  "[--block-private-network | --allow-private-network] [--allow-destructive] [--no-vision] [--yes]";
 
 /** parseArgs with plain-language failures. Positionals are accepted by the
  *  parse and rejected here with the usage line, since node's own error for a
@@ -85,9 +89,21 @@ function parseBudget(raw: string, source: string, usage: string): number {
   return raw.toLowerCase() === "off" ? 0 : nonNegativeInt(raw, source, usage, ' or "off"');
 }
 
-const DEPRECATED_PRIVATE_NOTE =
-  "--allow-private-network is deprecated and ignored; private/localhost is allowed by default. " +
-  "Use --block-private-network to restrict.";
+/**
+ * The private-network posture from the two flags. Neither: the default, which
+ * allows a private or localhost target and its private requests, and guards
+ * a target that resolves public. --block-private-network: the strict guard
+ * for any target. --allow-private-network: no guard, even for a public
+ * target. Both at once is a contradiction and fails.
+ */
+function privateNetworkFlag(values: { "block-private-network"?: boolean; "allow-private-network"?: boolean }, usage: string): boolean | undefined {
+  if (values["block-private-network"] && values["allow-private-network"]) {
+    throw new CliError("--block-private-network and --allow-private-network contradict each other; pick one", usage);
+  }
+  if (values["block-private-network"]) return false;
+  if (values["allow-private-network"]) return true;
+  return undefined;
+}
 
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
@@ -111,8 +127,9 @@ async function main(): Promise<number> {
           recipe: { type: "string" },
           out: { type: "string" },
           seed: { type: "string" },
+          "storage-state": { type: "string" },
           "block-private-network": { type: "boolean" },
-          "allow-private-network": { type: "boolean" }, // deprecated no-op
+          "allow-private-network": { type: "boolean" },
           help: { type: "boolean", short: "h" },
         },
         RECORD_USAGE,
@@ -124,7 +141,7 @@ async function main(): Promise<number> {
       if (!values.recipe) throw new CliError("missing --recipe", RECORD_USAGE);
       // flags are validated before any file is read
       const seed = values.seed === undefined ? 1 : nonNegativeInt(values.seed, "--seed", RECORD_USAGE);
-      if (values["allow-private-network"]) console.error(DEPRECATED_PRIVATE_NOTE);
+      const allowPrivateNetwork = privateNetworkFlag(values, RECORD_USAGE);
 
       const { readFileSync } = await import("node:fs");
       const { parseRecipe } = await import("../schema/index.js");
@@ -151,19 +168,24 @@ async function main(): Promise<number> {
       }
 
       const { record } = await import("../capture/index.js");
-      const outDir = values.out ?? "out/take";
+      const outDir = values.out ?? "supercut-out/take";
       console.log(`recording ${recipe.scenes.length} scene(s) from ${recipe.app_url} → ${outDir}`);
       const t0 = Date.now();
-      const res = await record({ recipe, outDir, seed, allowPrivateNetwork: !values["block-private-network"] }).catch(
+      const storageState = values["storage-state"] ? await storageStateOrUsage(values["storage-state"], RECORD_USAGE) : undefined;
+      const res = await record({
+        recipe, outDir, seed,
+        ...(allowPrivateNetwork !== undefined ? { allowPrivateNetwork } : {}),
+        ...(storageState ? { storageState } : {}),
+      }).catch(
         (err: unknown) => {
           throw describeRecordError(err);
         },
       );
       console.log(
-        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames ` +
+        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s, ${res.frameCount} frames ` +
           `(avg ${res.avgSourceFps.toFixed(1)} fps source), ` +
           `${res.eventLog.events.length} events` +
-          (res.failedScenes.length ? `, FAILED scenes: ${res.failedScenes.join(", ")}` : ""),
+          (res.failedScenes.length ? `, FAILED scenes: ${terminalSafe(res.failedScenes.join(", "))}` : ""),
       );
       // the take is on disk either way; a failed scene still means the caller
       // must not treat this run as a success
@@ -196,7 +218,7 @@ async function main(): Promise<number> {
         );
       }
       const { renderTake } = await import("../render/index.js");
-      const outFile = values.out ?? "out/final.mp4";
+      const outFile = values.out ?? "supercut-out/final.mp4";
       console.log(`rendering take ${values.take} → ${outFile}`);
       const res = await renderTake({
         takeDir: values.take,
@@ -205,7 +227,7 @@ async function main(): Promise<number> {
         ...(values.music ? { music: values.music } : {}),
       });
       console.log(
-        `done in ${(res.wallMs / 1000).toFixed(1)}s — ${res.frames} frames, ` +
+        `done in ${(res.wallMs / 1000).toFixed(1)}s, ${res.frames} frames, ` +
           `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded` +
           (res.music ? `, music: ${res.music}` : "") +
           ` → ${res.outFile}\n${res.summary} (report: ${res.reportFile})`,
@@ -226,7 +248,7 @@ async function main(): Promise<number> {
           model: { type: "string" },
           "no-vision": { type: "boolean" },
           "env-file": { type: "string" },
-          // hard LLM spend ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
+          // LLM token ceiling for the whole run (SUPERCUT_MAX_TOKENS env);
           // 0 or "off" disables, default 300000
           "max-tokens": { type: "string" },
           // preview: analyze + script only; print every action (incl. typed
@@ -235,11 +257,14 @@ async function main(): Promise<number> {
           // skip the HTTP reachability probe (bare fetch, no browser UA), for
           // apps it misjudges; the ffmpeg + URL policy checks still run
           "skip-preflight": { type: "boolean" },
+          // a Playwright storage state file: the crawl and every take run
+          // signed in. Only its path is passed on.
+          "storage-state": { type: "string" },
           help: { type: "boolean", short: "h" },
-          // private/localhost is ALLOWED BY DEFAULT: filming your own local
-          // dev app is the #1 use case. --block-private-network opts into the
-          // SSRF guard (for untrusted/public targets). --allow-private-network
-          // is kept as a deprecated no-op for back-compat.
+          // private network posture (see privateNetworkFlag): by default a
+          // private target is allowed and a public one is guarded;
+          // --block-private-network guards any target, --allow-private-network
+          // guards none
           "block-private-network": { type: "boolean" },
           "allow-private-network": { type: "boolean" },
           // fail-safe OFF: destructive controls (Delete, Pay, ...) are excluded
@@ -261,7 +286,7 @@ async function main(): Promise<number> {
         values["max-tokens"] !== undefined && values["max-tokens"].trim() !== ""
           ? parseBudget(values["max-tokens"], "--max-tokens", GENERATE_USAGE)
           : undefined;
-      if (values["allow-private-network"]) console.error(DEPRECATED_PRIVATE_NOTE);
+      const allowPrivateNetwork = privateNetworkFlag(values, GENERATE_USAGE);
       // The action preview only protects anyone if a human can stop it. With
       // no terminal to ask on (CI, a coding agent, piped stdin) do not quietly
       // film a model-written recipe: refuse before any crawl or LLM spend
@@ -273,7 +298,10 @@ async function main(): Promise<number> {
         );
         return 1;
       }
-      const { loadDotEnv, resolveProvider } = await import("../director/config.js");
+      const storageState = values["storage-state"]
+        ? await storageStateOrUsage(values["storage-state"], GENERATE_USAGE)
+        : undefined;
+      const { dotEnvWarnings, loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
       // a missing .env is fine (reason "not found"), but a file that EXISTED
@@ -284,6 +312,11 @@ async function main(): Promise<number> {
         if (process.env.SUPERCUT_VERBOSE) console.error(`env: ${envLoad.path} ${envLoad.reason}`);
       } else if (envLoad.reason) {
         console.error(`env: failed to parse ${envLoad.path}: ${envLoad.reason}`);
+      }
+      // a .env nobody named can redirect where the app's content goes, or
+      // lift the spend ceiling: say so loudly, every time (even with --yes)
+      for (const line of dotEnvWarnings(envLoad.path, envLoad.applied ?? [], process.env, { explicit: !!values["env-file"] })) {
+        console.error(terminalSafe(line));
       }
       // flag wins over env; 0 or "off" disables the cap (generate defaults to
       // 300000). An empty value is treated as unset: Number("") is 0, which
@@ -321,7 +354,7 @@ async function main(): Promise<number> {
       const res = await generate({
         llm: provider.client,
         url: values.url,
-        outDir: values.out ?? "out/generate",
+        outDir: values.out ?? "supercut-out/generate",
         // --no-vision forces off; otherwise follow the provider's capability
         vision: values["no-vision"] ? false : provider.vision,
         ...(values.repo ? { repoPath: values.repo } : {}),
@@ -329,13 +362,14 @@ async function main(): Promise<number> {
         ...(values.bg ? { background: values.bg } : {}),
         ...(values.music ? { music: values.music } : {}),
         ...(seed !== undefined ? { seed } : {}),
-        // default ALLOW; only --block-private-network engages the SSRF guard
-        allowPrivateNetwork: !values["block-private-network"],
+        // unset: private targets allowed, public targets guarded
+        ...(allowPrivateNetwork !== undefined ? { allowPrivateNetwork } : {}),
         // default OFF; --allow-destructive opts into filming destructive controls
         allowDestructive: !!values["allow-destructive"],
         ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(values["dry-run"] ? { dryRun: true } : {}),
         ...(values["skip-preflight"] ? { skipPreflight: true } : {}),
+        ...(storageState ? { storageState } : {}),
         // a human at a terminal gets the last word between the printed action
         // preview and the first real click; --yes proceeds without asking (a
         // non-TTY stdin without --yes was refused above)
@@ -343,10 +377,11 @@ async function main(): Promise<number> {
       });
       if (values["dry-run"]) {
         // the suggested command must preserve the security posture of THIS
-        // run: record defaults to allowing private networks, so a dry run
-        // made under --block-private-network has to say so in the follow-up
-        const followUp = dryRunFollowUpCommand(values.out ?? "out/generate", {
-          blockPrivateNetwork: !!values["block-private-network"],
+        // run: an explicit network flag and the session carry over
+        const followUp = dryRunFollowUpCommand(values.out ?? "supercut-out/generate", {
+          blockPrivateNetwork: allowPrivateNetwork === false,
+          allowPrivateNetwork: allowPrivateNetwork === true,
+          ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),
         });
         console.log(`\nsupercut: dry run complete. Review the recipe, then film it with:\n  ${followUp}`);
         return 0;
@@ -365,12 +400,24 @@ async function main(): Promise<number> {
   }
 }
 
+/** --storage-state: a readable Playwright storage state file, or a usage
+ *  error that names the problem without quoting the file */
+async function storageStateOrUsage(path: string, usage: string): Promise<string> {
+  const { assertStorageStateFile } = await import("../capture/session.js");
+  try {
+    return assertStorageStateFile(path);
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err), usage);
+  }
+}
+
 /** y/N prompt on stderr (stdout stays clean for piping) */
-async function confirmOnTty(): Promise<boolean> {
+async function confirmOnTty(info: { maxPerformances: number }): Promise<boolean> {
   const { createInterface } = await import("node:readline/promises");
+  const { captureConsentPrompt } = await import("../director/retakes.js");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const answer = await rl.question("Film this recipe against the live app now? [y/N] ");
+    const answer = await rl.question(captureConsentPrompt(info.maxPerformances));
     return /^y(es)?$/i.test(answer.trim());
   } finally {
     rl.close();
@@ -385,11 +432,14 @@ main().then(
     process.exitCode = code;
   },
   (err) => {
+    // an error can quote a scene name or page text: escape control
+    // characters, keeping the message's own line breaks
+    const safe = (s: string) => s.split("\n").map(terminalSafe).join("\n");
     if (err instanceof CliError) {
-      console.error(`supercut: ${err.message}`);
+      console.error(safe(`supercut: ${err.message}`));
       if (err.usage) console.error(err.usage);
     } else {
-      console.error(describeError(err));
+      console.error(safe(describeError(err)));
     }
     process.exitCode = 1;
   },

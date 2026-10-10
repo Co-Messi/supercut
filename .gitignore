@@ -22,3 +22,4 @@ examples/demo-app/.next/
 # launch working dir + scratch demo app (not part of the package)
 demos/
 examples/pulse-app/
+supercut-out/

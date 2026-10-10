@@ -77,7 +77,7 @@ function structuralTimeline(events: EventLog["events"]): string {
   );
 }
 
-/** 1s 440Hz mono 16-bit PCM WAV, written by hand — no codec availability
+/** 1s 440Hz mono 16-bit PCM WAV, written by hand, no codec availability
  *  guesswork (ffmpeg builds may lack lavfi/libmp3lame; all accept WAV input) */
 function writeToneWav(path: string): void {
   const sr = 44100;
@@ -126,7 +126,7 @@ describe("record E2E on fixture app", () => {
   it("render fails fast on an in-page FATAL (missing frames) instead of waiting out the timeout", async () => {
     // a take whose index points at frame files that don't exist: the host page
     // dies on the first fetch, and the crash/console hooks must surface it in
-    // seconds — the raw temp stream must also be cleaned up on that path
+    // seconds, the raw temp stream must also be cleaned up on that path
     const takeDir = mkdtempSync(join(tmpdir(), "supercut-fatal-"));
     dirs.push(takeDir);
     writeFileSync(
@@ -160,7 +160,7 @@ describe("record E2E on fixture app", () => {
     // a tiny but VALID take: two real 1x1 PNGs, short timeline (below the
     // health gate's judgeable floor). The encode succeeds; the mux is handed a
     // "music" file that exists but is not audio, so ffmpeg exits non-zero at
-    // the very last step — that must reject, not hang or succeed silently.
+    // the very last step, that must reject, not hang or succeed silently.
     const takeDir = mkdtempSync(join(tmpdir(), "supercut-badmux-"));
     dirs.push(takeDir);
     const png = Buffer.from(
@@ -208,17 +208,14 @@ describe("record E2E on fixture app", () => {
     ).rejects.toThrow(/private network/i);
   }, 30_000);
 
-  it("record() fails closed when allowPrivateNetwork is omitted (library default)", async () => {
-    // the CLI and generate() both pass the value explicitly; the default only
-    // ever reaches external embedders, and for them it must be the guard ON —
-    // matching crawlApp(), which has always defaulted closed
+  it("record() with allowPrivateNetwork unset films a local target: the default the CLI, generate() and crawlApp() share", async () => {
+    // a private or localhost target is the user's own app; only a target that
+    // resolves public gets the guard by default (request-gate.e2e covers it)
     const out = mkdtempSync(join(tmpdir(), "supercut-default-"));
     dirs.push(out);
-    const refusal = record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
-    await expect(refusal).rejects.toThrow(/private network/i);
-    // the refusal names the option a library caller sets to film a local app
-    await expect(refusal).rejects.toThrow(/allowPrivateNetwork: true/);
-  }, 30_000);
+    const res = await record({ recipe: demoRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
+    expect(res.failedScenes).toEqual([]);
+  }, 60_000);
 
   it("produces valid events.json + frames, twice, with identical scheduled timelines", async () => {
     const recipe = demoRecipe(app.url);
@@ -274,7 +271,7 @@ describe("record E2E on fixture app", () => {
     expect(hoverEvent.t - (firstNewFrame?.t_source ?? scene2T)).toBeGreaterThanOrEqual(1000);
 
     // capture fluency: the repaint beacon must defeat change-driven screencast
-    // starvation — sustained frame flow, and no stall outside the one deliberate
+    // starvation, sustained frame flow, and no stall outside the one deliberate
     // frame-suppression window around the scene-2 navigation. Bounds leave
     // headroom for machine-load jitter (a starved capture runs 1.8-19 fps avg,
     // p95 gap 430ms, max 4.1s). The fps floor is 30, not ~60: CI runners composite via
@@ -299,7 +296,7 @@ describe("record E2E on fixture app", () => {
 
     // reproducibility contract: same recipe + seed → identical structure and
     // geometry. Since the clock-unification change, event `t` rides the OBSERVED
-    // wall clock, so exact timestamps are deliberately NOT reproducible — only
+    // wall clock, so exact timestamps are deliberately NOT reproducible, only
     // structure/geometry is (asserted here as the hard invariant).
     const e1 = loadEvents(join(out1, "events.json"));
     const e2 = loadEvents(join(out2, "events.json"));
@@ -527,7 +524,7 @@ describe("record E2E on fixture app", () => {
     expect(log.enter - log.keys[log.keys.length - 1]!).toBeGreaterThanOrEqual(200);
   }, 120_000);
 
-  it("logs a navigation event when a click changes the page — and none for scene-entry gotos", async () => {
+  it("logs a navigation event when a click changes the page, and none for scene-entry gotos", async () => {
     const recipe = parseRecipe({
       version: 0,
       app_url: app.url,

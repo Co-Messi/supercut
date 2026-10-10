@@ -1,5 +1,5 @@
 /**
- * Capture executor — stage 3. Pure code, zero AI.
+ * Capture executor, stage 3. Pure code, zero AI.
  *
  *   recipe ──▶ ┌─────────────────────────────────────────────┐
  *              │ for each scene:                              │
@@ -14,7 +14,7 @@
  *
  * A take is ALWAYS a whole-run recording (no per-scene stitching).
  * Timestamp canon: the schedule clock still paces slots and budget, but event
- * and cursor `t` are stamped on the OBSERVED clock at actual dispatch time —
+ * and cursor `t` are stamped on the OBSERVED clock at actual dispatch time,
  * anchored to the first screencast frame's CDP timestamp, i.e. the SAME
  * timeline as frame `t_source`. When reality overruns a slot, the remainder of
  * the schedule shifts by whole frames and the shifted times are canonical
@@ -35,6 +35,9 @@ import { chromium, type CDPSession, type Page, type Response } from "playwright"
 import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/index.js";
 import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { NavigationLog } from "./navigation.js";
+import { isSameSite } from "../security/site.js";
+import { CAPTURE_VIEWPORT } from "./viewport.js";
+import { resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 import {
   GATED_REDIRECT_HEADER,
   installRequestGate,
@@ -49,7 +52,7 @@ import {
   type RequestGate,
 } from "../security/url-policy.js";
 
-const VIEWPORT = { width: 1920, height: 1080 };
+const VIEWPORT = CAPTURE_VIEWPORT;
 const DPR = 2;
 const FPS = 60;
 const FRAME_MS = 1000 / FPS;
@@ -58,7 +61,7 @@ const ACTION_TIMEOUT_MS = 10_000;
  *  renderer's downsample while encoding fast enough for a 60fps source */
 const JPEG_QUALITY = 92;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
-/** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
+/** `load` ≠ app ready (hydration, fonts, late paints), every navigation gets
  *  a settle pause before the schedule continues */
 export const SETTLE_MS = 400;
 /** every page opens at rest for at least this long before its first action:
@@ -66,10 +69,12 @@ export const SETTLE_MS = 400;
  *  has time to arrive BEFORE the first click instead of chasing it */
 export const PRE_ROLL_MS = 1_000;
 /** the pointer comes to rest on a target before pressing, and a press is
- *  held like a finger does — a zero-length press/release pair right at the
+ *  held like a finger does, a zero-length press/release pair right at the
  *  end of the travel reads as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
+/** the short corrective move when the target moved during the main travel */
+const REAIM_TRAVEL_MS = 300;
 /** events.json `failed_scenes` bounds (event-log schema) */
 const MAX_FAILED_SCENES = 100;
 const MAX_FAILED_SCENE_NAME = 200;
@@ -170,7 +175,7 @@ const MUTATION_OBSERVER_SCRIPT = `(() => {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       const consider = (el, churnOnly) => {
         if (!el.isConnected) return;
-        // visibility is evaluated NOW, at collection end — a transient overlay
+        // visibility is evaluated NOW, at collection end, a transient overlay
         // (toast/popup already removed or mid fade-out, including via an
         // ancestor's opacity/display) must never become the framed result
         if (typeof el.checkVisibility === "function" &&
@@ -201,15 +206,16 @@ export interface RecordOptions {
   seed?: number;
   /** Skip screencast (faster scheduling-only tests). */
   captureFrames?: boolean;
-  /** Allow localhost/RFC1918/link-local navigation. Defaults to FALSE: the
-   *  library fails closed and callers opt in. Every caller in this repo
-   *  (generate(), the CLI) passes the value explicitly — the CLI allows by
-   *  default and --block-private-network opts the guard in — so the default
-   *  exists only for external embedders, and for them the safe direction is
-   *  closed (matching crawlApp()'s default). With the guard on, the recipe's
-   *  URLs are policy-checked, the target hosts are DNS resolve-and-pinned,
-   *  and every in-flight request is gated. */
+  /** Private-network posture. true allows everything; false engages the
+   *  guard (recipe URLs policy-checked, hosts DNS resolve-and-pinned, every
+   *  in-flight request gated). Unset, the same default as generate() and
+   *  crawlApp(): no guard when the recipe's app_url is private or localhost,
+   *  the guard when it resolves public (src/security/network-policy.ts). */
   allowPrivateNetwork?: boolean;
+  /** path to a Playwright storage state file: the capture runs signed in.
+   *  Only the path is handed to the browser; the contents never reach the
+   *  take directory or a log line. */
+  storageState?: string;
 }
 
 export interface RecordResult {
@@ -241,11 +247,24 @@ function ceilToFrame(ms: number): number {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** a scene entry answered with an HTTP error is not the app: most often the
- *  app is not running at that URL, or another server holds the port */
-function entryPageError(url: string, response: Response | null): string | undefined {
+ *  app is not running at that URL, or another server holds the port. One that
+ *  settled on another site is not the app either: a sign-in page on an
+ *  identity provider, when a session is missing or has expired. */
+function entryPageError(url: string, response: Response | null, settled: string): string | undefined {
   const status = response?.status() ?? 0;
-  if (status < 400) return undefined;
-  return `entry page ${url} returned ${status}; is your app running there, and is something else using that port?`;
+  if (status >= 400) {
+    return `entry page ${url} returned ${status}; is your app running there, and is something else using that port?`;
+  }
+  if (!isSameSite(url, settled)) {
+    let where = settled;
+    try {
+      where = new URL(settled).origin;
+    } catch {
+      /* keep the raw URL */
+    }
+    return `entry page ${url} settled on ${where}, another site; a sign-in redirect looks like this (pass a fresh --storage-state)`;
+  }
+  return undefined;
 }
 
 /** same document URL (normalized; a differing fragment still counts as a
@@ -287,7 +306,7 @@ function pathOf(u: string): string {
 // SSRF policy and read its HTTP status.
 async function gotoReady(page: Page, url: string) {
   // guard ON: a redirected navigation first lands on the gate's stub, which
-  // replaces itself with the target — wait for the real document
+  // replaces itself with the target, wait for the real document
   const response = await settleGatedRedirect(
     page,
     await page.goto(url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" }),
@@ -311,15 +330,17 @@ async function assertRecipeNavigationPolicy(recipe: Recipe, allowPrivateNetwork:
 export async function record(opts: RecordOptions): Promise<RecordResult> {
   const { recipe, outDir } = opts;
   const captureFrames = opts.captureFrames ?? true;
-  const allowPrivateNetwork = opts.allowPrivateNetwork ?? false;
+  // unset: a private app_url is the user's own app (private requests stay
+  // allowed); a public one gets the guard (see network-policy.ts)
+  const { allowPrivateNetwork } = await resolvePrivateNetworkPolicy(recipe.app_url, opts.allowPrivateNetwork);
   const rng = makeRng(opts.seed ?? 1);
-  /** a caller who left the option unset gets the guard by default; its
-   *  refusal names the option that films a local app */
+  /** a caller who left the option unset and filmed a public app gets the
+   *  guard; its refusal names the option that lifts it */
   const explainDefault = (err: unknown): never => {
     if (opts.allowPrivateNetwork === undefined && err instanceof Error && /private.network/i.test(err.message)) {
       throw new Error(
-        `${err.message}. record() refuses private hosts unless allowPrivateNetwork: true is passed ` +
-          "(the CLI passes it unless --block-private-network is set)",
+        `${err.message}. The recipe's app_url resolves to a public address, so private addresses are blocked; ` +
+          "pass allowPrivateNetwork: true (--allow-private-network) to allow them",
         { cause: err },
       );
     }
@@ -331,10 +352,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
   // guard ON: resolve-and-pin every recipe host so the browser connects to the
-  // exact IPs the policy vetted — a DNS re-resolve mid-run can't swap in a
+  // exact IPs the policy vetted, a DNS re-resolve mid-run can't swap in a
   // private one (same defense the crawler applies).
   // Note: this re-resolves hosts that assertRecipeNavigationPolicy above
-  // already resolved — a second lookup and a small TOCTOU window between the
+  // already resolved, a second lookup and a small TOCTOU window between the
   // two. Deliberate: the assert is a pure yes/no policy check, the pin is the
   // one whose answer the browser actually connects to, and collapsing them
   // would couple the policy module to Chromium launch-arg formatting.
@@ -372,7 +393,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   let lastFrame: { hash: string; file: string } | undefined;
   // true while an inter-scene navigation is in flight: the page is blank/white
   // mid-reload, and capturing those frames makes the video FLASH at every scene
-  // change. Skip them — the renderer holds the last good frame across the gap.
+  // change. Skip them, the renderer holds the last good frame across the gap.
   let isNavigating = false;
   let writeErrors = 0;
   let lastWrite: Promise<void> = Promise.resolve();
@@ -389,7 +410,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   /**
    * Guard ON: after each action, refuse to keep filming if the action led the
-   * page somewhere the policy forbids — a click or submit whose navigation
+   * page somewhere the policy forbids, a click or submit whose navigation
    * (or any redirect hop of it) the gate blocked leaves an error page, and a
    * page that settled on a non-http(s) or private URL is not the product.
    * Throwing fails the scene through the normal scene-failure path.
@@ -484,7 +505,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     const alreadyInView =
       !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
     if (!alreadyInView) {
-      // an eased page scroll that centres the target, filmed as motion — an
+      // an eased page scroll that centres the target, filmed as motion, an
       // instant scrollIntoView reads as a jump cut in the middle of a shot
       await loc
         .evaluate(async (el) => {
@@ -515,7 +536,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // backstop (a target inside a nested scroll container the page scroll
     // cannot reach): a no-op when the eased scroll already revealed it
     await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS });
-    // settle ONLY when a scroll actually happened — an unconditional sleep adds
+    // settle ONLY when a scroll actually happened, an unconditional sleep adds
     // wall-time to every action, tipping in-view actions into the overrun path
     // and breaking the scheduled-timeline determinism contract on fixtures
     if (!alreadyInView) await sleep(150);
@@ -524,17 +545,115 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     return { x: box.x, y: box.y, w: box.width, h: box.height };
   }
 
-  /** the focused element (through open shadow roots) is a text field or an
-   *  editable region that already holds text */
-  async function focusedFieldHasText(): Promise<boolean> {
+  /**
+   * Hit-test the press point against the target, immediately before the
+   * press. The cursor travels for most of the action's slot, and a live page
+   * moves meanwhile (a re-sorted list, a toast, an overlay), so the box read
+   * before the travel is stale. Passes when the topmost element at (x, y),
+   * descending through open shadow roots, is the target or inside it in the
+   * composed tree. A target that is itself an iframe passes when the iframe is
+   * on top. On a miss it reports the target's current centre, so the caller
+   * can re-aim, and what is in the way, so a failure says why.
+   */
+  async function aimCheck(
+    selector: string,
+    x: number,
+    y: number,
+  ): Promise<{ ok: boolean; box: [number, number, number, number]; center: [number, number]; blocker: string }> {
     return page
-      .evaluate(() => {
-        let el: Element | null = document.activeElement;
-        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value.length > 0;
-        return el instanceof HTMLElement && el.isContentEditable && (el.textContent ?? "").length > 0;
+      .locator(selector)
+      .first()
+      .evaluate(
+        (el, pt) => {
+          const deepHit = (px: number, py: number): Element | null => {
+            let hit = document.elementFromPoint(px, py);
+            while (hit?.shadowRoot) {
+              const inner = hit.shadowRoot.elementFromPoint(px, py);
+              if (!inner || inner === hit) break;
+              hit = inner;
+            }
+            return hit;
+          };
+          const lands = (hit: Element | null): boolean => {
+            for (let n: Node | null = hit; n; n = n.parentNode ?? (n as ShadowRoot).host ?? null) {
+              if (n === el) return true;
+            }
+            return false;
+          };
+          const r = el.getBoundingClientRect();
+          const hit = deepHit(pt.x, pt.y);
+          const name = (e: Element | null): string =>
+            e ? e.tagName.toLowerCase() + (e.id ? `#${e.id}` : "") : "nothing";
+          return {
+            ok: lands(hit),
+            box: [r.left, r.top, r.width, r.height] as [number, number, number, number],
+            center: [r.left + r.width / 2, r.top + r.height / 2] as [number, number],
+            blocker: name(hit),
+          };
+        },
+        { x, y },
+      );
+  }
+
+  /**
+   * Make the target ready for keys, or say why it is not. Keys go wherever
+   * focus is, so nothing is typed unless the focused element (through open
+   * shadow roots) is a text-entry element and is the target, inside it, or the
+   * contentEditable host the editable target lives in. Then:
+   *  - "replace": the focused element IS the target, an input or textarea
+   *    holding text. Select-all is scoped to that one field, so the caller may
+   *    clear it.
+   *  - "append": anything else. The caret moves to the end, so the typed text
+   *    follows what is there. Select-all is never used in a contentEditable
+   *    host: there it selects the whole document.
+   */
+  async function prepareField(selector: string): Promise<{ mode: "replace" | "append" } | { refused: string }> {
+    return page
+      .locator(selector)
+      .first()
+      .evaluate((el) => {
+        let active: Element | null = document.activeElement;
+        while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+        const within = (node: Node | null, root: Node): boolean => {
+          for (let n: Node | null = node; n; n = n.parentNode ?? (n as ShadowRoot).host ?? null) {
+            if (n === root) return true;
+          }
+          return false;
+        };
+        const name = (e: Element | null): string =>
+          e ? e.tagName.toLowerCase() + (e.id ? `#${e.id}` : "") : "nothing";
+        const NOT_TEXT = new Set(["button", "submit", "reset", "checkbox", "radio", "file", "image", "color", "range", "hidden"]);
+        const isTextEntry = (e: Element | null): boolean =>
+          e instanceof HTMLTextAreaElement ||
+          (e instanceof HTMLInputElement && !NOT_TEXT.has(e.type)) ||
+          (e instanceof HTMLElement && e.isContentEditable);
+        const hostOfTarget =
+          active instanceof HTMLElement && active.isContentEditable && el instanceof HTMLElement && el.isContentEditable && within(el, active);
+        if (!active || active === document.body || !(within(active, el) || hostOfTarget)) {
+          return { refused: `${name(active)} has focus instead` };
+        }
+        if (!isTextEntry(active)) return { refused: `the focused ${name(active)} is not a text field` };
+        if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+          if (active === el && active.value.length > 0) return { mode: "replace" as const };
+          try {
+            active.setSelectionRange(active.value.length, active.value.length);
+          } catch {
+            /* email and number inputs have no selection API; the caret stays */
+          }
+          return { mode: "append" as const };
+        }
+        // contentEditable: caret at the end of the target, or of the focused
+        // editor when the target wraps it
+        const node = active !== el && within(active, el) ? active : el;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        return { mode: "append" as const };
       })
-      .catch(() => false);
+      .catch((err: unknown) => ({ refused: err instanceof Error ? err.message.split("\n")[0]! : String(err) }));
   }
 
   type MutationsApi = {
@@ -567,10 +686,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   /**
    * Attach the camera's result target to the event just emitted, by priority:
-   *   1. QC's patched zoom bbox (a verdict from real footage — always wins)
+   *   1. QC's patched zoom bbox (a verdict from real footage, always wins)
    *   2. the script's focus_selector, resolved post-action
    *   3. the changed-region union observed after the action (frame the result
-   *      by default — no LLM cooperation required)
+   *      by default, no LLM cooperation required)
    * Every miss falls through; focus_source records which path won.
    */
   async function resolveFocus(
@@ -644,13 +763,13 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "hover":
       case "type": {
         if (!a.selector) throw new Error(`${a.kind} action requires selector`);
-        const box = await targetBox(a.selector);
-        // targetBox burns unbounded wall time (waitFor + scroll + settle) —
+        let box = await targetBox(a.selector);
+        // targetBox burns unbounded wall time (waitFor + scroll + settle),
         // rebase the action's timeline to observed NOW so cursor + events sit
         // where the footage actually shows the page reacting, not where the
         // schedule hoped it would.
         const startT = Math.max(scheduledT, observedNow());
-        const target = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+        let target = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
         const travelBudget = Math.max(250, a.duration_ms * 0.7);
         const points = cursorPath({
           from: { ...cursor }, to: target, targetWidth: box.w,
@@ -658,11 +777,42 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
         });
         await moveCursor(points, startT);
         const armed = a.kind !== "hover" && !a.zoom ? await armMutationObserver() : false;
-        const pathEndT = startT + (points[points.length - 1]?.t ?? 0);
-        if (a.kind === "click" || a.kind === "type") await sleep(PRESS_SETTLE_MS);
+        let pathEndT = startT + (points[points.length - 1]?.t ?? 0);
+        if (a.kind === "click" || a.kind === "type") {
+          await sleep(PRESS_SETTLE_MS);
+          // the press goes where the target is NOW, or nowhere: a stale point
+          // can land on whatever moved into it (another row, a toast's button)
+          let aim = await aimCheck(a.selector, target.x, target.y);
+          if (!aim.ok) {
+            // re-aim once at the target's current place (scrolled back into
+            // view if the page moved it out)
+            const fresh = await targetBox(a.selector);
+            const reaimT = Math.max(observedNow(), pathEndT);
+            target = { x: fresh.x + fresh.w / 2, y: fresh.y + fresh.h / 2 };
+            const fix = cursorPath({
+              from: { ...cursor }, to: target, targetWidth: fresh.w, maxDurationMs: REAIM_TRAVEL_MS, rng,
+            });
+            await moveCursor(fix, reaimT);
+            pathEndT = reaimT + (fix[fix.length - 1]?.t ?? 0);
+            await sleep(PRESS_SETTLE_MS);
+            aim = await aimCheck(a.selector, target.x, target.y);
+            if (!aim.ok) {
+              throw new Error(
+                `the press did not land on "${a.selector}": ${aim.blocker} is at the press point ` +
+                  `(the page moved or covered the target), so nothing was pressed`,
+              );
+            }
+          }
+          // log the box that was actually pressed, not the one read before travel
+          box = { x: aim.box[0], y: aim.box[1], w: aim.box[2], h: aim.box[3] };
+        }
         const dispatchT = observedNow();
 
         if (a.kind === "click" || a.kind === "type") {
+          // the hold between press and release is a few frames; a layout
+          // change inside it can still move what the release lands on. The
+          // browser then fires `click` on the common ancestor, never on an
+          // unrelated element, so the window is narrow and accepted.
           await cdp.send("Input.dispatchMouseEvent", {
             type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1,
           });
@@ -689,12 +839,17 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           // human rhythm: a beat after the focusing click, log-normal gaps
           // around ~100ms (longer after spaces/punctuation, never under 45ms),
           // a beat before Enter. A slot too short for this overruns and the
-          // schedule shifts (timestamp canon) — never a pasted-in string.
+          // schedule shifts (timestamp canon), never a pasted-in string.
           const rhythm = typingPlan(text, remaining, rng);
           await sleep(rhythm.beforeFirstKey);
-          // the action types `text` into the field, not after what was there:
-          // select-all then delete, as real keys, so the app sees an edit
-          if (await focusedFieldHasText()) {
+          const field = await prepareField(a.selector);
+          if ("refused" in field) {
+            throw new Error(`"${a.selector}" did not take focus after the click (${field.refused}), so no keys were sent`);
+          }
+          // in its own input or textarea, the action types `text` instead of
+          // what was there: select-all then delete, as real keys, so the app
+          // sees an edit. Everywhere else the text is appended.
+          if (field.mode === "replace") {
             await page.keyboard.press("ControlOrMeta+a");
             await sleep(CLEAR_BEAT_MS);
             await page.keyboard.press("Backspace");
@@ -718,7 +873,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           if (a.submit) {
             // Many query inputs only reveal their payoff on submit (a form's
             // submit handler / an Enter keydown). Typing alone leaves the app in
-            // its idle state — the video would show a filled box and no result.
+            // its idle state, the video would show a filled box and no result.
             await sleep(rhythm.beforeEnter);
             await page.keyboard.press("Enter");
           }
@@ -769,16 +924,18 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   }
 
   try {
-    // guard ON: service workers are blocked — a registered worker's fetches
+    // guard ON: service workers are blocked, a registered worker's fetches
     // are not routed through the context, which would hand the page an
     // ungated network channel
-    page = await browser.newPage({
+    const context = await browser.newContext({
       viewport: VIEWPORT,
       deviceScaleFactor: DPR,
       ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
+      ...(opts.storageState ? { storageState: opts.storageState } : {}),
     });
+    page = await context.newPage();
     // guard ON: gate EVERY in-flight request (clicked links, Enter submits,
-    // subresources) and every redirect hop of each — assertSafeNavigationUrl
+    // subresources) and every redirect hop of each, assertSafeNavigationUrl
     // only covers entry/goto URLs known from the recipe, but a click on an
     // a[href] or a submit navigates with no pre-check. Installed ONLY when the
     // guard is engaged: route interception funnels every request through
@@ -787,10 +944,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     if (!allowPrivateNetwork) {
       gate = createRequestGate({ allowPrivateNetwork });
       gated = await installRequestGate(page.context(), gate);
-      // WebSocket upgrades bypass ctx.route — gate them separately
+      // WebSocket upgrades bypass ctx.route, gate them separately
       if (!(await gateWebSockets(page.context(), gate))) {
         console.error(
-          "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+          "warning: this Playwright build lacks routeWebSocket, WebSocket connections are NOT policy-checked",
         );
       }
     }
@@ -841,7 +998,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
           return;
         }
-        // a frame without a CDP timestamp cannot be placed on the timeline —
+        // a frame without a CDP timestamp cannot be placed on the timeline,
         // indexing it at 0 would poison t_source with an epoch-sized negative
         const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
         if (!(stampMs > 0)) {
@@ -894,7 +1051,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     await assertSafeNavigationUrl(firstScene.entry.url, { allowPrivateNetwork, finalUrl: firstResponse?.url() ?? page.url() });
     // an error page is not worth filming: the opening scene fails and the
     // take ends before the screencast starts
-    const firstEntryError = entryPageError(firstScene.entry.url, firstResponse);
+    const firstEntryError = entryPageError(firstScene.entry.url, firstResponse, page.url());
     if (firstEntryError) failScene(firstScene.name, firstEntryError, true);
     else await sleep(SETTLE_MS); // `load` ≠ ready: let hydration/fonts/paints settle
 
@@ -908,7 +1065,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       });
       // actions must not start before footage exists (frame-0 race)
       await Promise.race([firstFrameSeen, sleep(3000)]);
-      if (firstFrameStamp < 0) console.error("warning: no screencast frame within 3s — page may be fully static");
+      if (firstFrameStamp < 0) console.error("warning: no screencast frame within 3s, page may be fully static");
     }
     // one timeline for everything: frame t_source is (CDP timestamp − first
     // frame's CDP timestamp), so anchoring the observed clock to that same
@@ -964,7 +1121,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
             try {
               const response = await gotoReady(page, scene.entry.url);
               await assertSafeNavigationUrl(scene.entry.url, { allowPrivateNetwork, finalUrl: response?.url() ?? page.url() });
-              const entryError = entryPageError(scene.entry.url, response);
+              const entryError = entryPageError(scene.entry.url, response, page.url());
               if (entryError) throw new Error(entryError);
               await sleep(SETTLE_MS);
               pageDirty = false;
@@ -1007,7 +1164,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   if (writeErrors > 0) {
     throw new Error(
-      `${writeErrors} frame write(s) failed — take is incomplete, refusing to emit a corrupt index`,
+      `${writeErrors} frame write(s) failed, take is incomplete, refusing to emit a corrupt index`,
     );
   }
 
@@ -1018,8 +1175,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const eventLog: EventLog = {
     version: 0,
     // clock declaration (schema): event `t` shares the frame t_source timeline.
-    // The render stage keys its skew/health gates off this marker — never off
-    // the capture's frame rate — so a starved take can't pass as "legacy".
+    // The render stage keys its skew/health gates off this marker, never off
+    // the capture's frame rate, so a starved take can't pass as "legacy".
     t_source_unified: true,
     // navigation declaration (schema): every page change while filming is a
     // `scene` event (scene entries) or a `navigation` event (everything
@@ -1042,7 +1199,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   // capture-health telemetry: frames per second of take time. The span uses
   // BOTH clocks (last frame t_source and last event t) so a capture that
-  // stalled early — few frames, but a long event timeline — reads as sparse
+  // stalled early, few frames, but a long event timeline, reads as sparse
   // instead of hiding behind its own short frame span.
   let maxEventT = 0;
   for (const e of events) maxEventT = Math.max(maxEventT, e.t);

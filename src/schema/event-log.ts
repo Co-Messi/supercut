@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Event-Log Schema v0 — the public contract.
+ * Event-Log Schema v0, the public contract.
  */
 
 export const MAX_EVENTS = 5_000;
@@ -18,7 +18,7 @@ const baseEvent = {
 
 /** Optional camera target: the result region this action produced (a graph, a
  *  results panel). When present, the renderer frames THIS instead of the
- *  interaction bbox — the cursor stays on the control, the camera holds on the
+ *  interaction bbox, the cursor stays on the control, the camera holds on the
  *  payoff. Resolved at capture time, so it reflects the post-action layout.
  *  focus_source records which path produced it (observability): a QC zoom
  *  patch, the script's focus_selector, or the changed-region fallback. */
@@ -68,7 +68,7 @@ export const sceneEvent = z.object({
 }).strict();
 
 /** The page changed documents because of an ACTION (a clicked link, a form
- *  submit) — recipe-driven gotos are not logged. Fast local navigations keep
+ *  submit), recipe-driven gotos are not logged. Fast local navigations keep
  *  the screencast flowing with no gap, so without this marker the renderer
  *  cannot know the picture is now a different page. No URL: the log carries
  *  timing only. */
@@ -168,7 +168,7 @@ export function parseEventLog(raw: unknown): EventLog {
     .passthrough()
     .parse(raw);
 
-  // A3: keep the forward-compat drop, but don't do it silently — a typo'd or
+  // Keep the forward-compat drop, but don't do it silently, a typo'd or
   // wrong-version event type would otherwise vanish with no signal. Collect the
   // distinct dropped type names and warn ONCE with the total count.
   const droppedTypes = new Set<string>();
@@ -181,7 +181,7 @@ export function parseEventLog(raw: unknown): EventLog {
   });
   if (droppedCount > 0) {
     console.warn(
-      `[event-log] dropped ${droppedCount} event(s) of unknown type(s): ${[...droppedTypes].join(", ")} — the renderer ignores these`,
+      `[event-log] dropped ${droppedCount} event(s) of unknown type(s): ${[...droppedTypes].join(", ")}, the renderer ignores these`,
     );
   }
 

@@ -209,6 +209,41 @@ describe("scene entry", () => {
   }, 60_000);
 });
 
+describe("aiming", () => {
+  it("re-aims at a target that moved while the cursor travelled, and never presses what took its place", async () => {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([{ name: "moving", url: `${app.url}/moving`, actions: [click("#target", 1500)] }]),
+        outDir: outDir("moving"), seed: 4, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    expect(res.failedScenes).toEqual([]);
+    const pressed = logs.filter((l) => l.ev === "down").map((l) => l.id);
+    expect(pressed).toEqual(["target"]);
+    expect(logs.filter((l) => l.ev === "click").map((l) => l.id)).toEqual(["target"]);
+    // the logged click is where the press happened: the target's NEW place
+    const ev = res.eventLog.events.find((e) => e.type === "click");
+    expect(ev?.type === "click" && ev.selector).toBe("#target");
+    if (ev?.type !== "click") throw new Error("no click event");
+    expect(ev.point[1]).toBeGreaterThanOrEqual(ev.bbox[1]);
+    expect(ev.point[1]).toBeLessThanOrEqual(ev.bbox[1] + ev.bbox[3]);
+    expect(ev.bbox[1]).toBeGreaterThan(200); // pushed down by the 240px banner
+  }, 60_000);
+
+  it("fails the scene instead of pressing an overlay that covers the target, and logs no click", async () => {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([{ name: "covered", url: `${app.url}/covered`, actions: [click("#target", 1500)] }]),
+        outDir: outDir("covered"), seed: 4, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    expect(res.failedScenes).toEqual(["covered"]);
+    expect(res.sceneErrors["covered"]).toMatch(/did not land on "#target"/);
+    expect(logs.filter((l) => l.ev === "down" || l.ev === "click")).toEqual([]);
+    expect(res.eventLog.events.some((e) => e.type === "click")).toBe(false);
+  }, 60_000);
+});
+
 type Keys = { down: string[]; press: string[]; up: string[]; input: [string, string | null][] };
 
 async function typeInto(url: string, text: string) {
@@ -249,6 +284,51 @@ describe("typing", () => {
     expect(down.indexOf("Backspace")).toBeGreaterThan(-1);
     expect(down.indexOf("Backspace")).toBeLessThan(down.indexOf("p"));
     expect(submit.keys.input[0]).toEqual(["deleteContentBackward", null]);
+  }, 60_000);
+
+  type EditorState = { editor: string; notes: string; other: string };
+  async function typeInEditor(selector: string, text: string) {
+    const { result: res, logs } = await logsDuring(() =>
+      record({
+        recipe: recipeOf([{
+          name: "edit", url: `${app.url}/editor`,
+          actions: [{ kind: "type", selector, text, duration_ms: 2200 }], hold_ms: 200,
+        }]),
+        outDir: outDir("editor"), seed: 5, captureFrames: false, allowPrivateNetwork: true,
+      }),
+    );
+    const states = logs.filter((l) => l.ev === "state") as unknown as EditorState[];
+    const keys = logs.filter((l) => l.ev === "key") as unknown as { key: string; target: string }[];
+    return { res, last: states[states.length - 1], keys };
+  }
+
+  it("appends to a contentEditable editor: existing content survives, nothing is selected and deleted", async () => {
+    const { res, last, keys } = await typeInEditor("#editor", " Added.");
+    expect(res.failedScenes).toEqual([]);
+    expect(keys.map((k) => k.key)).not.toContain("Backspace");
+    expect(last?.editor).toContain("Seeded team notes.");
+    expect(last?.editor).toContain("Second paragraph.");
+    expect(last?.editor.trimEnd().endsWith("Added.")).toBe(true);
+    expect(last?.other).toBe("keep me");
+  }, 60_000);
+
+  it("replaces a prefilled textarea's text, and only that field's", async () => {
+    const { res, last } = await typeInEditor("#notes", "new note");
+    expect(res.failedScenes).toEqual([]);
+    expect(last?.notes).toBe("new note");
+    expect(last?.other).toBe("keep me");
+    expect(last?.editor).toContain("Seeded team notes.");
+  }, 60_000);
+
+  it("sends no keys when the target cannot take focus, and fails the scene", async () => {
+    // the press on #static is swallowed, so #other keeps focus: the keys would
+    // otherwise select and delete "keep me"
+    const { res, keys, last } = await typeInEditor("#static", "oops");
+    expect(res.failedScenes).toEqual(["edit"]);
+    expect(res.sceneErrors["edit"]).toMatch(/did not take focus/);
+    expect(keys).toEqual([]);
+    expect(last).toBeUndefined(); // no field changed
+    expect(res.eventLog.events.some((e) => e.type === "type")).toBe(false);
   }, 60_000);
 
   it("types grapheme by grapheme: keys for what a keyboard has, one insert per other grapheme", async () => {

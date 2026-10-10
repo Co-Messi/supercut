@@ -18,7 +18,7 @@ export interface CursorPoint {
   y: number;
 }
 
-/** mulberry32 — tiny deterministic PRNG, good enough for path jitter. */
+/** mulberry32, tiny deterministic PRNG, good enough for path jitter. */
 export function makeRng(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -112,14 +112,14 @@ export interface TypingPlan {
 const WORD_BREAK = /[\s.,@!?;:/\-_]/;
 const KEY_FLOOR_MS = 45;
 const KEY_MEAN_MAX_MS = 100;
-const KEY_MEAN_MIN_MS = 60;
+export const KEY_MEAN_MIN_MS = 60;
 const WORD_BREAK_FACTOR = 1.8;
 /** log-normal spread of inter-key intervals (σ of the underlying normal) */
 const KEY_SIGMA = 0.35;
 
 /**
  * Seeded human keystroke timing: log-normal inter-key intervals around a mean
- * of ~100ms (compressed toward 60ms, never below, when the slot is short —
+ * of ~100ms (compressed toward 60ms, never below, when the slot is short,
  * a short slot must not collapse into a paste), longer after spaces and
  * punctuation, a 45ms floor, a 250-400ms beat before the first key and
  * ~300ms before Enter. Uniform per-char delays read as a metronome.

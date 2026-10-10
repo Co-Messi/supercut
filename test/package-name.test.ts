@@ -15,7 +15,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 };
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
-describe("package name ownership (C1)", () => {
+describe("package name ownership", () => {
   it("publishes under the owned scope, publicly, with the bin still named supercut", () => {
     expect(pkg.name).toBe("@co-messi/supercut");
     expect(pkg.publishConfig?.access).toBe("public");

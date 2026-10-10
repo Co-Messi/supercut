@@ -11,7 +11,7 @@ import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
 
 const exec = promisify(execFile);
 
-/** codec_type:codec_name per stream, sorted — the music-mux assertion shape */
+/** codec_type:codec_name per stream, sorted, the music-mux assertion shape */
 async function probeStreams(mp4: string): Promise<string[]> {
   const { stdout } = await exec("ffprobe", [
     "-v", "quiet", "-print_format", "json", "-show_streams", mp4,
@@ -58,7 +58,7 @@ describe("inventory crawler on the fixture app", () => {
     expect(digests.length).toBeGreaterThanOrEqual(1);
     const selectors = digests[0]!.inventory.map((i) => i.selector);
     expect(selectors).toContain("#cta");
-    // #email is display:none until the CTA reveals it — must still be
+    // #email is display:none until the CTA reveals it, must still be
     // inventoried, flagged hidden (multi-step forms are everywhere)
     const email = digests[0]!.inventory.find((i) => i.selector === "#email")!;
     expect(email).toBeDefined();
@@ -89,32 +89,104 @@ describe("inventory crawler on the fixture app", () => {
     // the search box resolves via data-testid, immune to ticking metrics text
     expect(fleet.inventory.some((i) => i.selector === '[data-testid="service-search"]')).toBe(true);
 
-    // every genuine destructive control stays out, loudly — including a clickable
+    // every genuine destructive control stays out, loudly, including a clickable
     // div[onclick] (not scoped to <button>) and a hyphen-joined action label
-    // (an <input type=button> labels itself only through `value` — it must
+    // (an <input type=button> labels itself only through `value`, it must
     // be counted in the exclusion notice too, not silently dropped)
     for (const label of ["Delete service", "Delete account", "Delete-all", "Remove member"]) {
       expect(fleet.inventory.some((i) => i.text.includes(label)), `${label} must be excluded`).toBe(false);
       expect(fleet.excludedDestructive).toContain(label);
     }
 
-    // the reviewer's repro: a framework-wired clickable div — handler bound via
+    // a framework-wired clickable div, handler bound via
     // addEventListener (onclick ATTR null) AND no cursor:pointer/tabindex/role
-    // signal — is excluded purely by its destructive label. No interactivity
-    // heuristic could have caught it; we no longer rely on one.
+    // signal, is excluded purely by its destructive label. No interactivity
+    // heuristic could catch it, so the crawl relies on none.
     expect(fleet.inventory.some((i) => i.text.includes("delete-worker"))).toBe(false);
     expect(fleet.excludedDestructive).toContain("delete-worker");
 
     // a genuinely PASSIVE destructive-slug row (a read-only <li>, cursor:default,
-    // no handler) is ALSO excluded now — we can't prove it's inert, so fail-safe
+    // no handler) is ALSO excluded now, we can't prove it's inert, so fail-safe
     // wins over filming a row that merely looks like a display cell.
     expect(fleet.inventory.some((i) => i.text.includes("delete-log-2024"))).toBe(false);
     expect(fleet.excludedDestructive).toContain("delete-log-2024");
   }, 60_000);
 
+  it("keeps table rows with a nested Delete button filmable, judged by their own label, and drops the buttons", async () => {
+    const digests = await crawlApp(`${app.url}/crud`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const inv = digests[0]!.inventory;
+    for (const row of ["#row-acme", "#row-globex", "#row-initech"]) {
+      const item = inv.find((i) => i.selector === row);
+      expect(item, `${row} must stay filmable`).toBeDefined();
+      expect(item!.text).not.toMatch(/delete/i);
+    }
+    expect(inv.some((i) => /delete/i.test(i.text))).toBe(false);
+    expect(inv.some((i) => i.text === "Edit")).toBe(true);
+    // a camera control is not destructive
+    expect(inv.some((i) => i.selector === "#reset-view")).toBe(true);
+    // a container whose centre is its Delete button would press it: excluded,
+    // below the fold too (the recorder scrolls it into view and presses there)
+    expect(inv.some((i) => i.selector === "#card")).toBe(false);
+    expect(inv.some((i) => i.selector === "#far-card")).toBe(false);
+  }, 60_000);
+
+  it("disambiguates rows of a 2,000-row table with one lookup each, not one probe per row", async () => {
+    const timed = async (rows: number) => {
+      const t0 = Date.now();
+      const digests = await crawlApp(`${app.url}/big?rows=${rows}`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+      return { ms: Date.now() - t0, digests };
+    };
+    const small = await timed(20);
+    const big = await timed(2000);
+    const rows = big.digests[0]!.inventory.filter((i) => i.selector.includes('[data-testid="event-row"]'));
+    expect(rows.map((r) => r.selector)).toEqual(
+      [1, 2, 3, 4, 5, 6].map((k) => `:nth-match([data-testid="event-row"], ${k})`),
+    );
+    expect(rows.map((r) => r.text)).toEqual([1, 2, 3, 4, 5, 6].map((k) => `Event ${k}`));
+    // probing every match cost one CDP round trip per row for each of the six
+    // inventoried rows: about 12,000 extra round trips, over 15x the 20-row
+    // crawl (40.7s against about 1s locally). Bounded relative to the 20-row
+    // crawl on the same machine, so a slow runner does not fail it.
+    expect(big.ms).toBeLessThan(small.ms * 4 + 2_000);
+  }, 180_000);
+
+  it("never requests a link whose label or path is destructive (a GET to /logout signs the user out)", async () => {
+    for (const p of ["/logout", "/session/sign-out", "/history/clear-all", "/dash"]) app.hits.delete(p);
+    const digests = await crawlApp(`${app.url}/nav`, { maxPages: 5, screenshots: false, allowPrivateNetwork: true });
+    expect(app.hits.get("/logout") ?? 0).toBe(0);
+    expect(app.hits.get("/session/sign-out") ?? 0).toBe(0);
+    expect(app.hits.get("/history/clear-all") ?? 0).toBe(0);
+    // ordinary links are still followed
+    expect(app.hits.get("/dash") ?? 0).toBeGreaterThan(0);
+    expect(digests.length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it("crawls at the viewport the recorder films, so responsive controls are judged as filmed", async () => {
+    const digests = await crawlApp(`${app.url}/wide`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const inv = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));
+    expect(inv.get("#wide-only")?.hidden).toBeUndefined(); // visible at 1920
+    expect(inv.get("#narrow-only")?.hidden).toBe(true); // hidden at 1920
+  }, 60_000);
+
+  it("flags fields whose form submits through a destructive control, and only those", async () => {
+    const digests = await crawlApp(`${app.url}/forms`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const bySel = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));
+    // a destructive default button, a destructive action URL, an outside form= button
+    for (const sel of ["#ws-name", "#reason", "#amount"]) {
+      expect(bySel.get(sel), `${sel} must be inventoried`).toBeDefined();
+      expect(bySel.get(sel)!.submitsDestructive, `${sel} submits destructively`).toBe(true);
+    }
+    expect(bySel.get("#q")!.submitsDestructive).toBeUndefined();
+    // with the opt-in, nothing is flagged
+    const open = await crawlApp(`${app.url}/forms`, {
+      maxPages: 1, screenshots: false, allowPrivateNetwork: true, allowDestructive: true,
+    });
+    expect(open[0]!.inventory.some((i) => i.submitsDestructive)).toBe(false);
+  }, 60_000);
+
   it("refuses to film a page whose URL is itself a credential (token in the query)", async () => {
     // a URL is a validation key that can't be redacted, so a page whose URL
-    // carries a secret is dropped rather than leaked — here it's the start page,
+    // carries a secret is dropped rather than leaked, here it's the start page,
     // so the run fails closed with a clear error instead of egressing the token
     await expect(
       crawlApp(`${app.url}/?token=supersecretvalue123456`, {
@@ -125,7 +197,7 @@ describe("inventory crawler on the fixture app", () => {
 
   it("does not misread a light app with a full-viewport translucent overlay as dark", async () => {
     // a modal backdrop rgba(0,0,0,.55) out-covers the body but is not the page
-    // ground — the probe must skip non-opaque layers and stay "light"
+    // ground, the probe must skip non-opaque layers and stay "light"
     const digests = await crawlApp(`${app.url}/overlay`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     expect(digests[0]!.theme).toBe("light");
   }, 60_000);
@@ -149,7 +221,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
           { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
         ],
       }),
-      // ② script response — real selectors from the fixture app
+      // ② script response, real selectors from the fixture app
       JSON.stringify({
         version: 0,
         app_url: app.url,
@@ -176,7 +248,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
           },
         ],
       }),
-      // ④ vision QC response — all clean
+      // ④ vision QC response, all clean
       JSON.stringify({
         verdicts: [
           { scene: "signup", verdict: "ok", reason: "form visible and filled" },
@@ -206,7 +278,131 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(report.llm).toBe("scripted");
     expect(report.analysis.money_moments).toHaveLength(2);
     expect(report.recipe.music_track).toBe("daybreak");
-    expect(llm.calls).toBe(3); // analyze + script + vision QC — no silent extra spend
+    expect(llm.calls).toBe(3); // analyze + script + vision QC, no silent extra spend
+    // one id ties the director report to its render report, and each stage's
+    // wall time is on record
+    expect(report.runId).toMatch(/^[0-9a-f-]{36}$/);
+    const renderReport = JSON.parse(readFileSync(join(outDir, "render-report.json"), "utf8"));
+    expect(renderReport.runId).toBe(report.runId);
+    for (const stage of ["crawl", "analyze", "script", "record", "qc", "render"]) {
+      expect(report.timings[stage], stage).toBeGreaterThan(0);
+    }
+  }, 300_000);
+
+  it("a hold-only QC verdict is applied at render time: the app is filmed once, and consent states the bound", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-hold-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0, app_url: app.url, music_track: "off",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 200 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 200 },
+        ],
+      }),
+      // QC asks only for breathing room on the first scene
+      JSON.stringify({
+        verdicts: [
+          { scene: "signup", verdict: "patch", reason: "needs air", patch: { hold_ms: 1400 } },
+          { scene: "dashboard", verdict: "ok", reason: "fine" },
+        ],
+      }),
+    ]);
+    const asked: { maxPerformances: number }[] = [];
+    const res = await generate({
+      llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: () => {},
+      confirmCapture: async (info) => {
+        asked.push(info);
+        return true;
+      },
+    });
+    expect(asked).toEqual([{ maxPerformances: 2 }]);
+    expect(res.retakes).toBe(0);
+    expect(llm.calls).toBe(3); // no second QC pass: nothing was filmed again
+    expect(existsSync(join(outDir, "take-1"))).toBe(false);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.renderAdjustments.holds).toEqual([{ scene: "signup", extraMs: 1200 }]);
+    expect(report.takes).toBe(1);
+    // the hold is in the video, not in the take: rendering the take as
+    // recorded comes out about 1.2s shorter
+    const render = JSON.parse(readFileSync(join(outDir, "render-report.json"), "utf8"));
+    const { renderTake } = await import("../src/render/index.js");
+    const plain = await renderTake({ takeDir: join(outDir, "take-0"), outFile: join(outDir, "plain", "final.mp4") });
+    expect(render.video.durationS * 1000).toBeGreaterThanOrEqual(plain.durationMs + 1000);
+  }, 300_000);
+
+  it("a QC cut re-films once without the scene, renders that take, and removes the superseded one", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-retake-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0, app_url: app.url, music_track: "off",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 0 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
+        ],
+      }),
+      JSON.stringify({ verdicts: [{ scene: "signup", verdict: "ok", reason: "fine" }, { scene: "dashboard", verdict: "cut", reason: "blank" }] }),
+      JSON.stringify({ verdicts: [{ scene: "signup", verdict: "ok", reason: "fine" }] }),
+    ]);
+    const res = await generate({ llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: () => {} });
+    expect(res.retakes).toBe(1);
+    expect(res.recipe.scenes.map((s) => s.name)).toEqual(["signup"]);
+    expect(llm.calls).toBe(4);
+    expect(existsSync(join(outDir, "take-1", "events.json"))).toBe(true);
+    expect(existsSync(join(outDir, "take-0"))).toBe(false);
+    expect(statSync(res.outFile).size).toBeGreaterThan(50_000);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.takes).toBe(2);
+  }, 300_000);
+
+  it("a vision QC failure after capture still renders the recorded take", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-qcfail-"));
+    dirs.push(outDir);
+    // analyze and script answer; the QC call finds the LLM gone (it throws)
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0, app_url: app.url, music_track: "off",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 0 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
+        ],
+      }),
+    ]);
+    const logs: string[] = [];
+    const res = await generate({ llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: (m) => logs.push(m) });
+    expect(statSync(res.outFile).size).toBeGreaterThan(50_000);
+    expect(logs.join("\n")).toMatch(/vision QC failed .*rendering the recorded take/);
   }, 300_000);
 
   it("--music off silences the cut even when the director picked a track", async () => {
@@ -307,7 +503,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
   }, 300_000);
 
-  it("--dry-run writes the recipe + preview and never films (H6)", async () => {
+  it("--dry-run writes the recipe + preview and never films", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-dry-"));
     dirs.push(outDir);
     const llm = new ScriptedLlm(() => [
@@ -344,7 +540,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
       allowPrivateNetwork: true, log: (m) => logs.push(m),
     });
 
-    // nothing filmed, nothing rendered — but the recipe artifact exists
+    // nothing filmed, nothing rendered, but the recipe artifact exists
     expect(res.outFile).toBe("");
     expect(llm.calls).toBe(2); // analyze + script only, no QC
     expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
@@ -354,7 +550,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(report.dryRun).toBe(true);
     // the preview surfaces every action, including the full typed text + Enter
     const preview = logs.join("\n");
-    expect(preview).toContain('type #email "ada@lumon.dev" then press Enter');
+    expect(preview).toContain('type #email "ada@lumon.dev" then press Enter (replaces existing text)');
     expect(preview).toContain("click #cta");
   }, 120_000);
 
@@ -376,7 +572,9 @@ describe("preflight status handling", () => {
     const srv = createServer((req, res) => {
       const code = Number(/^\/s\/(\d{3})/.exec(req.url ?? "")?.[1] ?? 200);
       res.writeHead(code, { "content-type": "text/html; charset=utf-8" });
-      res.end("<!doctype html><html><body><h1>status page</h1></body></html>");
+      // one control, so a run that gets past preflight also gets past the
+      // crawl's nothing-to-film check and reaches the LLM
+      res.end('<!doctype html><html><body><h1>status page</h1><button id="go">Open dashboard</button></body></html>');
     });
     await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
     const { port } = srv.address() as { port: number };
@@ -410,11 +608,11 @@ describe("preflight status handling", () => {
     }
   }, 60_000);
 
-  it("401/403 warn and CONTINUE — an auth wall at the root must not block filming your own app", async () => {
+  it("401/403 warn and CONTINUE, an auth wall at the root must not block filming your own app", async () => {
     for (const code of [401, 403]) {
       const { run, logs } = tryGenerate(`${statusServer.url}/s/${code}`);
       // getting PAST preflight means the run dies later, in analyze, when the
-      // deliberately-empty scripted LLM runs out — not on a preflight error
+      // deliberately-empty scripted LLM runs out, not on a preflight error
       await expect(run).rejects.toThrow(/scripted LLM exhausted/);
       const all = logs.join("\n");
       expect(all).toMatch(new RegExp(`preflight warning: .*responded ${code}`));
@@ -422,7 +620,7 @@ describe("preflight status handling", () => {
   }, 120_000);
 
   it("--skip-preflight bypasses the reachability probe entirely (escape hatch)", async () => {
-    // a 500 root would be fatal — with the override the run proceeds to the
+    // a 500 root would be fatal, with the override the run proceeds to the
     // crawl and dies in analyze instead, proving the probe never gated it
     const { run, logs } = tryGenerate(`${statusServer.url}/s/500`, { skipPreflight: true });
     await expect(run).rejects.toThrow(/scripted LLM exhausted/);

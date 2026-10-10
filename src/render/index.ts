@@ -1,10 +1,10 @@
 /**
- * Render orchestrator — stage 5 entry point.
+ * Render orchestrator, stage 5 entry point.
  *
  *   takeDir (frames/ + events.json + frames-index.json)
  *      │
  *      ├─ gates: partial take, capture health, clock skew
- *      ├─ planTake (pure TS — plan.ts) → render-report.json beside the output
+ *      ├─ planTake (pure TS, plan.ts) → render-report.json beside the output
  *      ├─ localhost server: host page + take files, receives encoded stream
  *      ├─ full Chromium (channel "chromium"): draws plan, encodes H.264 annexb
  *      └─ ffmpeg as MUXER ONLY (-c copy) → final .mp4
@@ -21,7 +21,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { MAX_BUDGET_MS, parseEventLog, type EventLog } from "../schema/index.js";
-import { FADE_IN_MS, FADE_OUT_MS, planTake, type FrameIndexEntry } from "./plan.js";
+import { buildBackground, FADE_IN_MS, FADE_OUT_MS, planTake, validateFrameIndex, type FrameIndexEntry } from "./plan.js";
+import { applyTakeAdjustments, hasAdjustments, type TakeAdjustments } from "./adjust.js";
+import { removeOnExit } from "./temp.js";
 import { chromiumInstallCommand } from "../capture/browser-install.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 import {
@@ -38,7 +40,7 @@ import {
 const exec = promisify(execFile);
 
 /** ffmpeg mux ceiling: video is stream-copied and audio is ≤60s + loudnorm, so
- *  a healthy mux finishes in seconds — a pathological input (stalling demuxer,
+ *  a healthy mux finishes in seconds, a pathological input (stalling demuxer,
  *  zero-duration loop) must not hang the CLI at the last step of the pipeline */
 const MUX_TIMEOUT_MS = 120_000;
 /** headroom over the 1MB execFile default: unusually chatty ffmpeg stderr
@@ -66,6 +68,11 @@ export interface RenderOptions {
   /** "8bit" forces the motion-blur accumulator's 8-bit fallback (diagnostics
    *  and tests); "auto" (the default) uses float16 where the browser has it */
   accumulator?: "auto" | "8bit";
+  /** QC holds and zooms applied to the take before planning; the take on
+   *  disk is not changed */
+  adjust?: TakeAdjustments;
+  /** the generate run this render belongs to, written into render-report.json */
+  runId?: string;
 }
 
 export interface RenderResult {
@@ -90,7 +97,7 @@ export interface RenderResult {
 /**
  * Resolve --music: a bundled track name (fuzzy-matched against assets/music/,
  * same pattern as --bg), a path to the user's own audio file, or "off"/absent
- * → null. Throws with the available bundled names — validating here keeps a
+ * → null. Throws with the available bundled names, validating here keeps a
  * bad track from ever reaching the expensive render.
  */
 export function resolveMusicTrack(spec: string | undefined, musicDir?: string): string | null {
@@ -107,7 +114,7 @@ export function resolveMusicTrack(spec: string | undefined, musicDir?: string): 
   if (hit) return join(dir, hit);
   const names = bundled.map((f) => f.replace(/\.[a-z0-9]+$/i, ""));
   throw new Error(
-    `--music "${spec}" is neither an audio file nor a bundled track — ` +
+    `--music "${spec}" is neither an audio file nor a bundled track, ` +
       (names.length ? `bundled tracks: ${names.join(", ")} (or "off")` : `no bundled tracks installed; pass an audio file path or "off"`),
   );
 }
@@ -119,7 +126,7 @@ const DEFAULT_BACKGROUND = "cobalt";
 /**
  * Resolve --bg: bundled wallpaper name (fuzzy-matched against
  * assets/backgrounds/, then assets/ root for muscle-memory), a procedural
- * palette name, a path to the user's own image — or nothing, which resolves
+ * palette name, a path to the user's own image, or nothing, which resolves
  * to the bundled cobalt wallpaper. When the bundled assets are missing (weird
  * install) the DEFAULT quietly falls back to the procedural "aurora" stage
  * rather than crashing; an explicit --bg still fails loud downstream.
@@ -149,6 +156,17 @@ export function resolveBackgroundSpec(
   const isImage = existsSync(spec) && statSync(spec).isFile();
   if (!isImage && background === undefined) return { spec: "aurora", isImage: false };
   return { spec, isImage };
+}
+
+/**
+ * Fail now on a --bg that will fail at render time: an explicit name that is
+ * neither an image file, a bundled wallpaper, nor a procedural palette. A
+ * typo must die before the crawl, LLM and capture spend, not after them.
+ */
+export function assertBackground(background: string | undefined): void {
+  if (background === undefined) return;
+  const { spec, isImage } = resolveBackgroundSpec(background);
+  if (!isImage) buildBackground(spec, 16, 9);
 }
 
 /** content type for a captured frame file. The recorder writes JPEG since
@@ -212,9 +230,9 @@ const SKEW_LEGACY_WARN_MS = 500;
 
 /**
  * Clock-vs-frame skew gate. Unified-clock takes (the events.json carries
- * `t_source_unified: true` — the built-in recorder always writes it) stamp
+ * `t_source_unified: true`, the built-in recorder always writes it) stamp
  * events on the same timeline as frame `t_source`, so the event timeline
- * running well past the footage means the take is broken — fail. Legacy takes
+ * running well past the footage means the take is broken, fail. Legacy takes
  * (no marker) never unified their clocks, so skew is expected there and only
  * warns. Legacy-ness comes from the schema declaration, NEVER from inferring
  * it off the capture's frame rate: a starved capture must not be able to
@@ -239,7 +257,7 @@ export interface CaptureHealth {
   frames: number;
   /** take duration on the shared timeline: max(last frame t_source, last event t) */
   durationMs: number;
-  /** duration × declared fps — what a healthy capture would have produced */
+  /** duration × declared fps, what a healthy capture would have produced */
   expectedFrames: number;
   avgSourceFps: number;
   action: "ok" | "fail";
@@ -249,7 +267,7 @@ export interface CaptureHealth {
 /** a take must carry at least this fraction of duration × fps in real frames.
  *  Healthy beacon-era captures sit near 1.0; a slow CI disk may throttle the
  *  ack-gated screencast well below 60fps, so the floor is deliberately
- *  generous — a starved capture (beacon dead, page static) sits under 0.01. */
+ *  generous, a starved capture (beacon dead, page static) sits under 0.01. */
 const MIN_CAPTURE_RATIO = 0.2;
 /** short takes produce few frames legitimately (startup jitter dominates);
  *  the ratio gate only engages once the take is long enough to judge */
@@ -264,7 +282,7 @@ const MAX_FRAME_GAP_MS = 15_000;
 /**
  * Deterministic capture-health gate: did the capture actually capture?
  * Compares frames on disk against what the take's duration and declared fps
- * demand. This is the check the skew gate can't do — a capture that starved
+ * demand. This is the check the skew gate can't do, a capture that starved
  * (repaint beacon failed, page never committed frames) produces a "clean"
  * event timeline over almost no footage, and rendering it yields a slideshow
  * with a camera gliding over stills. That must be refused, not warned about.
@@ -272,7 +290,7 @@ const MAX_FRAME_GAP_MS = 15_000;
 export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]): CaptureHealth {
   // the index is only schema-validated later (buildRenderPlan); a NaN or
   // missing t_source here would make every duration NaN and every comparison
-  // false — i.e. "ok". Refuse it outright.
+  // false, i.e. "ok". Refuse it outright.
   const badEntry = frameIndex.findIndex(
     (f) => typeof f?.t_source !== "number" || !Number.isFinite(f.t_source) || f.t_source < 0,
   );
@@ -283,7 +301,7 @@ export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]
       expectedFrames: 0,
       avgSourceFps: 0,
       action: "fail",
-      reason: `frames-index entry ${badEntry} has no valid t_source — the capture index is corrupt`,
+      reason: `frames-index entry ${badEntry} has no valid t_source, the capture index is corrupt`,
     };
   }
   const lastFrameT = frameIndex.length ? frameIndex[frameIndex.length - 1]!.t_source : 0;
@@ -316,7 +334,7 @@ export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]
     health.reason =
       `capture is sparse: ${frameIndex.length} frame(s) over ${(durationMs / 1000).toFixed(1)}s ` +
       `(avg ${avgSourceFps.toFixed(1)} fps source; a healthy ${log.fps}fps capture would carry ` +
-      `~${expectedFrames}) — the video would be stills with a camera gliding over them`;
+      `~${expectedFrames}), the video would be stills with a camera gliding over them`;
     return health;
   }
   // coverage, not just count: the widest frameless stretch, including the
@@ -334,7 +352,7 @@ export function assessCaptureHealth(log: EventLog, frameIndex: FrameIndexEntry[]
   if (widestGap > MAX_FRAME_GAP_MS) {
     health.action = "fail";
     health.reason =
-      `capture has no frames for ${(widestGap / 1000).toFixed(1)}s (from ${(gapAt / 1000).toFixed(1)}s) — ` +
+      `capture has no frames for ${(widestGap / 1000).toFixed(1)}s (from ${(gapAt / 1000).toFixed(1)}s), ` +
       `the video would hold one still across that stretch`;
   }
   return health;
@@ -346,10 +364,18 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
   // Fail before expensive work: output dir + take shape.
   mkdirSync(dirname(outFile), { recursive: true });
-  const log = parseEventLog(JSON.parse(readFileSync(join(takeDir, "events.json"), "utf8")));
+  let log = parseEventLog(JSON.parse(readFileSync(join(takeDir, "events.json"), "utf8")));
   const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
-  const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+  let frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+  if (hasAdjustments(opts.adjust)) {
+    validateFrameIndex(frameIndex);
+    const adjusted = applyTakeAdjustments(log, frameIndex, opts.adjust);
+    log = parseEventLog(adjusted.log);
+    frameIndex = adjusted.frameIndex;
+    if (adjusted.applied.length) console.error(`[render] QC adjustments: ${adjusted.applied.join("; ")}`);
+    for (const s of adjusted.skipped) console.error(`[render] QC adjustment skipped: ${s}`);
+  }
 
   // Partial-take gate: the recorder lists the scenes it failed to perform.
   // Rendering such a take silently ships a video missing those beats.
@@ -367,7 +393,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
   // Capture-health gate: refuse a take whose footage can't carry its own
   // timeline. Printed regardless of outcome so the one diagnostic that reveals
-  // a starved capture — average source fps — is always on the record.
+  // a starved capture, average source fps, is always on the record.
   const health = assessCaptureHealth(log, frameIndex);
   {
     console.error(
@@ -387,7 +413,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   }
 
   const { spec: bgSpec, isImage: bgIsImage } = resolveBackgroundSpec(opts.background);
-  // --music: resolved + validated here, before the plan and the browser — a
+  // --music: resolved + validated here, before the plan and the browser, a
   // missing track must fail in milliseconds, not after a full encode
   const musicPath = resolveMusicTrack(opts.music);
   const { plan, diagnostics } = planTake(log, frameIndex, {
@@ -411,7 +437,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     if (verdict.action !== "ok") {
       const msg =
         `event timeline leads footage by ${Math.round(verdict.skewMs)}ms ` +
-        `(last event t=${Math.round(verdict.maxEventT)}ms, last frame t_source=${Math.round(verdict.lastFrameT)}ms) — ` +
+        `(last event t=${Math.round(verdict.maxEventT)}ms, last frame t_source=${Math.round(verdict.lastFrameT)}ms), ` +
         `the camera would run ahead of the pixels`;
       if (verdict.action === "warn" || process.env.SUPERCUT_ALLOW_SKEW === "1") {
         console.error(`[render] WARNING: ${msg} (continuing)`);
@@ -438,6 +464,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     limitMs: MAX_BUDGET_MS,
     source: { frames: frameIndex.length, avgFps: health.avgSourceFps, failedScenes: log.failed_scenes ?? [] },
   });
+  if (opts.runId) report.runId = opts.runId;
   const writeReport = (patch: Partial<RenderReport>): void => {
     Object.assign(report, patch);
     try {
@@ -452,8 +479,10 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const token = randomBytes(16).toString("hex");
   // the raw annexb H.264 goes to a temp path OUTSIDE the take dir: the take
   // is a read-only input, and a partial stream must never be left beside it.
-  // The finally below unlinks it on success and on failure.
+  // The finally below unlinks it on success and on failure; an interrupt or
+  // process.exit before then is covered by removeOnExit.
   const rawPath = join(tmpdir(), `supercut-${token}.h264`);
+  const disposeTempCleanup = removeOnExit(rawPath);
   let encodedBytes = 0;
   let resultReady = false;
   let rejectResult!: (err: Error) => void;
@@ -465,7 +494,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     const parsedUrl = new URL(rawUrl, "http://127.0.0.1");
     const url = parsedUrl.pathname;
     // constant-time compare (length-checked: timingSafeEqual throws on a length
-    // mismatch). Negligible value here — 128-bit per-run token, loopback-only —
+    // mismatch). Negligible value here, 128-bit per-run token, loopback-only,
     // but trivially correct.
     const tokenMatches = (got: string | string[] | undefined | null): boolean => {
       if (typeof got !== "string" || got.length !== token.length) return false;
@@ -586,7 +615,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
         }
       });
       // a hard tab death (OOM, GPU process crash) emits no console line at
-      // all — without these hooks the orchestrator waited out the full render
+      // all, without these hooks the orchestrator waited out the full render
       // timeout for a page that could never answer
       page.on("crash", () => {
         fatal = "[render] FATAL: renderer tab crashed (out of memory or GPU process death)";
@@ -700,8 +729,9 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     try {
       unlinkSync(rawPath);
     } catch {
-      /* already removed or never written — nothing to clean up */
+      /* already removed or never written, nothing to clean up */
     }
+    disposeTempCleanup();
   }
 }
 

@@ -6,10 +6,10 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 /**
- * M-new-2: between the printed action preview and the first real click, a
+ * between the printed action preview and the first real click, a
  * human gets the last word. Where no human can answer (piped stdin: CI, a
  * coding agent, `| tee`), `generate` must not quietly film a model-written
- * recipe anyway — it refuses up front, before any crawl or LLM spend, unless
+ * recipe anyway, it refuses up front, before any crawl or LLM spend, unless
  * the caller opted in with --yes (or only previews with --dry-run).
  *
  * The spawned CLI's stdin is a pipe, never a TTY. The URL points at a closed

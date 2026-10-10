@@ -7,7 +7,7 @@ import { createRequestGate } from "../src/security/url-policy.js";
  * Playwright keeps every APIResponse body in the driver until dispose() or
  * context close. Under the guard EVERY request of a run is fetched that way,
  * so the gate must release each body once it has been delivered (or skipped
- * over as a redirect hop) — otherwise a whole take's traffic stays resident.
+ * over as a redirect hop), otherwise a whole take's traffic stays resident.
  */
 
 function fakeResponse(status: number, headers: Record<string, string> = {}) {

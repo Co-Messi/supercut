@@ -41,6 +41,8 @@ npm run build
 node dist/cli/index.js generate --url http://127.0.0.1:3000
 ```
 
+Is your app behind a login? See [Filming a signed-in app](#filming-a-signed-in-app): without a session, supercut sees only the sign-in page.
+
 Any command accepts `--help`. Examples below write the command as plain `supercut ...`: run it as `npx @co-messi/supercut ...`, or `node dist/cli/index.js ...` from a source checkout.
 
 No key? The keyless path works standalone against the bundled demo app:
@@ -50,8 +52,8 @@ No key? The keyless path works standalone against the bundled demo app:
 python3 -m http.server 4319 --directory examples/demo-app &
 
 # 2. film it with the example recipe, then render
-node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
-node dist/cli/index.js render --take out/take --out out/final.mp4
+node dist/cli/index.js record --recipe examples/demo.recipe.json --out supercut-out/take
+node dist/cli/index.js render --take supercut-out/take --out supercut-out/final.mp4
 ```
 
 ## Use it from your coding agent (no API key)
@@ -112,7 +114,19 @@ Based on each project's public description at the time of writing. Check them be
 
 ## Safety
 
-supercut drives and may mutate the app you point it at. Film staging or local data, never production. Destructive controls (Delete, Pay, and similar) are excluded by default on a best effort basis, `generate` prints every action before filming and asks first, and `--block-private-network` engages an SSRF guard for untrusted targets. Full details are in [SECURITY.md](SECURITY.md).
+supercut drives and may mutate the app you point it at. Film staging or local data, never production. Destructive controls are excluded by default on a best effort basis: a control whose label contains a word from the policy list (Delete, Reset, Pay, Buy, Subscribe, Upgrade, Transfer, Publish, Deploy, Merge, Log out and more; the full list is in `src/security/destructive.ts` and the agent skill) is never filmed, and a field whose form submits through such a control can be typed into but never submitted. `generate` prints every action before filming and asks first. A localhost or private target may reach other private addresses (your frontend calling your local API); a target that resolves public may not, unless you pass `--allow-private-network`, and `--block-private-network` engages the strict SSRF guard for untrusted targets. With `--yes` nobody reviews the actions first, so the filter is the only automated guard. Full details are in [SECURITY.md](SECURITY.md).
+
+## Filming a signed-in app
+
+supercut starts from a fresh browser with no cookies, so an app behind a login shows only its sign-in page. Save a session once with Playwright, then pass it to `generate` or `record`:
+
+```bash
+npx playwright codegen --save-storage=auth.json http://localhost:3000   # sign in, then close the window
+supercut generate --url http://localhost:3000 --storage-state auth.json
+supercut record --recipe recipe.json --storage-state auth.json
+```
+
+The file holds live session cookies: use a staging account, keep it out of git, and delete it when you are done. supercut hands only its path to the browser, so its contents never reach the LLM, the take directory, `director-report.json` or the logs. Without a session, `generate` refuses a start page that settles on another site (an identity provider's sign-in page looks like this), and stops before any LLM call when the crawl finds nothing to click or only a sign-in form. An http to https upgrade or an apex to `www.` redirect of the same site is fine. `record` fails a scene whose entry page settles on another site, which is what an expired session looks like.
 
 ## LLM provider setup
 
@@ -139,18 +153,18 @@ SUPERCUT_MODEL=anthropic/claude-sonnet-4.6
 SUPERCUT_VISION=true
 ```
 
-For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`. A provider-scoped key never leaves its provider. If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly: ambiguous config fails loudly rather than guessing.
+For `SUPERCUT_PROVIDER=custom`, set `SUPERCUT_API_KEY`, `SUPERCUT_LLM_BASE_URL` and `SUPERCUT_MODEL`. Vision is off for a custom endpoint unless you set `SUPERCUT_VISION=true`, since many are text-only local models. When the endpoint refuses `max_tokens` (OpenAI's reasoning models want `max_completion_tokens`) or `response_format`, supercut asks again without it, and a rejection prints the provider's own error message. A provider-scoped key never leaves its provider. If multiple provider keys are present, set `SUPERCUT_PROVIDER` explicitly: ambiguous config fails loudly rather than guessing.
 
-Every `generate` run has a hard LLM spend ceiling: 300000 tokens by default, tunable with `--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0` or `off` disables). Retries, escalations and timed-out attempts all count against it, and the run aborts with a per-stage breakdown if it would pass the ceiling.
+Every `generate` run has an LLM token ceiling: 300000 tokens by default, tunable with `--max-tokens <n>` or `SUPERCUT_MAX_TOKENS` (`0` or `off` disables). It is checked before every attempt, retries and escalations included: an attempt is sent only when its estimated prompt plus its `max_tokens` fits what is left, and the run stops with a per-stage breakdown when the next one would not. Each attempt is metered at the provider's reported usage, or at that worst case when the provider reports none; a timeout, a connection that broke after sending, and a 5xx are always charged the worst case. The prompt side is an estimate (images start at 2000 tokens each and rise to what the provider actually bills once a call reports it), so one call can run past its estimate; the run then stops at the next call. The ceiling counts tokens, not money.
 
 ## Backgrounds
 
 Every render stages the app window on a background. The default is the bundled `cobalt` wallpaper. Pick another with `--bg` (on `render` and `generate`):
 
 ```sh
-supercut render --take out/take --bg sunrise            # bundled wallpaper
-supercut render --take out/take --bg midnight           # procedural palette
-supercut render --take out/take --bg path/to/wall.png   # your own image
+supercut render --take supercut-out/take --bg sunrise            # bundled wallpaper
+supercut render --take supercut-out/take --bg midnight           # procedural palette
+supercut render --take supercut-out/take --bg path/to/wall.png   # your own image
 ```
 
 | wallpaper            | look                        |
@@ -170,9 +184,9 @@ Procedural palettes (generated at render time, no asset): `aurora`, `midnight`, 
 `render` is silent by default. On `generate` the AI director picks the bundled track that matches your app's look. `--music` (on `render` and `generate`) muxes a looped, loudness-normalized track with fade in and out under the video, without re-encoding the video or changing its length:
 
 ```sh
-supercut render   --take out/take --music midnight
+supercut render   --take supercut-out/take --music midnight
 supercut generate --url http://localhost:3000 --music pulse
-supercut render   --take out/take --music path/to/your-track.mp3   # your own file
+supercut render   --take supercut-out/take --music path/to/your-track.mp3   # your own file
 ```
 
 Bundled tracks (original instrumentals made for supercut, provenance in `assets/music/CREDITS.md`):
@@ -188,7 +202,7 @@ Bundled tracks (original instrumentals made for supercut, provenance in `assets/
 
 ## Privacy
 
-`generate` sends crawled page text, element labels and selectors, and optional repo notes (`--repo`) to your configured LLM provider. In vision mode it also uploads full, unredacted screenshots of your app, so do not film apps showing real customer data or secrets with vision on. It writes frames, recipes and director reports to `out/`; review those before sharing. `record` and `render` never call an LLM. See [SECURITY.md](SECURITY.md).
+`generate` sends crawled page text, element labels and selectors, and optional repo notes (`--repo`) to your configured LLM provider. In vision mode it also uploads full, unredacted screenshots of your app, so do not film apps showing real customer data or secrets with vision on. It writes frames, recipes and director reports to `supercut-out/` (a take a re-take replaced is deleted once the video renders); review those before sharing, and add `supercut-out/` to your `.gitignore`. `record` and `render` never call an LLM. See [SECURITY.md](SECURITY.md).
 
 ## Event-log contract
 

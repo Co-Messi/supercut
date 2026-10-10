@@ -11,7 +11,7 @@ import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
 /**
  * WIRING coverage for the capture-health gate at its generate call site.
  * assessCaptureHealth is well covered as a unit and through renderTake; this
- * file proves the call BETWEEN record and QC actually fires — by mocking
+ * file proves the call BETWEEN record and QC actually fires, by mocking
  * record() to hand back a starved take (the one thing a healthy fixture can
  * never produce) and running the real generate pipeline into it.
  */
@@ -85,7 +85,7 @@ function brainResponses(): string[] {
 }
 
 /** swap record() for a stub that writes a STARVED take: 3 frames across a
- *  40-second event timeline — the shape a dead repaint beacon produces */
+ *  40-second event timeline, the shape a dead repaint beacon produces */
 function stubSparseRecord(failedScenes: string[]): void {
   vi.mocked(record).mockImplementation(async (opts) => {
     mkdirSync(join(opts.outDir, "frames"), { recursive: true });
@@ -118,7 +118,7 @@ function stubSparseRecord(failedScenes: string[]): void {
   });
 }
 
-describe("generate-path capture-health gate wiring (H1)", () => {
+describe("generate-path capture-health gate wiring", () => {
   it("refuses a starved take right after record, before any QC", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-health-fail-"));
     dirs.push(outDir);
@@ -130,7 +130,7 @@ describe("generate-path capture-health gate wiring (H1)", () => {
     ).rejects.toThrow(/generate: capture is sparse.*SUPERCUT_ALLOW_SPARSE=1/s);
 
     expect(vi.mocked(record)).toHaveBeenCalledTimes(1);
-    // analyze + script only — the run died at the gate, before QC or render
+    // analyze + script only, the run died at the gate, before QC or render
     expect(llm.calls).toBe(2);
     expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
   }, 120_000);
@@ -139,7 +139,7 @@ describe("generate-path capture-health gate wiring (H1)", () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-health-bypass-"));
     dirs.push(outDir);
     // every scene failed at capture, so the (bypassed) gate is followed by a
-    // deterministic all-cut — a cheap, hermetic proof the pipeline got PAST
+    // deterministic all-cut, a cheap, hermetic proof the pipeline got PAST
     // the health check rather than dying on it
     stubSparseRecord(["signup", "dashboard"]);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -150,7 +150,7 @@ describe("generate-path capture-health gate wiring (H1)", () => {
       generate({ llm, url: app.url, outDir, vision: false, allowPrivateNetwork: true, log: () => {} }),
     ).rejects.toThrow(/QC cut every scene/); // NOT the sparse error
 
-    // the bypass printed the same WARNING shape the render path prints —
+    // the bypass printed the same WARNING shape the render path prints,
     // a silently disabled gate is H1's failure mode back through the opt-out
     const errOutput = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(errOutput).toMatch(/\[generate\] WARNING: capture is sparse.*\(continuing: SUPERCUT_ALLOW_SPARSE=1\)/s);
@@ -158,12 +158,12 @@ describe("generate-path capture-health gate wiring (H1)", () => {
 });
 
 /**
- * M-new-5: the runs that fail are the runs whose spend and model output the
+ * the runs that fail are the runs whose spend and model output the
  * user most needs to see. Every failure after preflight must still leave a
  * (partial) director-report.json carrying the error, and print the LLM usage
  * line.
  */
-describe("generate failure paths keep the report and the spend line (M-new-5)", () => {
+describe("generate failure paths keep the report and the spend line", () => {
   function readReport(outDir: string): Record<string, unknown> {
     return JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8")) as Record<string, unknown>;
   }
@@ -219,11 +219,11 @@ describe("generate failure paths keep the report and the spend line (M-new-5)", 
 });
 
 /**
- * M-new-2: the action preview is only a control if a human can act on it
+ * the action preview is only a control if a human can act on it
  * before the browser does. When the CLI can ask (a TTY, no --yes) it passes a
  * confirm callback; declining must stop the run before capture.
  */
-describe("confirm before the first capture (M-new-2)", () => {
+describe("confirm before the first capture", () => {
   it("asks AFTER the preview is printed, and a 'no' films nothing but keeps the recipe", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-confirm-no-"));
     dirs.push(outDir);

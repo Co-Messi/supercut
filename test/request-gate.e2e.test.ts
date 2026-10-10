@@ -10,7 +10,7 @@ import { parseRecipe, type Recipe } from "../src/schema/index.js";
 import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
 
 /**
- * WIRING coverage for the H4/H5 request gate, through record() itself — not
+ * WIRING coverage for the H4/H5 request gate, through record() itself, not
  * createRequestGate as a pure function (test/url-policy.test.ts owns that),
  * and not assertRecipeNavigationPolicy (which fires first and rejects any
  * private recipe URL long before the gate exists, so no unmocked localhost
@@ -18,7 +18,7 @@ import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
  *
  * Why the host classifier is injected: a hermetic guard-ON run needs an entry
  * host the policy calls public that still lands on the local fixture. Real
- * DNS cannot deliver that — and the reviewer-suggested route (a fake hostname
+ * DNS cannot deliver that, and the obvious route (a fake hostname
  * pinned to loopback via --host-resolver-rules) is not portable either:
  * on a machine whose resolver hijacks unknown names (VPN/TUN fake-IP DNS,
  * e.g. Clash's 198.18/15) the pin is bypassed entirely and the navigation
@@ -26,8 +26,8 @@ import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
  * never produced a TCP connection to a local server). So this file mocks the
  * pre-flight assert/pin seams and swaps ONLY the gate's DNS classifier:
  * "localhost" plays the vetted public app; 127.0.0.1 (the probe server) is
- * private. Everything downstream is real — record()'s launch, its route
- * handler install, route.abort(), the WebSocket gate, the verdict cache —
+ * private. Everything downstream is real, record()'s launch, its route
+ * handler install, route.abort(), the WebSocket gate, the verdict cache,
  * which is exactly the wiring the unit tests could not see.
  */
 
@@ -37,6 +37,9 @@ vi.mock("../src/security/url-policy.js", async (importOriginal) => {
     ...actual, // gateWebSockets et al stay REAL
     assertSafeNavigationUrl: vi.fn(async () => {}),
     resolveAndPinHost: vi.fn(async () => undefined),
+    // the default posture classifies the TARGET the same way: "localhost" is
+    // the public app, 127.0.0.1 is private
+    urlResolvesPrivate: vi.fn(async (raw: string) => new URL(raw).hostname !== "localhost"),
     createRequestGate: vi.fn((opts: { allowPrivateNetwork: boolean }) =>
       actual.createRequestGate({
         ...opts,
@@ -100,7 +103,7 @@ function probeRecipe(entryOrigin: string): Recipe {
   });
 }
 
-describe("request gate wiring through record() (H4/H5)", () => {
+describe("request gate wiring through record()", () => {
   it("guard ON: the entry loads, but the page's fetch() and WebSocket to a private host never leave the browser", async () => {
     vi.clearAllMocks();
     const appPort = new URL(app.url).port;
@@ -115,7 +118,7 @@ describe("request gate wiring through record() (H4/H5)", () => {
       allowPrivateNetwork: false,
     });
 
-    // the entry navigated and the scene ran to completion — the gate allowed
+    // the entry navigated and the scene ran to completion, the gate allowed
     // the vetted app host through (a gate that blocked everything would have
     // aborted the entry itself and failed the scene)
     expect(res.aborted).toBe(false);
@@ -138,7 +141,7 @@ describe("request gate wiring through record() (H4/H5)", () => {
     );
   }, 60_000);
 
-  it("guard OFF: no gate is even installed, and the same page's probes reach the server — the blocked run measured a real gate, not a broken page", async () => {
+  it("guard OFF: no gate is even installed, and the same page's probes reach the server, the blocked run measured a real gate, not a broken page", async () => {
     vi.clearAllMocks();
     const out = mkdtempSync(join(tmpdir(), "supercut-gate-off-"));
     dirs.push(out);
@@ -162,8 +165,48 @@ describe("request gate wiring through record() (H4/H5)", () => {
   }, 60_000);
 });
 
+describe("default posture (allowPrivateNetwork unset): decided by the target", () => {
+  const reset = () => {
+    vi.clearAllMocks();
+    probe.requests.length = 0;
+    probe.upgrades.length = 0;
+  };
+
+  it("record, public target: the guard engages, so the page's private fetch and WebSocket never leave the browser", async () => {
+    reset();
+    const out = mkdtempSync(join(tmpdir(), "supercut-default-public-"));
+    dirs.push(out);
+    const res = await record({
+      recipe: probeRecipe(`http://localhost:${new URL(app.url).port}`), outDir: out, seed: 1, captureFrames: false,
+    });
+    expect(res.failedScenes).toEqual([]);
+    expect(probe.requests).toEqual([]);
+    expect(probe.upgrades).toEqual([]);
+    expect(vi.mocked(createRequestGate)).toHaveBeenCalledWith(expect.objectContaining({ allowPrivateNetwork: false }));
+  }, 60_000);
+
+  it("record, private target: its private requests stay allowed (a local frontend calling a local API)", async () => {
+    reset();
+    const out = mkdtempSync(join(tmpdir(), "supercut-default-private-"));
+    dirs.push(out);
+    const res = await record({ recipe: probeRecipe(app.url), outDir: out, seed: 1, captureFrames: false });
+    expect(res.failedScenes).toEqual([]);
+    expect(probe.requests.some((u) => u.startsWith("/hit"))).toBe(true);
+    expect(vi.mocked(createRequestGate)).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it("crawl, public target: the page's private fetch never leaves the browser", async () => {
+    reset();
+    const fetchTarget = `http://127.0.0.1:${probe.port}/hit-crawl`;
+    await crawlApp(`http://localhost:${new URL(app.url).port}/probe?fetch=${encodeURIComponent(fetchTarget)}`, {
+      maxPages: 1, screenshots: false,
+    });
+    expect(probe.requests.filter((u) => u.startsWith("/hit-crawl"))).toEqual([]);
+  }, 60_000);
+});
+
 /**
- * Redirect hops (H-new-1). Playwright's Chromium backend auto-continues every
+ * Redirect hops. Playwright's Chromium backend auto-continues every
  * redirected request WITHOUT calling route() handlers, so a gate that only
  * vets the first URL of a chain lets `public → 302 → private` through. Each
  * case below starts on the vetted "public" app host (localhost) and 302s,
@@ -172,7 +215,7 @@ describe("request gate wiring through record() (H4/H5)", () => {
  * must never arrive. Guard-off controls prove the same chains DO arrive when
  * nothing gates them, so a pass means a real gate, not a broken fixture.
  */
-describe("request gate vs redirect hops (H-new-1)", () => {
+describe("request gate vs redirect hops", () => {
   const appOrigin = () => `http://localhost:${new URL(app.url).port}`;
   const privateUrl = (path: string) => `http://127.0.0.1:${probe.port}${path}`;
   const viaRedirect = (to: string) => `/redirect?to=${encodeURIComponent(to)}`;
@@ -256,7 +299,7 @@ describe("request gate vs redirect hops (H-new-1)", () => {
 
     // the start page itself was crawled (the gate let the vetted host through)
     expect(digests.length).toBeGreaterThan(0);
-    // the crawler did discover the redirect link — so the navigation below
+    // the crawler did discover the redirect link, so the navigation below
     // was genuinely attempted, not skipped
     expect(digests[0]!.inventory.some((i) => i.href?.includes("/redirect?to="))).toBe(true);
     expect(hit("/sub-crawl-on")).toEqual([]);
@@ -328,7 +371,7 @@ describe("guard ON: the crawler waits out a gated redirect", () => {
 });
 
 /**
- * Service workers (H-new-2): a registered worker's own fetches are not routed
+ * Service workers: a registered worker's own fetches are not routed
  * through the context, so they would be an ungated channel. The guard blocks
  * registration outright; the guard-off control proves the same page's worker
  * really does reach the private host when nothing stops it.

@@ -1,28 +1,30 @@
 /**
- * Source-code comprehension — read the app's routes and page components to
+ * Source-code comprehension, read the app's routes and page components to
  * understand what the product actually IS, then seed the crawl with those
  * routes so the director can drive INTO real panels (not just the landing).
  *
  * Why this exists: the crawler only sees the app's *initial* DOM, so the
  * director never discovers functional pages reachable by buttons/SPA nav and
  * tours the surface ("stayed on the home page, didn't go into the panel"). The
- * code is the ground truth of what every screen shows — reading it is cheaper
+ * code is the ground truth of what every screen shows, reading it is cheaper
  * and deeper than vision, and it tells us which routes exist so we can crawl
  * them and get their real selectors into the inventory.
  *
- * Supports Next.js app-router (`app/**\/page.{tsx,jsx,ts,js}`) and pages-router
- * (`pages/**\/*.{tsx,jsx}`) first; other frameworks degrade to "no routes
- * found" and the crawl proceeds link-only as before.
+ * Reads Next.js only: the app router (`app/**\/page.*`) and the pages router
+ * (`pages/**\/*.*`) under a directory that has a `next.config.*` or a
+ * package.json depending on `next`. Any other framework yields no routes
+ * (an Angular `src/app` or a Vite `src/pages` folder is not a router), and
+ * the crawl follows links only.
  */
 import { readdirSync, readFileSync, type Dirent } from "node:fs";
-import { join, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 export interface SourceRoute {
   /** URL path, e.g. "/dashboard" (route groups stripped, dynamic kept verbatim) */
   route: string;
   /** absolute file path of the page component */
   file: string;
-  /** true for dynamic routes like /items/[id] — NOT seeded into the crawl (no
+  /** true for dynamic routes like /items/[id], NOT seeded into the crawl (no
    *  concrete value), but still listed in the product summary */
   dynamic: boolean;
   /** extracted human-visible text (headings, labels, copy) for the LLM summary */
@@ -32,12 +34,16 @@ export interface SourceRoute {
 const SKIP_DIRS = new Set([
   "node_modules", ".next", ".git", "dist", "build", "out", ".turbo",
   "coverage", ".vercel", ".cache", "__tests__", "test", "tests",
-  // A5: test/spec/fixture/story dirs hold fake pages and sample data — never
-  // real product routes — so keep them out of the crawl seeds and LLM prompt.
+  // test/spec/fixture/story dirs hold fake pages and sample data, never
+  // real product routes, so keep them out of the crawl seeds and LLM prompt.
   "e2e", "__mocks__", "stories", ".storybook", "cypress", "playwright", "fixtures", "spec", "specs",
 ]);
-const PAGE_FILE = /^(page|index)\.(tsx|jsx|ts|js)$/;
-const PAGES_FILE = /\.(tsx|jsx)$/;
+/** an app-router page: the only file that makes a segment a route */
+const APP_PAGE_FILE = /^page\.(tsx|jsx|ts|js|mdx)$/;
+/** a pages-router page module (declaration files excluded) */
+const PAGES_FILE = /^(?!.*\.d\.ts$).*\.(tsx|jsx|ts|js|mdx)$/;
+/** a Next.js config file at an app root */
+const NEXT_CONFIG = /^next\.config\.(js|mjs|cjs|ts|mts)$/;
 
 /** file-count budget for the repo walk: --repo ./ on a large monorepo must not
  *  become an unbounded directory enumeration on the hot path of a command the
@@ -46,7 +52,7 @@ const PAGES_FILE = /\.(tsx|jsx)$/;
 const MAX_WALK_FILES = 10_000;
 /** absolute ceiling on directory entries VISITED. With --app, files outside
  *  the selected app cost nothing against the file budget (see extractAppRoutes)
- *  — this second bound keeps the traversal itself finite on a pathological
+ *  this second bound keeps the traversal itself finite on a pathological
  *  repo instead of re-opening the unbounded-enumeration hole the file budget
  *  closed. */
 const MAX_WALK_VISITED = 200_000;
@@ -101,40 +107,93 @@ function walk(
   }
 }
 
-/** app-router: path segments after `app/` → route. `(group)` stripped, route
- *  is dynamic if any segment is `[param]`. */
-function appRouterRoute(file: string): { route: string; dynamic: boolean } | null {
-  const parts = file.split(sep);
-  // find the LAST "app" segment (handles src/app and apps/x/app)
-  let appIdx = -1;
-  for (let i = parts.length - 1; i >= 0; i--) {
-    if (parts[i] === "app") { appIdx = i; break; }
-  }
-  if (appIdx < 0) return null;
-  const segs = parts.slice(appIdx + 1, parts.length - 1); // exclude app/ and the page file
-  const routeSegs = segs.filter((s) => !(s.startsWith("(") && s.endsWith(")"))); // drop route groups
+/** app-router: the segments between the router dir and `page.*` make the
+ *  route. A `(group)` and a parallel `@slot` add no URL segment; an
+ *  intercepting segment (`(.)x`, `(..)x`, `(...)x`) renders another route,
+ *  and a `_private` folder opts out of routing, so both yield no route. The
+ *  route is dynamic if any segment is `[param]`. */
+function appRouterRoute(segs: string[]): { route: string; dynamic: boolean } | null {
+  if (segs.some((s) => /^\(\.{1,3}\)/.test(s) || s.startsWith("_"))) return null;
+  const routeSegs = segs.filter((s) => !(s.startsWith("(") && s.endsWith(")")) && !s.startsWith("@"));
   const route = "/" + routeSegs.join("/");
   const dynamic = routeSegs.some((s) => s.includes("[") || s.includes("]"));
   return { route: route === "/" ? "/" : route.replace(/\/$/, ""), dynamic };
 }
 
-/** pages-router: path after `pages/` minus extension; index → parent. */
-function pagesRouterRoute(file: string): { route: string; dynamic: boolean } | null {
-  const parts = file.split(sep);
-  let pagesIdx = -1;
-  for (let i = parts.length - 1; i >= 0; i--) {
-    if (parts[i] === "pages") { pagesIdx = i; break; }
-  }
-  if (pagesIdx < 0) return null;
-  const segs = parts.slice(pagesIdx + 1);
-  const last = segs[segs.length - 1]!;
-  if (last.startsWith("_")) return null; // _app, _document
-  if (segs.includes("api")) return null; // API routes, not pages
-  segs[segs.length - 1] = last.replace(PAGES_FILE, "");
-  if (segs[segs.length - 1] === "index") segs.pop();
-  const route = "/" + segs.join("/");
-  const dynamic = segs.some((s) => s.includes("[") || s.includes("]"));
+/** pages-router: the path under the router dir minus the extension; index
+ *  maps to its parent. `_app`, `_document`, `_error`, error pages and API
+ *  routes are not pages. */
+function pagesRouterRoute(segs: string[]): { route: string; dynamic: boolean } | null {
+  const out = [...segs];
+  const last = out[out.length - 1]!.replace(/\.(tsx|jsx|ts|js|mdx)$/, "");
+  if (out.some((s) => s.startsWith("_")) || out[0] === "api" || last === "404" || last === "500") return null;
+  out[out.length - 1] = last;
+  if (last === "index") out.pop();
+  const route = "/" + out.join("/");
+  const dynamic = out.some((s) => s.includes("[") || s.includes("]"));
   return { route: route === "/" ? "/" : route.replace(/\/$/, ""), dynamic };
+}
+
+/** true when this package.json names Next.js as a dependency */
+function hasNextDependency(file: string): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(file, "utf8")) as { dependencies?: object; devDependencies?: object };
+    return Object.hasOwn(pkg.dependencies ?? {}, "next") || Object.hasOwn(pkg.devDependencies ?? {}, "next");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Next.js app roots for this walk: every directory holding a
+ * `next.config.*` or a package.json that depends on `next`, among the walked
+ * files and in the repo path itself or its nearest parents (a --repo pointed
+ * inside an app). Only these roots' router dirs are read as routes, so an
+ * Angular `src/app` or a Vite `src/pages` folder never is.
+ */
+function nextRoots(repoPath: string, files: string[]): string[] {
+  const roots = new Set<string>();
+  for (const f of files) {
+    const base = basename(f);
+    if (NEXT_CONFIG.test(base) || (base === "package.json" && hasNextDependency(f))) roots.add(dirname(f));
+  }
+  let dir = resolve(repoPath);
+  for (let i = 0; i < 4; i++) {
+    const markers = (() => {
+      try {
+        return readdirSync(dir);
+      } catch {
+        return [];
+      }
+    })();
+    if (markers.some((m) => NEXT_CONFIG.test(m)) || (markers.includes("package.json") && hasNextDependency(join(dir, "package.json")))) {
+      roots.add(dir);
+    }
+    const up = dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return [...roots];
+}
+
+/** the route a file defines under one of the Next roots, if any */
+function routeOf(file: string, roots: string[]): { route: string; dynamic: boolean } | null {
+  const abs = resolve(file);
+  for (const root of roots) {
+    for (const [router, kind] of [["app", "app"], [join("src", "app"), "app"], ["pages", "pages"], [join("src", "pages"), "pages"]] as const) {
+      const prefix = join(root, router) + sep;
+      if (!abs.startsWith(prefix)) continue;
+      const segs = abs.slice(prefix.length).split(sep);
+      const base = segs[segs.length - 1]!;
+      if (kind === "app") {
+        if (!APP_PAGE_FILE.test(base)) return null;
+        return appRouterRoute(segs.slice(0, -1));
+      }
+      if (!PAGES_FILE.test(base)) return null;
+      return pagesRouterRoute(segs);
+    }
+  }
+  return null;
 }
 
 /** Pull human-visible text out of a page component: JSX text + string literals,
@@ -184,22 +243,18 @@ export function extractAppRoutes(repoPath: string, opts: ExtractOptions = {}): S
     console.error(
       `[source] --repo walk stopped early (kept ${state.files.length} file(s)` +
         (appName ? ` matching --app ${appName}` : "") +
-        `, visited ${state.visited} entries) — routes beyond that are not seen. ` +
+        `, visited ${state.visited} entries), routes beyond that are not seen. ` +
         `Point --repo at the app directory to scope the scan.`,
     );
   }
-  const files = state.files.filter((f) => {
-    const base = f.split(sep).pop()!;
-    const inPages = f.split(sep).includes("pages");
-    return PAGE_FILE.test(base) || (inPages && PAGES_FILE.test(base));
-  });
+  // routes are read only from Next.js apps; any other framework yields none
+  // and the crawl follows links
+  const roots = nextRoots(repoPath, state.files);
+  if (roots.length === 0) return [];
 
   const byRoute = new Map<string, SourceRoute>();
-  for (const file of files) {
-    const base = file.split(sep).pop()!;
-    const derived = PAGE_FILE.test(base) && file.split(sep).includes("app")
-      ? appRouterRoute(file)
-      : pagesRouterRoute(file);
+  for (const file of state.files) {
+    const derived = routeOf(file, roots);
     if (!derived) continue;
     if (byRoute.has(derived.route)) continue; // first wins (handles dup layouts)
     byRoute.set(derived.route, {
@@ -233,10 +288,10 @@ export function routesToSeedAndNotes(
         /* skip */
       }
     }
-    lines.push(`  ${r.route}${r.dynamic ? " (dynamic)" : ""}${r.summary ? ` — ${r.summary}` : ""}`);
+    lines.push(`  ${r.route}${r.dynamic ? " (dynamic)" : ""}${r.summary ? `, ${r.summary}` : ""}`);
   }
   const notes =
-    `APP ROUTES (from source — these are the real pages this product has):\n` +
+    `APP ROUTES (from source, these are the real pages this product has):\n` +
     lines.join("\n");
   return { seedUrls, notes };
 }

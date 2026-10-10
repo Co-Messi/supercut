@@ -125,6 +125,78 @@ const STALL = `<!doctype html><html><head><meta charset="utf-8"><title>Stall</ti
   </script>
 </body></html>`;
 
+/** a target that moves while the cursor travels to it: 150ms after the first
+ *  pointer move, a banner pushes it down and a decoy takes its old place */
+const MOVING = `<!doctype html><html><head><meta charset="utf-8"><title>Moving</title>${BASE_STYLE}${SEND}
+<style>#banner{display:none;height:240px;background:#fde68a} #decoy{position:absolute;left:48px;top:120px;width:220px;height:56px;display:none}
+#target{width:220px;height:56px}</style></head><body>
+  <h1>Pick one</h1>
+  <div id="banner">New: something shifted the layout</div>
+  <button id="target">Open report</button>
+  <button id="decoy">Not this one</button>
+  <script>
+    let armed = false;
+    addEventListener("mousemove", () => {
+      if (armed) return;
+      armed = true;
+      setTimeout(() => {
+        document.getElementById("banner").style.display = "block";
+        const d = document.getElementById("decoy");
+        const r = document.getElementById("target").getBoundingClientRect();
+        d.style.display = "block";
+        d.style.top = (r.top - 240 + scrollY) + "px";
+      }, 150);
+    });
+    for (const id of ["target", "decoy"]) {
+      document.getElementById(id).addEventListener("mousedown", () => send({ ev: "down", id }));
+      document.getElementById(id).addEventListener("click", () => send({ ev: "click", id }));
+    }
+  </script>
+</body></html>`;
+
+/** a target that an overlay covers while the cursor travels to it, and keeps
+ *  covering: the press must never happen */
+const COVERED = `<!doctype html><html><head><meta charset="utf-8"><title>Covered</title>${BASE_STYLE}${SEND}
+<style>#overlay{display:none;position:fixed;inset:0;background:rgba(20,20,20,.35);z-index:10}
+#overlay button{position:absolute;left:40%;top:40%}</style></head><body>
+  <h1>Covered</h1>
+  <button id="target">Open report</button>
+  <div id="overlay"><button id="undo">Undo delete</button></div>
+  <script>
+    let armed = false;
+    addEventListener("mousemove", () => {
+      if (armed) return;
+      armed = true;
+      setTimeout(() => { document.getElementById("overlay").style.display = "block"; }, 150);
+    });
+    for (const id of ["target", "overlay", "undo"]) {
+      document.getElementById(id).addEventListener("mousedown", (e) => { e.stopPropagation(); send({ ev: "down", id }); });
+      document.getElementById(id).addEventListener("click", (e) => { e.stopPropagation(); send({ ev: "click", id }); });
+    }
+  </script>
+</body></html>`;
+
+/** fields with content worth keeping: a rich text editor (contentEditable),
+ *  two prefilled textareas, and a static block that swallows the focusing
+ *  press. Reports every key and the fields' contents after each change. */
+const EDITOR = `<!doctype html><html><head><meta charset="utf-8"><title>Editor</title>${BASE_STYLE}${SEND}
+<style>#editor{border:1px solid #ccc;padding:12px;min-height:80px;width:640px}
+textarea{font-size:18px;width:420px;height:60px;display:block;margin:12px 0} #static{padding:16px;border:1px dashed #999;width:300px}</style></head><body>
+  <div id="editor" contenteditable="true"><p>Seeded team notes.</p><p>Second paragraph.</p></div>
+  <textarea id="notes">old note</textarea>
+  <textarea id="other" autofocus>keep me</textarea>
+  <div id="static" onmousedown="event.preventDefault()">Static summary block</div>
+  <script>
+    const state = () => send({ ev: "state",
+      editor: document.getElementById("editor").innerText,
+      notes: document.getElementById("notes").value,
+      other: document.getElementById("other").value });
+    addEventListener("keydown", (e) => send({ ev: "key", key: e.key, target: (e.target.id || e.target.tagName) }), true);
+    addEventListener("input", state, true);
+    addEventListener("load", () => document.getElementById("other").focus());
+  </script>
+</body></html>`;
+
 export interface CaptureApp {
   url: string;
   /** bodies POSTed to /log, oldest first */
@@ -161,6 +233,9 @@ export async function startCaptureApp(): Promise<CaptureApp> {
       case "/still": return html(res, STILL);
       case "/slow-from": return html(res, SLOW_FROM);
       case "/stall": return html(res, STALL);
+      case "/moving": return html(res, MOVING);
+      case "/covered": return html(res, COVERED);
+      case "/editor": return html(res, EDITOR);
       case "/slow-paint": {
         // the document commits on the first bytes; its first paint waits for the body
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });

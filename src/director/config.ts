@@ -1,5 +1,5 @@
 /**
- * Provider config — resolves which LLM the director uses from explicit env
+ * Provider config, resolves which LLM the director uses from explicit env
  * input (a loaded `.env` file or real env vars). OpenAI-compatible: works with
  * OpenRouter, DeepSeek, or a custom endpoint.
  */
@@ -31,7 +31,7 @@ export interface ResolvedProvider {
   model: string;
   baseUrl: string;
   vision: boolean;
-  /** which env var supplied the credential (e.g. "DEEPSEEK_API_KEY") —
+  /** which env var supplied the credential (e.g. "DEEPSEEK_API_KEY"),
    *  surfaced in the summary so a user always sees which key is being sent */
   keySource: string;
   summary: string;
@@ -57,7 +57,7 @@ function isLoopbackHost(hostname: string): boolean {
  * The base URL decides where the bearer key goes. Invariants:
  *  - deepseek/openrouter keys only ever reach that provider's own host, so a
  *    stray SUPERCUT_LLM_BASE_URL (in a .env, a shell profile, a CI secret)
- *    can never redirect them to a third party — refused, not ignored, so the
+ *    can never redirect them to a third party, refused, not ignored, so the
  *    user learns their config is not what they think it is;
  *  - every key travels over https, except to a loopback host (a local model
  *    server, where there is no network path to sniff).
@@ -111,7 +111,7 @@ export function resolveProvider(
     env.OPENROUTER_API_KEY ? "openrouter" : "",
   ].filter(Boolean);
 
-  // ANY multi-key situation is ambiguous — SUPERCUT_API_KEY must not silently
+  // ANY multi-key situation is ambiguous, SUPERCUT_API_KEY must not silently
   // pick a winner, so require an explicit provider.
   if (!explicitProvider && providerKeys.length > 1) {
     throw new Error("multiple provider keys found; set SUPERCUT_PROVIDER to deepseek, openrouter, or custom");
@@ -147,7 +147,7 @@ export function resolveProvider(
     keySource = "SUPERCUT_API_KEY";
     if (!apiKey && (env.DEEPSEEK_API_KEY || env.OPENROUTER_API_KEY)) {
       throw new Error(
-        "SUPERCUT_API_KEY is required when SUPERCUT_PROVIDER=custom — provider-scoped keys " +
+        "SUPERCUT_API_KEY is required when SUPERCUT_PROVIDER=custom, provider-scoped keys " +
           "(DEEPSEEK_API_KEY / OPENROUTER_API_KEY) are never sent to a custom endpoint",
       );
     }
@@ -169,7 +169,10 @@ export function resolveProvider(
   if (!model) throw new Error("SUPERCUT_MODEL is required when SUPERCUT_PROVIDER=custom");
 
   const envVision = parseVision(env.SUPERCUT_VISION);
-  const vision = overrides.vision ?? envVision ?? (provider !== "deepseek");
+  // vision is on only where the default model takes images (OpenRouter's
+  // default); a custom endpoint is often a text-only local model, so it opts
+  // in with SUPERCUT_VISION=true instead of failing mid-run
+  const vision = overrides.vision ?? envVision ?? (provider === "openrouter");
   if (provider === "deepseek" && vision) {
     throw new Error("vision cannot be enabled for DeepSeek text-only models; use OpenRouter/custom vision model or SUPERCUT_VISION=false");
   }
@@ -197,20 +200,63 @@ export interface DotEnvLoadResult {
   path: string;
   loaded: boolean;
   reason?: string;
+  /** the variables the file supplied (ones the environment already had are
+   *  not overridden and not listed) */
+  applied?: string[];
 }
 
-/** Best-effort .env loader. Always uses the internal parser — NOT the native
- *  process.loadEnvFile — so semantics are identical on every Node ≥20 version:
+/** Best-effort .env loader. Always uses the internal parser, NOT the native
+ *  process.loadEnvFile, so semantics are identical on every Node ≥20 version:
  *  a non-empty real environment variable always wins over the .env file (the
  *  native loader can override existing process.env on some versions). */
 export function loadDotEnv(path = ".env"): DotEnvLoadResult {
   if (!existsSync(path)) return { path, loaded: false, reason: "not found" };
   try {
-    parseDotEnvInto(readFileSync(path, "utf8"), process.env);
-    return { path, loaded: true };
+    const applied = parseDotEnvInto(readFileSync(path, "utf8"), process.env);
+    return { path, loaded: true, applied };
   } catch (err) {
     return { path, loaded: false, reason: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Warnings for a .env the user did not name. It is read from the current
+ * directory, usually the app being filmed, and a cloned repo can ship one: a
+ * file that points the LLM at another endpoint sends the crawled app there,
+ * and one that lifts the token ceiling removes the spend guard. Each warning
+ * names the file and the variable, and the endpoint's host; no value that can
+ * be a secret is ever printed.
+ */
+export function dotEnvWarnings(
+  path: string,
+  applied: string[],
+  env: Record<string, string | undefined>,
+  opts: { explicit: boolean },
+): string[] {
+  if (opts.explicit) return [];
+  const set = new Set(applied);
+  const out: string[] = [];
+  if (set.has("SUPERCUT_LLM_BASE_URL")) {
+    let host = "an unknown host";
+    try {
+      host = new URL(env.SUPERCUT_LLM_BASE_URL ?? "").host || host;
+    } catch {
+      /* unparseable: resolveProvider rejects it */
+    }
+    out.push(`${path} (in the current directory) sets SUPERCUT_LLM_BASE_URL: crawled app content will be sent to ${host}.`);
+  } else if (set.has("SUPERCUT_PROVIDER") && env.SUPERCUT_PROVIDER?.toLowerCase() === "custom") {
+    out.push(`${path} (in the current directory) sets SUPERCUT_PROVIDER=custom: crawled app content goes to a custom endpoint.`);
+  }
+  const budget = env.SUPERCUT_MAX_TOKENS?.trim().toLowerCase();
+  if (set.has("SUPERCUT_MAX_TOKENS") && (budget === "0" || budget === "off")) {
+    out.push(`${path} (in the current directory) sets SUPERCUT_MAX_TOKENS=${budget}: the LLM token ceiling is off.`);
+  }
+  if (out.length > 0) {
+    out.push(
+      "If you did not write that file (a cloned repo can ship one), stop now. Pass --env-file <file> to choose the file explicitly.",
+    );
+  }
+  return out.map((l) => `warning: ${l}`);
 }
 
 /** the only variables a .env may set: supercut's own. The file is read from
@@ -227,7 +273,8 @@ function isSupercutVar(key: string): boolean {
  *  preceded by whitespace), treats an empty value as unset, imports only
  *  supercut's own variables, and never overrides a non-empty real
  *  environment variable. */
-function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): void {
+function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): string[] {
+  const applied: string[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
@@ -242,6 +289,10 @@ function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): void {
     } else {
       val = val.replace(/\s+#.*$/, "");
     }
-    if (val && !env[key]) env[key] = val;
+    if (val && !env[key]) {
+      env[key] = val;
+      applied.push(key);
+    }
   }
+  return applied;
 }

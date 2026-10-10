@@ -12,7 +12,7 @@ The pipeline is: you write `recipe.json`, then `supercut record` films it, then 
 ## Safety rules (read first)
 
 1. Film a staging or local dev instance only. supercut performs real clicks and typing in the app. Never point it at production or at an app holding real customer data.
-2. Never include destructive controls in the recipe: Delete, Remove, Pay, Buy, Send, Publish, Cancel subscription, Log out, anything that mutates data you cannot reset. If a moment needs one, leave it out.
+2. Never include destructive controls in the recipe. A control is destructive when its label contains any of these words or phrases, which is the same list `supercut generate` filters on: <!-- destructive-terms:start -->Delete, Remove, Erase, Wipe, Destroy, Purge, Drop, Discard, Clear all, Empty trash, Reset, Revert, Rollback, Archive, Regenerate, Deactivate, Disable, Suspend, Terminate, Revoke, Ban, Disconnect, Uninstall, Close account, Leave team, Log out, Sign out, Publish, Deploy, Merge, Approve, Restart, Pay, Payment, Payout, Buy, Sell, Purchase, Checkout, Subscribe, Upgrade, Downgrade, Donate, Refund, Charge, Withdraw, Transfer, Send money, Order now, Book now, Cancel order<!-- destructive-terms:end -->. View-only controls such as "Clear filters", "Reset view" and "Sort" are fine. Also leave out anything else that mutates data you cannot reset, and never set `submit: true` on a field whose form is submitted by one of these controls. If a moment needs one, leave it out.
 3. Only type harmless sample text (for example `ada@example.com`). Never type real credentials or secrets.
 4. Before running record, show the user the list of actions (each selector and each typed string) and the app URL, and wait for a yes. Skipping this is the one thing the user will not forgive.
 5. Do not kill processes you did not start. If the port is taken, pick another one.
@@ -25,7 +25,7 @@ The pipeline is: you write `recipe.json`, then `supercut record` films it, then 
 npx @co-messi/supercut doctor
 ```
 
-If npm cannot find `@co-messi/supercut` (it is not published yet), use a source checkout instead: `git clone https://github.com/Co-Messi/supercut`, then `npm ci && npm run build` inside it, and run `node <checkout>/dist/cli/index.js` wherever these steps say `npx @co-messi/supercut`.
+`@co-messi/supercut` is on npm, so `npx` fetches it on first use. To run a source checkout instead (to try an unreleased fix): `git clone https://github.com/Co-Messi/supercut`, then `npm ci && npm run build` inside it, and run `node <checkout>/dist/cli/index.js` wherever these steps say `npx @co-messi/supercut`.
 
 It needs Node 20 or newer, `ffmpeg` on PATH, and Playwright's Chromium. Fix whatever it reports, using the exact command it prints: the Chromium command runs supercut's own copy of Playwright (`node "<its path>/cli.js" install chromium`). Do not substitute `npx playwright install chromium`: inside an app that has its own Playwright it installs that app's browser version, which supercut cannot use.
 
@@ -39,6 +39,8 @@ curl -sS -o /dev/null -w "%{http_code}\n" http://localhost:3000/
 
 Start the dev server in the background if it is not running, and stop only the process you started when you are done. Make sure the port belongs to this app and not to something else.
 
+If the app needs a login, supercut sees only the sign-in page. Ask the user to save a session for a staging account with `npx playwright codegen --save-storage=auth.json <app url>` (they sign in, then close the window), and pass `--storage-state auth.json` to `record`. Never type real credentials into the app yourself, never read or print the file, and keep it out of git. `record` fails a scene whose entry page lands on another site, which is what a missing or expired session looks like.
+
 ### 3. Read the app
 
 Work out what the product is and which 2 to 4 moments sell it.
@@ -49,7 +51,7 @@ Work out what the product is and which 2 to 4 moments sell it.
 
 ### 4. Write recipe.json
 
-Write it next to the app or under `out/`. It must satisfy this schema (the real parser is `parseRecipe` in `src/schema/recipe.ts`):
+Write it under `supercut-out/` (add that folder to the app's `.gitignore`; supercut avoids `out/`, which a Next.js static export owns). It must satisfy this schema (the real parser is `parseRecipe` in `src/schema/recipe.ts`):
 
 ```text
 recipe: {
@@ -81,7 +83,7 @@ Action: {
 Rules that make a recipe fail validation:
 
 - Unknown fields are rejected (the schema is strict).
-- The estimated video length must stay at or under 60 seconds: the sum of every `duration_ms` and `hold_ms`, plus 1000 ms, plus 2400 ms per scene after the first, plus an ending of 1000 to 4100 ms (the full 4100 ms when the last scene ends on a click or type, or on a hover with `focus_selector`, with no hold after it). `record` checks this before it opens a browser and prints the estimate when it is over. A good launch video is 20 to 40 seconds, so aim for 3 to 6 actions in total.
+- The estimated video length must stay at or under 60 seconds: the sum of every `duration_ms` and `hold_ms`, plus 1000 ms, plus 2400 ms per scene after the first, plus an ending of 1000 to 4100 ms (the full 4100 ms when the last scene ends on a click or type, or on a hover with `focus_selector`, with no hold after it). `record` checks this before it opens a browser and prints the estimate when it is over. A `type` action counts as at least 820 ms plus 60 ms per character after the first (plus 350 ms with `submit`), even when its `duration_ms` is shorter, because that is how long typing it takes; typed text is at most 500 characters. A good launch video is 20 to 40 seconds, so aim for 3 to 6 actions in total.
 - Each scene must be independently reachable from its `entry.url`. Do not rely on typed text, filters or other page state left behind by an earlier scene: a scene reloads its `entry.url` unless the previous scene only hovered or waited on that same page, in which case it continues from there.
 - An action's selector must be visible when the action runs. A control that appears only after another action (a form behind a "Get started" button) needs that action first, in the same scene.
 
@@ -120,15 +122,17 @@ Tips for a good take:
 Show the actions list and get a yes (safety rule 4). Then:
 
 ```bash
-npx @co-messi/supercut record --recipe recipe.json --out out/take
+npx @co-messi/supercut record --recipe supercut-out/recipe.json --out supercut-out/take
 ```
+
+For an app behind a login, add `--storage-state auth.json` (step 2).
 
 `record` exits nonzero if any scene failed, and prints which. A failed scene usually means a wrong selector, a wrong URL, or another app on that port. Fix the recipe and record again. Do not render a partial take unless the user agrees.
 
 ### 6. Render
 
 ```bash
-npx @co-messi/supercut render --take out/take --out out/final.mp4 --music daybreak
+npx @co-messi/supercut render --take supercut-out/take --out supercut-out/final.mp4 --music daybreak
 ```
 
 Replace `daybreak` with the recipe's `music_track`. Without `--music` the video is silent. Optional: `--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper` for the backdrop.
@@ -138,9 +142,9 @@ Replace `daybreak` with the recipe's `music_track`. Without `--music` the video 
 Make a contact sheet and view it with your image-reading tool:
 
 ```bash
-ffmpeg -y -i out/final.mp4 -vf "fps=1/3,scale=480:-1,tile=4x3" -frames:v 1 out/contact.png
+ffmpeg -y -i supercut-out/final.mp4 -vf "fps=1/3,scale=480:-1,tile=4x3" -frames:v 1 supercut-out/contact.png
 ```
 
 Check that the cursor lands on the intended controls, the camera frames the result, no frame shows an error page or a blank screen, and nothing sensitive is on screen. If something is wrong, adjust the recipe and repeat from step 5.
 
-Report the path of `out/final.mp4`, the scenes you filmed, and anything you noticed that the user might want changed. Do not claim the video looks good unless you actually looked at the contact sheet.
+Report the path of `supercut-out/final.mp4`, the scenes you filmed, and anything you noticed that the user might want changed. Do not claim the video looks good unless you actually looked at the contact sheet.

@@ -15,6 +15,17 @@ describe("agent skill and plugin packaging", () => {
     for (const b of blocks) expect(() => parseRecipe(JSON.parse(b))).not.toThrow();
   });
 
+  it("the skill uses the published package, not a claim that it is unpublished", () => {
+    expect(skill).not.toMatch(/not published/i);
+    expect(skill).toMatch(/^npx @co-messi\/supercut doctor$/m);
+  });
+
+  it("the spike results say they are history, not the production capture path", () => {
+    const spike = read("spikes/RESULTS.md");
+    expect(spike.split("\n").slice(0, 8).join("\n")).toMatch(/historical/i);
+    expect(spike).toMatch(/JPEG q92/);
+  });
+
   it("the skill has frontmatter naming itself", () => {
     expect(skill).toMatch(/^---\nname: supercut\ndescription: .+\n---/);
   });
@@ -35,6 +46,14 @@ describe("agent skill and plugin packaging", () => {
     const { FOCUS_DWELL_MS, SETTLE_TAIL_MS } = await import("../src/render/plan.js");
     expect(skill).toContain(`plus ${TAKE_HEAD_MS} ms, plus ${SCENE_CHANGE_MS} ms per scene after the first`);
     expect(skill).toContain(`${TAKE_TAIL_MS} to ${FOCUS_DWELL_MS + SETTLE_TAIL_MS} ms`);
+  });
+
+  it("the skill's typing rule uses the schema's real typing floor", async () => {
+    const { ENTER_BEAT_MS, MAX_TYPED_TEXT, MIN_KEY_GAP_MS, MIN_TYPE_ACTION_MS } = await import("../src/schema/index.js");
+    expect(skill).toContain(
+      `at least ${MIN_TYPE_ACTION_MS} ms plus ${MIN_KEY_GAP_MS} ms per character after the first (plus ${ENTER_BEAT_MS} ms with \`submit\`)`,
+    );
+    expect(skill).toContain(`at most ${MAX_TYPED_TEXT} characters`);
   });
 
   it("the skill lists exactly the bundled music tracks", async () => {
@@ -77,7 +96,7 @@ describe("prose style", () => {
   it.each(["README.md", "SECURITY.md", "CHANGELOG.md", "AGENTS.md", ".claude/skills/supercut/SKILL.md"])(
     "%s has no em or en dashes",
     (file) => {
-      expect(read(file)).not.toMatch(/[–—]/);
+      expect(read(file)).not.toMatch(/[\u2013\u2014]/);
     },
   );
 });

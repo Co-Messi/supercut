@@ -10,6 +10,7 @@ import { installRequestGate, settleGatedRedirect } from "../security/browser-gat
 import { redactForPrompt } from "../security/redaction.js";
 import { isDestructiveLabel } from "../security/destructive.js";
 import { isSameSite } from "../security/site.js";
+import { CAPTURE_VIEWPORT } from "../capture/viewport.js";
 import { resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 
 /**
@@ -196,7 +197,7 @@ async function collectRegions(page: Page): Promise<RegionItem[]> {
   const out: RegionItem[] = [];
   const seen = new Set<string>();
   // a region must be a meaningful share of the viewport to be worth framing
-  const MIN_AREA = 1280 * 800 * 0.12;
+  const MIN_AREA = CAPTURE_VIEWPORT.width * CAPTURE_VIEWPORT.height * 0.12;
   for (let i = 0; i < count; i++) {
     const el = els.nth(i);
     const box = await el.boundingBox().catch(() => null);
@@ -590,7 +591,7 @@ export async function crawlApp(
     // are not routed through the context, which would hand the page an
     // ungated network channel
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
+      viewport: { ...CAPTURE_VIEWPORT },
       ...(allowPrivateNetwork ? {} : { serviceWorkers: "block" as const }),
       ...(opts.storageState ? { storageState: opts.storageState } : {}),
     });

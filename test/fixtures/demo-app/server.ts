@@ -284,6 +284,17 @@ const CRUD = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Cus
   <div id="card" data-testid="danger-card"><button style="width:200px;height:90px">Delete</button></div>
 </body></html>`;
 
+/** a responsive page: one control exists only at the filmed width (1920),
+ *  another only below 1400. The crawl must see the layout that is filmed. */
+const WIDE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Wide</title>
+<style>body{font:16px sans-serif;padding:40px} #wide-only{display:none} #narrow-only{display:inline-block}
+@media (min-width: 1600px) { #wide-only{display:inline-block} }
+@media (min-width: 1400px) { #narrow-only{display:none} }</style></head><body>
+  <h1>Responsive</h1>
+  <button id="wide-only">Open the side panel</button>
+  <button id="narrow-only">Open the menu</button>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -327,6 +338,7 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/keys") ? KEYS
       : req.url?.startsWith("/forms") ? FORMS
       : req.url?.startsWith("/crud") ? CRUD
+      : req.url?.startsWith("/wide") ? WIDE
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);

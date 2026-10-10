@@ -128,6 +128,13 @@ describe("inventory crawler on the fixture app", () => {
     expect(inv.some((i) => i.selector === "#card")).toBe(false);
   }, 60_000);
 
+  it("crawls at the viewport the recorder films, so responsive controls are judged as filmed", async () => {
+    const digests = await crawlApp(`${app.url}/wide`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const inv = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));
+    expect(inv.get("#wide-only")?.hidden).toBeUndefined(); // visible at 1920
+    expect(inv.get("#narrow-only")?.hidden).toBe(true); // hidden at 1920
+  }, 60_000);
+
   it("flags fields whose form submits through a destructive control, and only those", async () => {
     const digests = await crawlApp(`${app.url}/forms`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     const bySel = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));

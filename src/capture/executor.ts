@@ -36,6 +36,7 @@ import type { EventLog, KnownEvent, Recipe, Scene, Action } from "../schema/inde
 import { cursorPath, graphemes, makeRng, typingPlan, type CursorPoint } from "./cursor.js";
 import { NavigationLog } from "./navigation.js";
 import { isSameSite } from "../security/site.js";
+import { CAPTURE_VIEWPORT } from "./viewport.js";
 import { resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 import {
   GATED_REDIRECT_HEADER,
@@ -51,7 +52,7 @@ import {
   type RequestGate,
 } from "../security/url-policy.js";
 
-const VIEWPORT = { width: 1920, height: 1080 };
+const VIEWPORT = CAPTURE_VIEWPORT;
 const DPR = 2;
 const FPS = 60;
 const FRAME_MS = 1000 / FPS;

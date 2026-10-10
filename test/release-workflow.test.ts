@@ -11,6 +11,14 @@ const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "u
 const release = read(".github/workflows/release.yml");
 const ci = read(".github/workflows/ci.yml");
 
+describe("CI matrix", () => {
+  it("covers the engines floor and the current LTS (Node 24)", () => {
+    const pkg = JSON.parse(read("package.json")) as { engines: { node: string } };
+    expect(pkg.engines.node).toBe(">=20");
+    expect(ci).toMatch(/node-version: \[20, 22, 24\]/);
+  });
+});
+
 describe("release workflow", () => {
   it("publishes with trusted publishing, not a stored npm token", () => {
     expect(release).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN/);

@@ -16,9 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # exercise the advertised engines floor (>=20) alongside current LTS, so
-        # a Node-20-incompatible API can't slip in against the stated support
-        node-version: [20, 22]
+        # the advertised engines floor (>=20; Node 20 is past end of life but
+        # still supported here), the previous LTS and the current LTS (24), so
+        # an API missing on any of them can't slip in
+        node-version: [20, 22, 24]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

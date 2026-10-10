@@ -1,4 +1,5 @@
 import { ZodError } from "zod";
+import { terminalSafe } from "../security/terminal.js";
 
 /**
  * Human-readable CLI errors. Users see one short message and the command's
@@ -96,14 +97,16 @@ export function recordOutcome(res: {
   sceneErrors?: Record<string, string>;
 }): { code: number; lines: string[] } {
   if (res.failedScenes.length === 0 && !res.aborted) return { code: 0, lines: [] };
+  // scene names come from the recipe and reasons can quote the page: shown
+  // with control characters escaped
   const lines = [
-    `supercut: ${res.failedScenes.length} scene(s) failed: ${res.failedScenes.join(", ") || "(none named)"}` +
+    `supercut: ${res.failedScenes.length} scene(s) failed: ${terminalSafe(res.failedScenes.join(", ")) || "(none named)"}` +
       (res.aborted ? " (recording aborted early)" : ""),
   ];
   const reasons = res.failedScenes.map((name) => res.sceneErrors?.[name]).filter((r): r is string => !!r);
   for (const name of res.failedScenes) {
     const reason = res.sceneErrors?.[name]?.split("\n")[0]?.trim();
-    if (reason) lines.push(`  ${name}: ${reason.length > 300 ? `${reason.slice(0, 300)}...` : reason}`);
+    if (reason) lines.push(terminalSafe(`  ${name}: ${reason.length > 300 ? `${reason.slice(0, 300)}...` : reason}`));
   }
   lines.push("The take was still written, but it is partial footage.");
   // without reasons (an older caller) the URL and port are the likeliest cause

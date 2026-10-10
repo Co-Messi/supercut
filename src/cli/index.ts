@@ -2,6 +2,7 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { ZodError } from "zod";
 import { doctor } from "./doctor.js";
+import { terminalSafe } from "../security/terminal.js";
 import {
   CliError,
   describeArgsError,
@@ -184,7 +185,7 @@ async function main(): Promise<number> {
         `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames ` +
           `(avg ${res.avgSourceFps.toFixed(1)} fps source), ` +
           `${res.eventLog.events.length} events` +
-          (res.failedScenes.length ? `, FAILED scenes: ${res.failedScenes.join(", ")}` : ""),
+          (res.failedScenes.length ? `, FAILED scenes: ${terminalSafe(res.failedScenes.join(", "))}` : ""),
       );
       // the take is on disk either way; a failed scene still means the caller
       // must not treat this run as a success
@@ -426,11 +427,14 @@ main().then(
     process.exitCode = code;
   },
   (err) => {
+    // an error can quote a scene name or page text: escape control
+    // characters, keeping the message's own line breaks
+    const safe = (s: string) => s.split("\n").map(terminalSafe).join("\n");
     if (err instanceof CliError) {
-      console.error(`supercut: ${err.message}`);
+      console.error(safe(`supercut: ${err.message}`));
       if (err.usage) console.error(err.usage);
     } else {
-      console.error(describeError(err));
+      console.error(safe(describeError(err)));
     }
     process.exitCode = 1;
   },

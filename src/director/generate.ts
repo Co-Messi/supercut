@@ -28,6 +28,7 @@ import { writeRecipe } from "./script.js";
 import { assertSafeNavigationUrl } from "../security/url-policy.js";
 import { publicTargetNote, resolvePrivateNetworkPolicy } from "../security/network-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
+import { quoteForTerminal, terminalSafe } from "../security/terminal.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
@@ -250,20 +251,24 @@ export function formatRecipePreview(
     if (tag === undefined) return " (replaces existing text in an input or textarea, appends elsewhere)";
     return tag === "input" || tag === "textarea" ? " (replaces existing text)" : " (appends to existing text)";
   };
+  // every field is model output derived from page text: control characters
+  // show as escapes, and quoted fields are JSON string literals
+  const q = quoteForTerminal;
+  const t = terminalSafe;
   const lines: string[] = [];
   for (const [i, scene] of recipe.scenes.entries()) {
     lines.push(
-      `scene ${i + 1} "${scene.name}" @ ${scene.entry.url}` +
-        (scene.depends_on.length ? ` (after ${scene.depends_on.join(", ")})` : ""),
+      `scene ${i + 1} ${q(scene.name)} @ ${t(scene.entry.url)}` +
+        (scene.depends_on.length ? ` (after ${scene.depends_on.map(q).join(", ")})` : ""),
     );
     for (const a of [...scene.entry.prelude, ...scene.actions]) {
       let desc = a.kind as string;
-      if (a.kind === "goto" && a.url) desc += ` ${a.url}`;
-      if (a.selector) desc += ` ${a.selector}`;
+      if (a.kind === "goto" && a.url) desc += ` ${t(a.url)}`;
+      if (a.selector) desc += ` ${t(a.selector)}`;
       if (a.kind === "type") {
-        desc += ` "${a.text ?? ""}"${a.submit ? " then press Enter" : ""}${typeEffect(scene.entry.url, a.selector)}`;
+        desc += ` ${q(a.text ?? "")}${a.submit ? " then press Enter" : ""}${typeEffect(scene.entry.url, a.selector)}`;
       }
-      desc += ` (${a.duration_ms}ms${a.focus_selector ? `, focus ${a.focus_selector}` : ""})`;
+      desc += ` (${a.duration_ms}ms${a.focus_selector ? `, focus ${t(a.focus_selector)}` : ""})`;
       lines.push(`  · ${desc}`);
     }
     if (scene.hold_ms > 0) lines.push(`  · hold ${scene.hold_ms}ms`);
@@ -315,7 +320,10 @@ function repoNotes(repoPath: string): string | undefined {
 }
 
 export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
-  const log = opts.log ?? ((m: string) => console.log(`[generate] ${m}`));
+  // log lines carry model and page strings (product summary, moment titles,
+  // verdict reasons, excluded labels): none may reach the terminal raw
+  const sink = opts.log ?? ((m: string) => console.log(`[generate] ${m}`));
+  const log = (m: string): void => sink(terminalSafe(m));
   const vision = opts.vision !== undefined ? opts.vision : !(opts.noVision ?? false);
   const budget = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
   // every LLM call in the run goes through the budget guard (analyze, script,

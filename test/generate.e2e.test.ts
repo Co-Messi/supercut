@@ -112,6 +112,22 @@ describe("inventory crawler on the fixture app", () => {
     expect(fleet.excludedDestructive).toContain("delete-log-2024");
   }, 60_000);
 
+  it("keeps table rows with a nested Delete button filmable, judged by their own label, and drops the buttons", async () => {
+    const digests = await crawlApp(`${app.url}/crud`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+    const inv = digests[0]!.inventory;
+    for (const row of ["#row-acme", "#row-globex", "#row-initech"]) {
+      const item = inv.find((i) => i.selector === row);
+      expect(item, `${row} must stay filmable`).toBeDefined();
+      expect(item!.text).not.toMatch(/delete/i);
+    }
+    expect(inv.some((i) => /delete/i.test(i.text))).toBe(false);
+    expect(inv.some((i) => i.text === "Edit")).toBe(true);
+    // a camera control is not destructive
+    expect(inv.some((i) => i.selector === "#reset-view")).toBe(true);
+    // a container whose centre is its Delete button would press it: excluded
+    expect(inv.some((i) => i.selector === "#card")).toBe(false);
+  }, 60_000);
+
   it("flags fields whose form submits through a destructive control, and only those", async () => {
     const digests = await crawlApp(`${app.url}/forms`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     const bySel = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));

@@ -342,6 +342,34 @@ async function formSubmitLabels(el: Locator): Promise<string[]> {
     .catch(() => [] as string[]);
 }
 
+/**
+ * For an element that contains interactive descendants (links, buttons,
+ * fields, role=button and onclick elements): its own text with those
+ * descendants' text left out, and the label of the descendant at its centre,
+ * if one is there. Null for an element with no interactive descendants.
+ */
+async function containerLabels(el: Locator): Promise<{ own: string; centre: string | null } | null> {
+  return el
+    .evaluate((node) => {
+      const INTERACTIVE =
+        "a[href], button, input, textarea, select, [role=button], [role=link], [role=menuitem], [role=tab], [onclick]";
+      if (!node.querySelector(INTERACTIVE)) return null;
+      const clone = node.cloneNode(true) as Element;
+      for (const n of Array.from(clone.querySelectorAll(INTERACTIVE))) n.remove();
+      const r = node.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      const control = hit && node.contains(hit) && hit !== node ? hit.closest(INTERACTIVE) : null;
+      const centre =
+        control && node.contains(control) && control !== node
+          ? [control.getAttribute("aria-label"), (control as HTMLElement).innerText, control.getAttribute("value")]
+              .filter((s): s is string => !!s && s.trim() !== "")
+              .join(" ")
+          : null;
+      return { own: (clone.textContent ?? "").replace(/\s+/g, " ").trim(), centre: centre || null };
+    })
+    .catch(() => null);
+}
+
 async function digestPage(page: Page, withScreenshot: boolean, allowDestructive = false): Promise<PageDigest> {
   const title = await page.title();
   const { theme, accentColor } = await probeTheme(page);
@@ -381,10 +409,16 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     const placeholder = await el.getAttribute("placeholder").catch(() => null);
     const value = await el.getAttribute("value").catch(() => null);
     const href = (await el.getAttribute("href").catch(() => null)) ?? undefined;
+    // A container (a table row, a list item, a card) holding its own controls
+    // is judged by ITS label: its text minus the text of those nested
+    // controls, which are candidates of their own and judged separately.
+    // Otherwise every "Acme  Edit  Delete" row of an admin table is excluded.
+    const container = box ? await containerLabels(el) : null;
     const text = (
-      (await el.innerText().catch(() => "")) ||
-      (await el.textContent().catch(() => "")) ||
-      placeholder || aria || ""
+      container?.own ??
+      ((await el.innerText().catch(() => "")) ||
+        (await el.textContent().catch(() => "")) ||
+        placeholder || aria || "")
     ).trim().replace(/\s+/g, " ").slice(0, 80);
 
     // Fail-safe: never put a destructive/irreversible control into the inventory
@@ -395,12 +429,15 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
     // to the DOM and getEventListeners is devtools-only — so any destructive-
     // lexicon hit is excluded outright. Losing a passive row that merely SHARES a
     // name with a verb ("checkout-api") is a small price for never scripting a
-    // real Delete/Pay; --allow-destructive re-includes them.
+    // real Delete/Pay; --allow-destructive re-includes them. A container whose
+    // centre (where the recorder presses) is a nested destructive control is
+    // excluded too: pressing the row would press that control.
     const labels = [text, aria, value].filter((s): s is string => Boolean(s));
-    if (!allowDestructive && labels.some((s) => isDestructiveLabel(s))) {
+    const centreDestructive = !!container?.centre && isDestructiveLabel(container.centre);
+    if (!allowDestructive && (labels.some((s) => isDestructiveLabel(s)) || centreDestructive)) {
       // name it by whichever label tripped the filter: an <input type=button>
       // has no text, only a value, and must still be counted in the notice
-      excludedDestructive.push(labels[0]!);
+      excludedDestructive.push(labels[0] ?? container?.centre ?? tag);
       continue;
     }
 

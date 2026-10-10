@@ -268,6 +268,22 @@ button{font-size:16px;padding:10px 18px;margin:8px}</style></head><body>
   <div><button form="ext" type="submit" id="outside">Transfer</button></div>
 </body></html>`;
 
+/** an admin table: every row carries its own Edit and Delete buttons. The
+ *  rows must stay filmable (judged by their own label), the Delete buttons
+ *  must not. A card whose centre IS its Delete button is not a safe row. */
+const CRUD = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Customers</title>
+<style>body{font:16px sans-serif;padding:40px} table{border-collapse:collapse;width:900px} td{padding:14px;border-bottom:1px solid #eee}
+#card{width:240px;height:120px;border:1px solid #ccc;display:flex;align-items:center;justify-content:center;margin-top:24px}</style></head><body>
+  <h1>Customers</h1>
+  <button id="reset-view">Reset view</button>
+  <table><tbody>
+    <tr id="row-acme"><td>Acme Corp</td><td>12 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
+    <tr id="row-globex"><td>Globex</td><td>40 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
+    <tr id="row-initech"><td>Initech</td><td>7 seats</td><td><button class="edit">Edit</button> <button class="del">Delete</button></td></tr>
+  </tbody></table>
+  <div id="card" data-testid="danger-card"><button style="width:200px;height:90px">Delete</button></div>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -310,6 +326,7 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/probe") ? PROBE
       : req.url?.startsWith("/keys") ? KEYS
       : req.url?.startsWith("/forms") ? FORMS
+      : req.url?.startsWith("/crud") ? CRUD
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);

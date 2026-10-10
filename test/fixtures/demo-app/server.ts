@@ -295,10 +295,10 @@ const WIDE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Wid
   <button id="narrow-only">Open the menu</button>
 </body></html>`;
 
-/** a long table: 2,000 rows share one data-testid */
-const BIG = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Big</title>
+/** a long table: `rows` rows (2,000 by default) share one data-testid */
+const BIG = (rows: number) => `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Big</title>
 <style>body{font:14px sans-serif;padding:20px} li{padding:4px}</style></head><body><h1>Events</h1><ul>
-${Array.from({ length: 2000 }, (_, i) => `<li data-testid="event-row">Event ${i + 1}</li>`).join("")}
+${Array.from({ length: rows }, (_, i) => `<li data-testid="event-row">Event ${i + 1}</li>`).join("")}
 </ul></body></html>`;
 
 /** navigation links, some of which mutate on GET: the crawl must never
@@ -355,7 +355,8 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/forms") ? FORMS
       : req.url?.startsWith("/crud") ? CRUD
       : req.url?.startsWith("/wide") ? WIDE
-      : req.url?.startsWith("/big") ? BIG
+      : req.url?.startsWith("/big")
+        ? BIG(Math.min(5000, Number(new URL(req.url, "http://fixture.invalid").searchParams.get("rows") ?? 2000)))
       : req.url?.startsWith("/nav") ? NAV
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });

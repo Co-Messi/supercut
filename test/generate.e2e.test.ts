@@ -129,17 +129,24 @@ describe("inventory crawler on the fixture app", () => {
   }, 60_000);
 
   it("disambiguates rows of a 2,000-row table with one lookup each, not one probe per row", async () => {
-    const t0 = Date.now();
-    const digests = await crawlApp(`${app.url}/big`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
-    const elapsed = Date.now() - t0;
-    const rows = digests[0]!.inventory.filter((i) => i.selector.includes('[data-testid="event-row"]'));
+    const timed = async (rows: number) => {
+      const t0 = Date.now();
+      const digests = await crawlApp(`${app.url}/big?rows=${rows}`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
+      return { ms: Date.now() - t0, digests };
+    };
+    const small = await timed(20);
+    const big = await timed(2000);
+    const rows = big.digests[0]!.inventory.filter((i) => i.selector.includes('[data-testid="event-row"]'));
     expect(rows.map((r) => r.selector)).toEqual(
       [1, 2, 3, 4, 5, 6].map((k) => `:nth-match([data-testid="event-row"], ${k})`),
     );
     expect(rows.map((r) => r.text)).toEqual([1, 2, 3, 4, 5, 6].map((k) => `Event ${k}`));
-    // probing every match cost thousands of CDP round trips per row
-    expect(elapsed).toBeLessThan(8_000);
-  }, 120_000);
+    // probing every match cost one CDP round trip per row for each of the six
+    // inventoried rows: about 12,000 extra round trips, over 15x the 20-row
+    // crawl (40.7s against about 1s locally). Bounded relative to the 20-row
+    // crawl on the same machine, so a slow runner does not fail it.
+    expect(big.ms).toBeLessThan(small.ms * 4 + 2_000);
+  }, 180_000);
 
   it("never requests a link whose label or path is destructive (a GET to /logout signs the user out)", async () => {
     for (const p of ["/logout", "/session/sign-out", "/history/clear-all", "/dash"]) app.hits.delete(p);

@@ -141,6 +141,17 @@ describe("inventory crawler on the fixture app", () => {
     expect(elapsed).toBeLessThan(8_000);
   }, 120_000);
 
+  it("never requests a link whose label or path is destructive (a GET to /logout signs the user out)", async () => {
+    for (const p of ["/logout", "/session/sign-out", "/history/clear-all", "/dash"]) app.hits.delete(p);
+    const digests = await crawlApp(`${app.url}/nav`, { maxPages: 5, screenshots: false, allowPrivateNetwork: true });
+    expect(app.hits.get("/logout") ?? 0).toBe(0);
+    expect(app.hits.get("/session/sign-out") ?? 0).toBe(0);
+    expect(app.hits.get("/history/clear-all") ?? 0).toBe(0);
+    // ordinary links are still followed
+    expect(app.hits.get("/dash") ?? 0).toBeGreaterThan(0);
+    expect(digests.length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
   it("crawls at the viewport the recorder films, so responsive controls are judged as filmed", async () => {
     const digests = await crawlApp(`${app.url}/wide`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     const inv = new Map(digests[0]!.inventory.map((i) => [i.selector, i]));

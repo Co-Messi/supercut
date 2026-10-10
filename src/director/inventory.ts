@@ -706,6 +706,11 @@ export async function crawlApp(
         if (!item.href) continue;
         try {
           const linked = new URL(item.href, digest.url);
+          // the crawl is a GET of every followed link, and some apps mutate
+          // on GET (/logout, /history/clear-all): a link whose path reads as
+          // destructive is never requested (its label was judged already)
+          const pathWords = decodeURIComponent(linked.pathname).replace(/[/_.-]+/g, " ");
+          if (!allowDestructive && isDestructiveLabel(pathWords)) continue;
           if (isSameSite(appUrl, linked.href) && isCrawlable(linked) && !visited.has(linked.pathname + linked.search)) {
             await assertSafeNavigationUrl(linked.href, { allowPrivateNetwork });
             queue.pushLink(linked.href);

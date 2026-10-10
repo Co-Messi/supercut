@@ -301,6 +301,16 @@ const BIG = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Big<
 ${Array.from({ length: 2000 }, (_, i) => `<li data-testid="event-row">Event ${i + 1}</li>`).join("")}
 </ul></body></html>`;
 
+/** navigation links, some of which mutate on GET: the crawl must never
+ *  request those, whether the label or only the path gives them away */
+const NAV = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon: Nav</title></head><body>
+  <h1>Settings</h1>
+  <a href="/dash">Dashboard</a>
+  <a href="/logout">Log out</a>
+  <a href="/session/sign-out">Leave</a>
+  <a href="/history/clear-all">History</a>
+</body></html>`;
+
 export interface DemoApp {
   url: string;
   close: () => Promise<void>;
@@ -346,6 +356,7 @@ export async function startDemoApp(port = 0): Promise<DemoApp> {
       : req.url?.startsWith("/crud") ? CRUD
       : req.url?.startsWith("/wide") ? WIDE
       : req.url?.startsWith("/big") ? BIG
+      : req.url?.startsWith("/nav") ? NAV
       : LANDING;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);

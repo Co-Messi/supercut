@@ -33,7 +33,7 @@ Usage:
 Key generate flags:
   --url <url>       the running app to film (required)
   --repo <path>     the app's source, so the director films real routes
-  --dry-run         write recipe.json and stop before touching the app
+  --dry-run         crawl (page loads only), write recipe.json, stop before any click or typing
   --yes             film without the confirmation prompt (required when there is no terminal)
   --out <dir>       where the take and video go (default out/generate)
   --max-tokens <n>  LLM token ceiling, checked before every call (default 300000, 0 or off disables)

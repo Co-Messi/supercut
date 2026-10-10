@@ -14,8 +14,8 @@ Try the keyless path against the bundled demo app (port 4319, chosen to avoid Vi
 
 ```bash
 python3 -m http.server 4319 --directory examples/demo-app &
-node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
-node dist/cli/index.js render --take out/take --out out/final.mp4
+node dist/cli/index.js record --recipe examples/demo.recipe.json --out supercut-out/take
+node dist/cli/index.js render --take supercut-out/take --out supercut-out/final.mp4
 ```
 
 Agents working on this repo: see [AGENTS.md](AGENTS.md) for commands, test rules and invariants.

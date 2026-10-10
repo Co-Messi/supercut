@@ -324,6 +324,41 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(render.video.durationS * 1000).toBeGreaterThanOrEqual(plain.durationMs + 1000);
   }, 300_000);
 
+  it("a QC cut re-films once without the scene, renders that take, and removes the superseded one", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-retake-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0, app_url: app.url, music_track: "off",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 0 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
+        ],
+      }),
+      JSON.stringify({ verdicts: [{ scene: "signup", verdict: "ok", reason: "fine" }, { scene: "dashboard", verdict: "cut", reason: "blank" }] }),
+      JSON.stringify({ verdicts: [{ scene: "signup", verdict: "ok", reason: "fine" }] }),
+    ]);
+    const res = await generate({ llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: () => {} });
+    expect(res.retakes).toBe(1);
+    expect(res.recipe.scenes.map((s) => s.name)).toEqual(["signup"]);
+    expect(llm.calls).toBe(4);
+    expect(existsSync(join(outDir, "take-1", "events.json"))).toBe(true);
+    expect(existsSync(join(outDir, "take-0"))).toBe(false);
+    expect(statSync(res.outFile).size).toBeGreaterThan(50_000);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.takes).toBe(2);
+  }, 300_000);
+
   it("a vision QC failure after capture still renders the recorded take", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-qcfail-"));
     dirs.push(outDir);

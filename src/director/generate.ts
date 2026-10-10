@@ -608,6 +608,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       ...(hasAdjustments(adjustments) ? { adjust: adjustments } : {}),
     });
     log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
+    // a take a re-take replaced is hundreds of MB of frames no video uses:
+    // once the video exists, only the rendered take is kept
+    for (let i = 0; i < retakes; i++) rmSync(join(opts.outDir, `take-${i}`), { recursive: true, force: true });
+    if (retakes > 0) log(`   removed ${retakes} superseded take(s); the rendered take is ${takeDir}`);
 
     return { outFile, recipe, analysis, retakes, verdictLog };
   } catch (err) {

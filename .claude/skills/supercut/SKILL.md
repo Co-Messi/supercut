@@ -51,7 +51,7 @@ Work out what the product is and which 2 to 4 moments sell it.
 
 ### 4. Write recipe.json
 
-Write it next to the app or under `out/`. It must satisfy this schema (the real parser is `parseRecipe` in `src/schema/recipe.ts`):
+Write it under `supercut-out/` (add that folder to the app's `.gitignore`; supercut avoids `out/`, which a Next.js static export owns). It must satisfy this schema (the real parser is `parseRecipe` in `src/schema/recipe.ts`):
 
 ```text
 recipe: {
@@ -122,7 +122,7 @@ Tips for a good take:
 Show the actions list and get a yes (safety rule 4). Then:
 
 ```bash
-npx @co-messi/supercut record --recipe recipe.json --out out/take
+npx @co-messi/supercut record --recipe supercut-out/recipe.json --out supercut-out/take
 ```
 
 For an app behind a login, add `--storage-state auth.json` (step 2).
@@ -132,7 +132,7 @@ For an app behind a login, add `--storage-state auth.json` (step 2).
 ### 6. Render
 
 ```bash
-npx @co-messi/supercut render --take out/take --out out/final.mp4 --music daybreak
+npx @co-messi/supercut render --take supercut-out/take --out supercut-out/final.mp4 --music daybreak
 ```
 
 Replace `daybreak` with the recipe's `music_track`. Without `--music` the video is silent. Optional: `--bg cobalt|glacier|sunrise|daydream|magenta|coral|lavender|aurora|midnight|dusk|paper` for the backdrop.
@@ -142,9 +142,9 @@ Replace `daybreak` with the recipe's `music_track`. Without `--music` the video 
 Make a contact sheet and view it with your image-reading tool:
 
 ```bash
-ffmpeg -y -i out/final.mp4 -vf "fps=1/3,scale=480:-1,tile=4x3" -frames:v 1 out/contact.png
+ffmpeg -y -i supercut-out/final.mp4 -vf "fps=1/3,scale=480:-1,tile=4x3" -frames:v 1 supercut-out/contact.png
 ```
 
 Check that the cursor lands on the intended controls, the camera frames the result, no frame shows an error page or a blank screen, and nothing sensitive is on screen. If something is wrong, adjust the recipe and repeat from step 5.
 
-Report the path of `out/final.mp4`, the scenes you filmed, and anything you noticed that the user might want changed. Do not claim the video looks good unless you actually looked at the contact sheet.
+Report the path of `supercut-out/final.mp4`, the scenes you filmed, and anything you noticed that the user might want changed. Do not claim the video looks good unless you actually looked at the contact sheet.

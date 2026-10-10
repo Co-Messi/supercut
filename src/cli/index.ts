@@ -35,7 +35,7 @@ Key generate flags:
   --repo <path>     the app's source, so the director films real routes
   --dry-run         crawl (page loads only), write recipe.json, stop before any click or typing
   --yes             film without the confirmation prompt (required when there is no terminal)
-  --out <dir>       where the take and video go (default out/generate)
+  --out <dir>       where the take and video go (default supercut-out/generate)
   --max-tokens <n>  LLM token ceiling, checked before every call (default 300000, 0 or off disables)
   --storage-state <file>    film signed in: a Playwright storage state (also on record)
   --block-private-network   refuse localhost and private addresses, for any target
@@ -168,7 +168,7 @@ async function main(): Promise<number> {
       }
 
       const { record } = await import("../capture/index.js");
-      const outDir = values.out ?? "out/take";
+      const outDir = values.out ?? "supercut-out/take";
       console.log(`recording ${recipe.scenes.length} scene(s) from ${recipe.app_url} → ${outDir}`);
       const t0 = Date.now();
       const storageState = values["storage-state"] ? await storageStateOrUsage(values["storage-state"], RECORD_USAGE) : undefined;
@@ -218,7 +218,7 @@ async function main(): Promise<number> {
         );
       }
       const { renderTake } = await import("../render/index.js");
-      const outFile = values.out ?? "out/final.mp4";
+      const outFile = values.out ?? "supercut-out/final.mp4";
       console.log(`rendering take ${values.take} → ${outFile}`);
       const res = await renderTake({
         takeDir: values.take,
@@ -354,7 +354,7 @@ async function main(): Promise<number> {
       const res = await generate({
         llm: provider.client,
         url: values.url,
-        outDir: values.out ?? "out/generate",
+        outDir: values.out ?? "supercut-out/generate",
         // --no-vision forces off; otherwise follow the provider's capability
         vision: values["no-vision"] ? false : provider.vision,
         ...(values.repo ? { repoPath: values.repo } : {}),
@@ -378,7 +378,7 @@ async function main(): Promise<number> {
       if (values["dry-run"]) {
         // the suggested command must preserve the security posture of THIS
         // run: an explicit network flag and the session carry over
-        const followUp = dryRunFollowUpCommand(values.out ?? "out/generate", {
+        const followUp = dryRunFollowUpCommand(values.out ?? "supercut-out/generate", {
           blockPrivateNetwork: allowPrivateNetwork === false,
           allowPrivateNetwork: allowPrivateNetwork === true,
           ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),

@@ -23,6 +23,7 @@ import { chromium, type Browser } from "playwright";
 import { MAX_BUDGET_MS, parseEventLog, type EventLog } from "../schema/index.js";
 import { buildBackground, FADE_IN_MS, FADE_OUT_MS, planTake, validateFrameIndex, type FrameIndexEntry } from "./plan.js";
 import { applyTakeAdjustments, hasAdjustments, type TakeAdjustments } from "./adjust.js";
+import { removeOnExit } from "./temp.js";
 import { chromiumInstallCommand } from "../capture/browser-install.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 import {
@@ -475,8 +476,10 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
   const token = randomBytes(16).toString("hex");
   // the raw annexb H.264 goes to a temp path OUTSIDE the take dir: the take
   // is a read-only input, and a partial stream must never be left beside it.
-  // The finally below unlinks it on success and on failure.
+  // The finally below unlinks it on success and on failure; an interrupt or
+  // process.exit before then is covered by removeOnExit.
   const rawPath = join(tmpdir(), `supercut-${token}.h264`);
+  const disposeTempCleanup = removeOnExit(rawPath);
   let encodedBytes = 0;
   let resultReady = false;
   let rejectResult!: (err: Error) => void;
@@ -725,6 +728,7 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
     } catch {
       /* already removed or never written — nothing to clean up */
     }
+    disposeTempCleanup();
   }
 }
 

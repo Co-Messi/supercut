@@ -45,7 +45,7 @@ These apply to every run whose target resolves public, unless `--allow-private-n
 
 `generate` sends crawled page text, element labels and selectors, and optional repo notes (`--repo`) to your configured LLM provider. In vision mode it also uploads full, unredacted screenshots of your app. Text gets best effort secret redaction (keys, tokens, emails, private keys). Selectors cannot be redacted, because the model must copy them exactly, so an element whose selector would carry a secret or an identifier (a selector built from an email in link text, an id holding a token) is left out of what the director sees. Redaction cannot cover images, so do not film apps showing real customer data or secrets with vision on. Page content is wrapped in per-run unguessable markers and the prompts tell the model to treat it as data, which narrows but does not eliminate prompt injection from a hostile page. The selector whitelist and schema validation stop invented selectors.
 
-`generate` also writes frames, recipes and director reports to `out/`. Review those before sharing. `record` and `render` never call an LLM.
+`generate` also writes frames, recipes and director reports to `supercut-out/` by default. Review those before sharing. `record` and `render` never call an LLM.
 
 `generate` reads `.env` from the current directory, which is usually the app you are filming, and a cloned repository can ship one. When that file (one you did not name with `--env-file`) points the LLM at another endpoint (`SUPERCUT_LLM_BASE_URL`, or `SUPERCUT_PROVIDER=custom`) or turns the token ceiling off, `generate` prints a warning naming the file, the variable and the endpoint's host. It does not refuse: check the warning before you answer the confirmation question.
 

@@ -52,8 +52,8 @@ No key? The keyless path works standalone against the bundled demo app:
 python3 -m http.server 4319 --directory examples/demo-app &
 
 # 2. film it with the example recipe, then render
-node dist/cli/index.js record --recipe examples/demo.recipe.json --out out/take
-node dist/cli/index.js render --take out/take --out out/final.mp4
+node dist/cli/index.js record --recipe examples/demo.recipe.json --out supercut-out/take
+node dist/cli/index.js render --take supercut-out/take --out supercut-out/final.mp4
 ```
 
 ## Use it from your coding agent (no API key)
@@ -162,9 +162,9 @@ Every `generate` run has an LLM token ceiling: 300000 tokens by default, tunable
 Every render stages the app window on a background. The default is the bundled `cobalt` wallpaper. Pick another with `--bg` (on `render` and `generate`):
 
 ```sh
-supercut render --take out/take --bg sunrise            # bundled wallpaper
-supercut render --take out/take --bg midnight           # procedural palette
-supercut render --take out/take --bg path/to/wall.png   # your own image
+supercut render --take supercut-out/take --bg sunrise            # bundled wallpaper
+supercut render --take supercut-out/take --bg midnight           # procedural palette
+supercut render --take supercut-out/take --bg path/to/wall.png   # your own image
 ```
 
 | wallpaper            | look                        |
@@ -184,9 +184,9 @@ Procedural palettes (generated at render time, no asset): `aurora`, `midnight`, 
 `render` is silent by default. On `generate` the AI director picks the bundled track that matches your app's look. `--music` (on `render` and `generate`) muxes a looped, loudness-normalized track with fade in and out under the video, without re-encoding the video or changing its length:
 
 ```sh
-supercut render   --take out/take --music midnight
+supercut render   --take supercut-out/take --music midnight
 supercut generate --url http://localhost:3000 --music pulse
-supercut render   --take out/take --music path/to/your-track.mp3   # your own file
+supercut render   --take supercut-out/take --music path/to/your-track.mp3   # your own file
 ```
 
 Bundled tracks (original instrumentals made for supercut, provenance in `assets/music/CREDITS.md`):
@@ -202,7 +202,7 @@ Bundled tracks (original instrumentals made for supercut, provenance in `assets/
 
 ## Privacy
 
-`generate` sends crawled page text, element labels and selectors, and optional repo notes (`--repo`) to your configured LLM provider. In vision mode it also uploads full, unredacted screenshots of your app, so do not film apps showing real customer data or secrets with vision on. It writes frames, recipes and director reports to `out/`; review those before sharing. `record` and `render` never call an LLM. See [SECURITY.md](SECURITY.md).
+`generate` sends crawled page text, element labels and selectors, and optional repo notes (`--repo`) to your configured LLM provider. In vision mode it also uploads full, unredacted screenshots of your app, so do not film apps showing real customer data or secrets with vision on. It writes frames, recipes and director reports to `supercut-out/` (a take a re-take replaced is deleted once the video renders); review those before sharing, and add `supercut-out/` to your `.gitignore`. `record` and `render` never call an LLM. See [SECURITY.md](SECURITY.md).
 
 ## Event-log contract
 

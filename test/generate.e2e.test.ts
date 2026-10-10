@@ -277,6 +277,35 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(render.video.durationS * 1000).toBeGreaterThanOrEqual(plain.durationMs + 1000);
   }, 300_000);
 
+  it("a vision QC failure after capture still renders the recorded take", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-qcfail-"));
+    dirs.push(outDir);
+    // analyze and script answer; the QC call finds the LLM gone (it throws)
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0, app_url: app.url, music_track: "off",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 0 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 0 },
+        ],
+      }),
+    ]);
+    const logs: string[] = [];
+    const res = await generate({ llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: (m) => logs.push(m) });
+    expect(statSync(res.outFile).size).toBeGreaterThan(50_000);
+    expect(logs.join("\n")).toMatch(/vision QC failed .*rendering the recorded take/);
+  }, 300_000);
+
   it("--music off silences the cut even when the director picked a track", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-silent-"));
     dirs.push(outDir);

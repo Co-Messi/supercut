@@ -21,7 +21,7 @@ import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { assessCrawl, crawlApp, type PageDigest } from "./inventory.js";
 import { assertStorageStateFile } from "../capture/session.js";
 import { BudgetedLlmClient, type LlmClient } from "./llm.js";
-import { deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
+import { deterministicChecks, visionQc, visionVerdictsOrNone, type SceneVerdict } from "./qc.js";
 import { AllScenesCutAfterTakeError, filmWithRetakes, MAX_RETAKES, type FilmResult } from "./retakes.js";
 import { hasAdjustments, NO_ADJUSTMENTS, type TakeAdjustments } from "../render/adjust.js";
 import { writeRecipe } from "./script.js";
@@ -531,7 +531,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       if (vision) {
         log("④ qc: vision pass…");
         llm.stage = "qc";
-        verdicts.push(...await visionQc(llm, takeDir, result.eventLog));
+        verdicts.push(...await visionVerdictsOrNone(() => visionQc(llm, takeDir, result.eventLog), log));
       }
       return verdicts;
     };

@@ -484,6 +484,32 @@ async function digestPage(page: Page, withScreenshot: boolean, allowDestructive 
 }
 
 /**
+ * The crawl's page order: the start page, then source-derived seeds and
+ * link-discovered pages taken in turn. Seeds alone could fill the page cap
+ * (and a wrong seed list would starve the crawl of the pages the app
+ * actually links to), so neither source can crowd out the other.
+ */
+export class CrawlQueue {
+  private readonly seeds: string[];
+  private readonly links: string[] = [];
+  private turn = 0;
+  constructor(start: string, seeds: string[]) {
+    this.seeds = [start, ...seeds];
+  }
+  get size(): number {
+    return this.seeds.length + this.links.length;
+  }
+  pushLink(url: string): void {
+    this.links.push(url);
+  }
+  next(): string | undefined {
+    const order = this.turn++ % 2 === 0 ? [this.seeds, this.links] : [this.links, this.seeds];
+    for (const q of order) if (q.length > 0) return q.shift();
+    return undefined;
+  }
+}
+
+/**
  * Crawl the live app: digest the start page, then up to `maxPages - 1`
  * same-origin pages discovered from its links.
  */
@@ -565,13 +591,14 @@ export async function crawlApp(
       }
     }
 
-    // start page first, then source-derived routes (same site only), then
-    // link-discovered pages. Seeds ensure functional panels get crawled even
-    // when no <a href> points to them.
-    const queue = [appUrl, ...(opts.seedUrls ?? []).filter((u) => isSameSite(appUrl, u))];
+    // start page first, then source-derived routes (same site only) and
+    // link-discovered pages in turn. Seeds get functional panels crawled even
+    // when no <a href> points to them; links keep a wrong seed list from
+    // starving the crawl.
+    const queue = new CrawlQueue(appUrl, (opts.seedUrls ?? []).filter((u) => isSameSite(appUrl, u)));
     let first = true;
-    while (queue.length > 0 && digests.length < maxPages) {
-      const target = queue.shift()!;
+    while (queue.size > 0 && digests.length < maxPages) {
+      const target = queue.next()!;
       const isStart = first;
       first = false;
       // Pathname + search: pathname-only collapses query-routed
@@ -600,7 +627,7 @@ export async function crawlApp(
         // meta-refresh) can land somewhere the pre-navigation check never saw
         await assertSafeNavigationUrl(target, { allowPrivateNetwork, finalUrl: page.url() });
       } catch (err) {
-        if (digests.length === 0 && queue.length === 0) throw err; // start page must load
+        if (digests.length === 0 && queue.size === 0) throw err; // start page must load
         continue;
       }
       // A page that settled on another site (an identity provider's sign-in
@@ -622,7 +649,7 @@ export async function crawlApp(
       // never film a page whose settled URL is itself a credential — the URL is
       // an un-redactable validation key, so drop the page rather than leak it
       if (pageUrlHasSecret(digest.url)) {
-        if (digests.length === 0 && queue.length === 0) {
+        if (digests.length === 0 && queue.size === 0) {
           throw new Error(
             "the target URL contains a secret in its path or query (a token/key/JWT); " +
               "supercut won't film a page whose URL is itself a credential — point --url at a " +
@@ -643,7 +670,7 @@ export async function crawlApp(
           const linked = new URL(item.href, digest.url);
           if (isSameSite(appUrl, linked.href) && isCrawlable(linked) && !visited.has(linked.pathname + linked.search)) {
             await assertSafeNavigationUrl(linked.href, { allowPrivateNetwork });
-            queue.push(linked.href);
+            queue.pushLink(linked.href);
           }
         } catch {
           /* invalid href — skip */

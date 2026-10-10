@@ -11,7 +11,7 @@ import { startDemoApp, type DemoApp } from "./fixtures/demo-app/server.js";
 
 const exec = promisify(execFile);
 
-/** codec_type:codec_name per stream, sorted — the music-mux assertion shape */
+/** codec_type:codec_name per stream, sorted, the music-mux assertion shape */
 async function probeStreams(mp4: string): Promise<string[]> {
   const { stdout } = await exec("ffprobe", [
     "-v", "quiet", "-print_format", "json", "-show_streams", mp4,
@@ -58,7 +58,7 @@ describe("inventory crawler on the fixture app", () => {
     expect(digests.length).toBeGreaterThanOrEqual(1);
     const selectors = digests[0]!.inventory.map((i) => i.selector);
     expect(selectors).toContain("#cta");
-    // #email is display:none until the CTA reveals it — must still be
+    // #email is display:none until the CTA reveals it, must still be
     // inventoried, flagged hidden (multi-step forms are everywhere)
     const email = digests[0]!.inventory.find((i) => i.selector === "#email")!;
     expect(email).toBeDefined();
@@ -89,24 +89,24 @@ describe("inventory crawler on the fixture app", () => {
     // the search box resolves via data-testid, immune to ticking metrics text
     expect(fleet.inventory.some((i) => i.selector === '[data-testid="service-search"]')).toBe(true);
 
-    // every genuine destructive control stays out, loudly — including a clickable
+    // every genuine destructive control stays out, loudly, including a clickable
     // div[onclick] (not scoped to <button>) and a hyphen-joined action label
-    // (an <input type=button> labels itself only through `value` — it must
+    // (an <input type=button> labels itself only through `value`, it must
     // be counted in the exclusion notice too, not silently dropped)
     for (const label of ["Delete service", "Delete account", "Delete-all", "Remove member"]) {
       expect(fleet.inventory.some((i) => i.text.includes(label)), `${label} must be excluded`).toBe(false);
       expect(fleet.excludedDestructive).toContain(label);
     }
 
-    // the reviewer's repro: a framework-wired clickable div — handler bound via
+    // a framework-wired clickable div, handler bound via
     // addEventListener (onclick ATTR null) AND no cursor:pointer/tabindex/role
-    // signal — is excluded purely by its destructive label. No interactivity
-    // heuristic could have caught it; we no longer rely on one.
+    // signal, is excluded purely by its destructive label. No interactivity
+    // heuristic could catch it, so the crawl relies on none.
     expect(fleet.inventory.some((i) => i.text.includes("delete-worker"))).toBe(false);
     expect(fleet.excludedDestructive).toContain("delete-worker");
 
     // a genuinely PASSIVE destructive-slug row (a read-only <li>, cursor:default,
-    // no handler) is ALSO excluded now — we can't prove it's inert, so fail-safe
+    // no handler) is ALSO excluded now, we can't prove it's inert, so fail-safe
     // wins over filming a row that merely looks like a display cell.
     expect(fleet.inventory.some((i) => i.text.includes("delete-log-2024"))).toBe(false);
     expect(fleet.excludedDestructive).toContain("delete-log-2024");
@@ -186,7 +186,7 @@ describe("inventory crawler on the fixture app", () => {
 
   it("refuses to film a page whose URL is itself a credential (token in the query)", async () => {
     // a URL is a validation key that can't be redacted, so a page whose URL
-    // carries a secret is dropped rather than leaked — here it's the start page,
+    // carries a secret is dropped rather than leaked, here it's the start page,
     // so the run fails closed with a clear error instead of egressing the token
     await expect(
       crawlApp(`${app.url}/?token=supersecretvalue123456`, {
@@ -197,7 +197,7 @@ describe("inventory crawler on the fixture app", () => {
 
   it("does not misread a light app with a full-viewport translucent overlay as dark", async () => {
     // a modal backdrop rgba(0,0,0,.55) out-covers the body but is not the page
-    // ground — the probe must skip non-opaque layers and stay "light"
+    // ground, the probe must skip non-opaque layers and stay "light"
     const digests = await crawlApp(`${app.url}/overlay`, { maxPages: 1, screenshots: false, allowPrivateNetwork: true });
     expect(digests[0]!.theme).toBe("light");
   }, 60_000);
@@ -221,7 +221,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
           { title: "Live dashboard", caption: "Watch the numbers move", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
         ],
       }),
-      // ② script response — real selectors from the fixture app
+      // ② script response, real selectors from the fixture app
       JSON.stringify({
         version: 0,
         app_url: app.url,
@@ -248,7 +248,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
           },
         ],
       }),
-      // ④ vision QC response — all clean
+      // ④ vision QC response, all clean
       JSON.stringify({
         verdicts: [
           { scene: "signup", verdict: "ok", reason: "form visible and filled" },
@@ -278,7 +278,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(report.llm).toBe("scripted");
     expect(report.analysis.money_moments).toHaveLength(2);
     expect(report.recipe.music_track).toBe("daybreak");
-    expect(llm.calls).toBe(3); // analyze + script + vision QC — no silent extra spend
+    expect(llm.calls).toBe(3); // analyze + script + vision QC, no silent extra spend
     // one id ties the director report to its render report, and each stage's
     // wall time is on record
     expect(report.runId).toMatch(/^[0-9a-f-]{36}$/);
@@ -503,7 +503,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(existsSync(join(outDir, "final.mp4"))).toBe(false);
   }, 300_000);
 
-  it("--dry-run writes the recipe + preview and never films (H6)", async () => {
+  it("--dry-run writes the recipe + preview and never films", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-dry-"));
     dirs.push(outDir);
     const llm = new ScriptedLlm(() => [
@@ -540,7 +540,7 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
       allowPrivateNetwork: true, log: (m) => logs.push(m),
     });
 
-    // nothing filmed, nothing rendered — but the recipe artifact exists
+    // nothing filmed, nothing rendered, but the recipe artifact exists
     expect(res.outFile).toBe("");
     expect(llm.calls).toBe(2); // analyze + script only, no QC
     expect(existsSync(join(outDir, "recipe.json"))).toBe(true);
@@ -608,11 +608,11 @@ describe("preflight status handling", () => {
     }
   }, 60_000);
 
-  it("401/403 warn and CONTINUE — an auth wall at the root must not block filming your own app", async () => {
+  it("401/403 warn and CONTINUE, an auth wall at the root must not block filming your own app", async () => {
     for (const code of [401, 403]) {
       const { run, logs } = tryGenerate(`${statusServer.url}/s/${code}`);
       // getting PAST preflight means the run dies later, in analyze, when the
-      // deliberately-empty scripted LLM runs out — not on a preflight error
+      // deliberately-empty scripted LLM runs out, not on a preflight error
       await expect(run).rejects.toThrow(/scripted LLM exhausted/);
       const all = logs.join("\n");
       expect(all).toMatch(new RegExp(`preflight warning: .*responded ${code}`));
@@ -620,7 +620,7 @@ describe("preflight status handling", () => {
   }, 120_000);
 
   it("--skip-preflight bypasses the reachability probe entirely (escape hatch)", async () => {
-    // a 500 root would be fatal — with the override the run proceeds to the
+    // a 500 root would be fatal, with the override the run proceeds to the
     // crawl and dies in analyze instead, proving the probe never gated it
     const { run, logs } = tryGenerate(`${statusServer.url}/s/500`, { skipPreflight: true });
     await expect(run).rejects.toThrow(/scripted LLM exhausted/);

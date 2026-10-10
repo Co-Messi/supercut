@@ -8,7 +8,7 @@ import { createRequestGate } from "../src/security/url-policy.js";
  * installRequestGate on its own, against a real Chromium, with the DNS
  * classifier injected: "localhost" plays the vetted public app and 127.0.0.1
  * the private network. These pin down what a redirected DOCUMENT looks like
- * to the page under the guard — the request-gate e2e file covers the SSRF
+ * to the page under the guard, the request-gate e2e file covers the SSRF
  * side through record()/crawlApp().
  */
 

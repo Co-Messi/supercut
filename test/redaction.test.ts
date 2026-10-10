@@ -37,7 +37,7 @@ describe("prompt redaction", () => {
   });
 
   it("redacts Slack tokens", () => {
-    // split literal — see the GitHub-tokens test
+    // split literal, see the GitHub-tokens test
     const token = ["xoxb", "-1234567890-abcdefghijklmnop"].join("");
     const out = redactForPrompt(`SLACK ${token}`);
     expect(out).not.toContain(token);
@@ -45,7 +45,7 @@ describe("prompt redaction", () => {
   });
 
   it("redacts Stripe secret, restricted, and live publishable keys", () => {
-    // split literals — see the GitHub-tokens test
+    // split literals, see the GitHub-tokens test
     for (const key of [
       ["sk", "_live_abcdefghijklmnop1234"].join(""),
       ["sk", "_test_abcdefghijklmnop1234"].join(""),
@@ -87,7 +87,7 @@ describe("prompt redaction", () => {
   });
 
   it("redacts opaque Authorization: Bearer tokens (header form, no :/= separator)", () => {
-    // split literal — see the GitHub-tokens test
+    // split literal, see the GitHub-tokens test
     const token = ["mF_9z-abc", ".DEF_12345"].join("");
     const out = redactForPrompt(`Authorization: Bearer ${token}`);
     expect(out).not.toContain(token);

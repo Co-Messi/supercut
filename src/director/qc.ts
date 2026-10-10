@@ -1,12 +1,12 @@
 /**
- * Stage 4: QC — two layers, one frozen patch surface.
+ * Stage 4: QC, two layers, one frozen patch surface.
  *
  *  (a) deterministic checks, zero API cost: failed scenes, dead air
  *  (b) vision checks on real captured frames at event moments
  *
  * Verdicts may ONLY: adjust hold_ms, adjust an action's zoom bbox, or cut a
  * scene. Selectors, actions, and scene order are immutable (the frozen patch
- * surface) — no flaky AI ever re-enters the deterministic path.
+ * surface), no flaky AI ever re-enters the deterministic path.
  */
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -30,7 +30,7 @@ const exec = promisify(execFile);
 
 // a zoom patch flows into the event log's focus_bbox. The event-log schema
 // itself only demands positive w/h (x/y may be negative there; plan.ts clamps
-// the focus point to the viewport) — but the QC patch surface is stricter and
+// the focus point to the viewport), but the QC patch surface is stricter and
 // mirrors the recipe's zoom rule (nonneg x/y too), so a hallucinated
 // degenerate bbox dies HERE, not at render time after all the capture spend
 const finiteNum = z.number().finite();
@@ -60,8 +60,8 @@ export function deterministicChecks(result: RecordResult): SceneVerdict[] {
 
   // dead air: >4s between consecutive interaction events inside a scene.
   // Informational only: hold_ms adds time at the END of a scene and cannot
-  // compress a MID-scene gap, so
-  // patching it was a no-op that just lengthened the scene. Mid-scene dead air
+  // compress a MID-scene gap, so a hold patch would only lengthen the scene
+  // and fix nothing. Mid-scene dead air
   // comes from observed overrun on a slow app, and no frozen-surface lever
   // (hold/zoom/cut) fixes it, nor does re-recording. We surface it in the
   // report; the right lever is shorter scripted durations, owned upstream.
@@ -116,7 +116,7 @@ async function frameJpegB64(takeDir: string, t: number): Promise<string | null> 
 
 const SYSTEM = `You are the quality judge for a cinematic product launch video. For each scene you get SEVERAL captured frames sampled across the scene (its key interaction moment, a mid point, and its final hold). Judge the scene across ALL of its frames. Judge ONLY:
 - is the interaction's payoff visible (did something happen)?
-- is there an error page, blank screen, overlay, or cookie banner ruining the shot — in ANY of the frames?
+- is there an error page, blank screen, overlay, or cookie banner ruining the shot, in ANY of the frames?
 - does the scene need a longer hold to land (slow content)?
 Respond ONLY with JSON: { "verdicts": [{ "scene": string, "verdict": "ok"|"patch"|"cut", "reason": string, "patch": { "hold_ms"?: int } }] }
 Rules: if ANY sampled frame is an error page, blank/empty screen, or shows a banner ruining the shot, prefer "cut" (a late error still ruins the clip). "patch" with hold_ms 400-2000 for shots that need breathing room. Otherwise "ok". One verdict per scene, scene names exactly as given (the name between the markers, without the markers).
@@ -152,7 +152,7 @@ export async function visionQc(
     const idx = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8")) as { t_source: number }[];
     lastFrameT = idx.reduce((m, e) => Math.max(m, e.t_source), 0);
   } catch {
-    /* no frame index — final scene falls back to last event time below */
+    /* no frame index, final scene falls back to last event time below */
   }
 
   for (let i = 0; i < scenes.length; i++) {
@@ -172,7 +172,7 @@ export async function visionQc(
     // is Infinity, so fall back to the take's last captured frame time.
     const lastEventT = log.events.reduce((m, e) => Math.max(m, e.t), s.t);
     // final scene: end at the last captured FRAME (covers the hold), not the
-    // last event — see lastFrameT note above.
+    // last event, see lastFrameT note above.
     const sceneEndT = end === Infinity ? Math.max(lastFrameT, lastEventT) : end;
     const holdT = Math.max(keyT, sceneEndT - 200); // just inside the final hold
     const midT = (keyT + holdT) / 2;
@@ -223,7 +223,7 @@ export async function visionQc(
       feedback = err instanceof Error ? err.message.slice(0, 300) : String(err);
     }
   }
-  console.error("vision QC: model failed twice — proceeding without vision verdicts");
+  console.error("vision QC: model failed twice, proceeding without vision verdicts");
   return [];
 }
 
@@ -257,18 +257,18 @@ export interface AppliedVerdicts {
 
 /**
  * Thrown when the verdicts cut every scene (directly or via cascade). A typed
- * throw instead of a flag on the return value: an earlier draft returned the
- * ORIGINAL recipe with `changed: false` plus an `allCut` marker, which fails
- * open for any caller that predates the marker — `if (!applied.changed)
- * proceed to render` turns "cut everything" into "cut nothing" and renders
- * the full uncut recipe. applyVerdicts is public API; its contract stays
+ * throw instead of a flag on the return value: returning the original recipe
+ * with `changed: false` plus an `allCut` marker would fail open for any
+ * caller that ignores the marker, since `if (!applied.changed) proceed to
+ * render` turns "cut everything" into "cut nothing" and renders the full
+ * uncut recipe. applyVerdicts is public API; its contract stays
  * "a non-empty recipe or an exception". The caller that holds a recorded
  * take catches THIS error specifically and preserves the artifacts (the take
- * is renderable — refusing an empty video must not discard it).
+ * is renderable, refusing an empty video must not discard it).
  */
 export class AllScenesCutError extends Error {
   constructor(readonly cut: string[]) {
-    super(`QC cut every scene (${cut.join(", ")}) — refusing to produce an empty recipe`);
+    super(`QC cut every scene (${cut.join(", ")}), refusing to produce an empty recipe`);
     this.name = "AllScenesCutError";
   }
 }

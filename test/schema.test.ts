@@ -65,7 +65,7 @@ describe("event log schema", () => {
     expect(log.viewport.dpr).toBe(2);
   });
 
-  it("drops unknown event types but warns once (A3 — forward compat, not silent)", () => {
+  it("drops unknown event types but warns once (forward compat, not silent)", () => {
     const withUnknown = {
       ...validEventLog,
       events: [
@@ -86,7 +86,7 @@ describe("event log schema", () => {
     }
   });
 
-  it("dedupes dropped type names and counts the total (A3)", () => {
+  it("dedupes dropped type names and counts the total", () => {
     const withUnknown = {
       ...validEventLog,
       events: [
@@ -170,7 +170,7 @@ describe("recipe schema", () => {
   });
 
   it("counts the take's fixed capture + render overhead against the 60s ceiling", () => {
-    // 4 scenes of 14.5s actions = 58s of recipe — under 60s on paper, but the
+    // 4 scenes of 14.5s actions = 58s of recipe, under 60s on paper, but the
     // take adds a 1s head pre-roll, ~2.4s per later scene (reload allowance +
     // settle + pre-roll) and a settled tail after the last beat: the video
     // would run well past 60s
@@ -196,7 +196,7 @@ describe("recipe schema", () => {
           name: "view-item",
           priority: 2,
           entry: { url: "http://localhost:3000/items/1", prelude: [] },
-          depends_on: ["create-item"], // defined below — later, so invalid
+          depends_on: ["create-item"], // defined below, later, so invalid
           actions: [{ kind: "hover", selector: ".item", duration_ms: 1000 }],
           hold_ms: 0,
         },

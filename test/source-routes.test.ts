@@ -33,7 +33,7 @@ beforeAll(() => {
   const other = join(root, "apps", "admin", "src", "app");
   mkdirSync(other, { recursive: true });
   writeFileSync(join(other, "page.tsx"), `<h1>Admin</h1>`);
-  // A5: test/spec/fixture/story pages live under the app tree but must NOT be
+  // test/spec/fixture/story pages live under the app tree but must NOT be
   // ingested as real routes. Plant a page in each excluded dir.
   for (const skip of ["e2e", "fixtures", "stories", "cypress", "__mocks__", "spec"]) {
     mkdirSync(join(web, skip, "secret"), { recursive: true });
@@ -54,7 +54,7 @@ describe("extractAppRoutes", () => {
     expect(routes.some((r) => r.file.includes("node_modules"))).toBe(false);
   });
 
-  it("skips test/spec/fixture/story dirs so sample pages aren't ingested (A5)", () => {
+  it("skips test/spec/fixture/story dirs so sample pages aren't ingested", () => {
     const routes = extractAppRoutes(join(root, "apps", "web"));
     // no route should originate from an excluded dir
     expect(routes.some((r) => /[/\\](e2e|fixtures|stories|cypress|__mocks__|spec)[/\\]/.test(r.file))).toBe(false);
@@ -176,9 +176,9 @@ describe("walk budget", () => {
   it("--app scoping is applied before the budget is spent, not after", () => {
     // monorepo where a sibling app holds 3x the file budget and sorts BEFORE
     // the requested app (traversal is sorted, so it is enumerated first).
-    // Budget spent repo-wide used to exhaust on the junk app and return no
-    // routes for --app web — while the truncation warning recommended --app
-    // as the remedy. Scoped-in-walk, junk files cost nothing.
+    // A budget spent repo-wide would exhaust on the junk app and return no
+    // routes for --app web, while the truncation warning recommends --app as
+    // the remedy. Scoped in the walk, junk files cost nothing.
     const mono = mkdtempSync(join(tmpdir(), "supercut-mono-"));
     const junk = join(mono, "apps", "aaa-junk");
     mkdirSync(junk, { recursive: true });

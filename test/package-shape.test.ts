@@ -47,7 +47,7 @@ describe("dependency pins", () => {
 describe("publish guard", () => {
   // npm always packs README* whatever `files` says, so a stray README.md.bak
   // (or any other backup/secret swept into dist/) ships unless the pack is
-  // checked at publish time — CI's check runs on a clean checkout, not on the
+  // checked at publish time, CI's check runs on a clean checkout, not on the
   // laptop that actually runs `npm publish`
   it("prepublishOnly builds, then asserts the tarball's contents", () => {
     const pre = pkg.scripts?.prepublishOnly ?? "";

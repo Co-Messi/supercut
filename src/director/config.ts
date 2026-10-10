@@ -1,5 +1,5 @@
 /**
- * Provider config — resolves which LLM the director uses from explicit env
+ * Provider config, resolves which LLM the director uses from explicit env
  * input (a loaded `.env` file or real env vars). OpenAI-compatible: works with
  * OpenRouter, DeepSeek, or a custom endpoint.
  */
@@ -31,7 +31,7 @@ export interface ResolvedProvider {
   model: string;
   baseUrl: string;
   vision: boolean;
-  /** which env var supplied the credential (e.g. "DEEPSEEK_API_KEY") —
+  /** which env var supplied the credential (e.g. "DEEPSEEK_API_KEY"),
    *  surfaced in the summary so a user always sees which key is being sent */
   keySource: string;
   summary: string;
@@ -57,7 +57,7 @@ function isLoopbackHost(hostname: string): boolean {
  * The base URL decides where the bearer key goes. Invariants:
  *  - deepseek/openrouter keys only ever reach that provider's own host, so a
  *    stray SUPERCUT_LLM_BASE_URL (in a .env, a shell profile, a CI secret)
- *    can never redirect them to a third party — refused, not ignored, so the
+ *    can never redirect them to a third party, refused, not ignored, so the
  *    user learns their config is not what they think it is;
  *  - every key travels over https, except to a loopback host (a local model
  *    server, where there is no network path to sniff).
@@ -111,7 +111,7 @@ export function resolveProvider(
     env.OPENROUTER_API_KEY ? "openrouter" : "",
   ].filter(Boolean);
 
-  // ANY multi-key situation is ambiguous — SUPERCUT_API_KEY must not silently
+  // ANY multi-key situation is ambiguous, SUPERCUT_API_KEY must not silently
   // pick a winner, so require an explicit provider.
   if (!explicitProvider && providerKeys.length > 1) {
     throw new Error("multiple provider keys found; set SUPERCUT_PROVIDER to deepseek, openrouter, or custom");
@@ -147,7 +147,7 @@ export function resolveProvider(
     keySource = "SUPERCUT_API_KEY";
     if (!apiKey && (env.DEEPSEEK_API_KEY || env.OPENROUTER_API_KEY)) {
       throw new Error(
-        "SUPERCUT_API_KEY is required when SUPERCUT_PROVIDER=custom — provider-scoped keys " +
+        "SUPERCUT_API_KEY is required when SUPERCUT_PROVIDER=custom, provider-scoped keys " +
           "(DEEPSEEK_API_KEY / OPENROUTER_API_KEY) are never sent to a custom endpoint",
       );
     }
@@ -205,8 +205,8 @@ export interface DotEnvLoadResult {
   applied?: string[];
 }
 
-/** Best-effort .env loader. Always uses the internal parser — NOT the native
- *  process.loadEnvFile — so semantics are identical on every Node ≥20 version:
+/** Best-effort .env loader. Always uses the internal parser, NOT the native
+ *  process.loadEnvFile, so semantics are identical on every Node ≥20 version:
  *  a non-empty real environment variable always wins over the .env file (the
  *  native loader can override existing process.env on some versions). */
 export function loadDotEnv(path = ".env"): DotEnvLoadResult {

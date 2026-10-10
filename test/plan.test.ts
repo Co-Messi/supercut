@@ -105,7 +105,7 @@ describe("buildRenderPlan", () => {
 
 describe("frame-the-result (4b): camera prefers focus_bbox", () => {
   // a type into a tiny input at the top-right that PRODUCES a large central
-  // result region — the camera must hold on the result, not the input box.
+  // result region, the camera must hold on the result, not the input box.
   const focusLog = makeLog([
     { t: 1000, type: "scene", name: "s1", priority: 1 },
     {
@@ -136,7 +136,7 @@ describe("frame-the-result (4b): camera prefers focus_bbox", () => {
     const plan = buildRenderPlan(focusLog, frameIndex);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
     const z = zAt(95);
-    // a 1200x700 region in 1920x1080 fits at ~1.36x — gentler than the fixed
+    // a 1200x700 region in 1920x1080 fits at ~1.36x, gentler than the fixed
     // 1.42 punch-in (proving the fit math), but still a real zoom (>1).
     expect(z).toBeGreaterThan(1.05);
     expect(z).toBeLessThan(1.42);
@@ -150,7 +150,7 @@ describe("frame-the-result (4b): camera prefers focus_bbox", () => {
     const plan = buildRenderPlan(focusLog, longIndex);
     const zAt = (frame: number) => plan.camera[(frame * SUBFRAMES) * 3]!;
     // event t=1500ms ≈ frame 90; focus dwell 2400ms holds the payoff to ~3900ms.
-    // ~1800ms after the event (frame 198) it's still framed — a plain dwell
+    // ~1800ms after the event (frame 198) it's still framed, a plain dwell
     // (1200ms) would already be releasing by now.
     expect(zAt(198)).toBeGreaterThan(1.3);
     // and it has glided back to a relaxed overview by ~2900ms after (frame 264)
@@ -230,7 +230,7 @@ describe("framing: establishing shots, size-aware zoom, spatial merging", () => 
   it("a long focus dwell overlapping a later far beat never drags the camera back", () => {
     // focus beat top-left at t=2000 (FOCUS_DWELL 2400 → would run to 4400)
     // overlaps a far plain click at t=4000 (dwell ends 5200): after beat 2's
-    // dwell, the camera must settle out — not re-punch across the page to
+    // dwell, the camera must settle out, not re-punch across the page to
     // beat 1's stale target
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
@@ -349,10 +349,10 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
       .map((t, i) => ({ file: `frames/${String(i).padStart(6, "0")}.jpg`, t_source: t }));
 
   it("never bridges a punch across a click-triggered navigation gap", () => {
-    // two nearby small targets 2.5s apart would bridge into one held zoom —
+    // two nearby small targets 2.5s apart would bridge into one held zoom,
     // but a source gap (the page reloaded) lies between them. The recorder
     // logs the navigation; its 400ms gap is then the cut (an UNLOGGED gap
-    // this short would be a capture hiccup — see the stall test below)
+    // this short would be a capture hiccup, see the stall test below)
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 1600, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
@@ -368,7 +368,7 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
   });
 
   it("cuts wide at a click-triggered navigation even when capture never paused", () => {
-    // a fast local navigation keeps frames flowing (paint holding) — no source
+    // a fast local navigation keeps frames flowing (paint holding), no source
     // gap to detect. The recorder logs the page change; the camera must not
     // zoom into the old page's link and carry that zoom onto the new page.
     const log = makeLog([
@@ -564,7 +564,7 @@ describe("scene boundaries: cuts, snaps, tail and fades", () => {
 
   it("skips a punch that could only land after the click", () => {
     // a click 500ms into a new page: the establishing shot owns the opening,
-    // so there is no time to arrive — no late zoom chasing the click
+    // so there is no time to arrive, no late zoom chasing the click
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
       { t: 500, type: "click", bbox: [600, 300, 120, 40], selector: "#a", point: [660, 320] },
@@ -620,7 +620,7 @@ describe("plan input bounds", () => {
   });
 
   it("constrains frame files to the frames/ namespace", () => {
-    // the host page fetches /take/<file> — a hand-edited index must not be
+    // the host page fetches /take/<file>, a hand-edited index must not be
     // able to point the fetch at other take artifacts
     for (const file of ["render-plan.json", "../events.json", "frames/../events.json", "frames/a/b.png"]) {
       expect(() => buildRenderPlan(clickLog, [{ file, t_source: 0 }])).toThrow(/frames\//);
@@ -651,7 +651,7 @@ describe("plan input bounds", () => {
     expect(assessSkew(broken, dense).action).toBe("fail");
   });
 
-  it("skew gate: a sparse take that DECLARES the unified clock still fails — a starved capture can't reclassify itself as legacy", () => {
+  it("skew gate: a sparse take that DECLARES the unified clock still fails, a starved capture can't reclassify itself as legacy", () => {
     // legacy-ness comes from the schema declaration only: inferred from fps,
     // 12 frames over 40s would read as "legacy" and downgrade the fail to a
     // warning
@@ -664,7 +664,7 @@ describe("plan input bounds", () => {
     expect(assessSkew(skewed, starved).action).toBe("fail");
   });
 
-  it("skew gate: legacy takes (no clock declaration) only warn — back-compat", () => {
+  it("skew gate: legacy takes (no clock declaration) only warn, back-compat", () => {
     // pre-unified-clock recorders stamped events on a separate wall
     // accumulator: events routinely outrun the footage, warn is correct
     const sparse = Array.from({ length: 25 }, (_, i) => ({

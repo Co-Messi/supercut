@@ -182,7 +182,7 @@ async function main(): Promise<number> {
         },
       );
       console.log(
-        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${res.frameCount} frames ` +
+        `done in ${((Date.now() - t0) / 1000).toFixed(1)}s, ${res.frameCount} frames ` +
           `(avg ${res.avgSourceFps.toFixed(1)} fps source), ` +
           `${res.eventLog.events.length} events` +
           (res.failedScenes.length ? `, FAILED scenes: ${terminalSafe(res.failedScenes.join(", "))}` : ""),
@@ -227,7 +227,7 @@ async function main(): Promise<number> {
         ...(values.music ? { music: values.music } : {}),
       });
       console.log(
-        `done in ${(res.wallMs / 1000).toFixed(1)}s — ${res.frames} frames, ` +
+        `done in ${(res.wallMs / 1000).toFixed(1)}s, ${res.frames} frames, ` +
           `${(res.encodedBytes / 1048576).toFixed(1)}MB encoded` +
           (res.music ? `, music: ${res.music}` : "") +
           ` → ${res.outFile}\n${res.summary} (report: ${res.reportFile})`,

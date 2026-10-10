@@ -70,7 +70,7 @@ export interface MotionMetrics {
   tailMaxDzPerFrame: number;
   /** final camera z */
   finalZ: number;
-  /** max z range across ONE output frame's shutter samples — a camera snap
+  /** max z range across ONE output frame's shutter samples, a camera snap
    *  that lands mid-shutter motion-blurs the whole window across the jump
    *  (one smeared frame); a moving spring spans < 0.01 */
   maxIntraFrameDz: number;
@@ -118,7 +118,7 @@ export function framingMetrics(plan: RenderPlan): FramingMetrics {
       if (z * len >= size + 1e-6) {
         uncovered = Math.max(uncovered, gapLo, gapHi);
         // feasible covering offsets: [size − z(start+len), −z·start]; the
-        // focus maps to z·focus + off — its closest feasible spot to centre
+        // focus maps to z·focus + off, its closest feasible spot to centre
         const a = z * focus + size - z * (start + len);
         const b = z * focus - z * start;
         const best = Math.min(Math.max(size / 2, a), b);

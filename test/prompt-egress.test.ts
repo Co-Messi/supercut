@@ -6,8 +6,9 @@ import { writeRecipe } from "../src/director/script.js";
 
 /**
  * Element text is redacted before it reaches a provider, but a selector built
- * from that text (`a:has-text("jane@customer.com")`) used to travel raw. A
- * selector that would carry a secret or an identifier is not inventoried.
+ * from that text (`a:has-text("jane@customer.com")`) cannot be redacted: the
+ * model must copy it exactly. A selector that would carry a secret or an
+ * identifier is not inventoried.
  */
 
 const EMAIL = "jane@customer.com";

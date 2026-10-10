@@ -1,5 +1,5 @@
 /**
- * Capture executor — stage 3. Pure code, zero AI.
+ * Capture executor, stage 3. Pure code, zero AI.
  *
  *   recipe ──▶ ┌─────────────────────────────────────────────┐
  *              │ for each scene:                              │
@@ -14,7 +14,7 @@
  *
  * A take is ALWAYS a whole-run recording (no per-scene stitching).
  * Timestamp canon: the schedule clock still paces slots and budget, but event
- * and cursor `t` are stamped on the OBSERVED clock at actual dispatch time —
+ * and cursor `t` are stamped on the OBSERVED clock at actual dispatch time,
  * anchored to the first screencast frame's CDP timestamp, i.e. the SAME
  * timeline as frame `t_source`. When reality overruns a slot, the remainder of
  * the schedule shifts by whole frames and the shifted times are canonical
@@ -61,7 +61,7 @@ const ACTION_TIMEOUT_MS = 10_000;
  *  renderer's downsample while encoding fast enough for a 60fps source */
 const JPEG_QUALITY = 92;
 const ENTRY_NAV_ALLOWANCE_MS = 1_000;
-/** `load` ≠ app ready (hydration, fonts, late paints) — every navigation gets
+/** `load` ≠ app ready (hydration, fonts, late paints), every navigation gets
  *  a settle pause before the schedule continues */
 export const SETTLE_MS = 400;
 /** every page opens at rest for at least this long before its first action:
@@ -69,7 +69,7 @@ export const SETTLE_MS = 400;
  *  has time to arrive BEFORE the first click instead of chasing it */
 export const PRE_ROLL_MS = 1_000;
 /** the pointer comes to rest on a target before pressing, and a press is
- *  held like a finger does — a zero-length press/release pair right at the
+ *  held like a finger does, a zero-length press/release pair right at the
  *  end of the travel reads as robotic */
 const PRESS_SETTLE_MS = 100;
 const PRESS_HOLD_MS = 70;
@@ -175,7 +175,7 @@ const MUTATION_OBSERVER_SCRIPT = `(() => {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       const consider = (el, churnOnly) => {
         if (!el.isConnected) return;
-        // visibility is evaluated NOW, at collection end — a transient overlay
+        // visibility is evaluated NOW, at collection end, a transient overlay
         // (toast/popup already removed or mid fade-out, including via an
         // ancestor's opacity/display) must never become the framed result
         if (typeof el.checkVisibility === "function" &&
@@ -306,7 +306,7 @@ function pathOf(u: string): string {
 // SSRF policy and read its HTTP status.
 async function gotoReady(page: Page, url: string) {
   // guard ON: a redirected navigation first lands on the gate's stub, which
-  // replaces itself with the target — wait for the real document
+  // replaces itself with the target, wait for the real document
   const response = await settleGatedRedirect(
     page,
     await page.goto(url, { timeout: ACTION_TIMEOUT_MS, waitUntil: "domcontentloaded" }),
@@ -352,10 +352,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   mkdirSync(join(outDir, "frames"), { recursive: true });
 
   // guard ON: resolve-and-pin every recipe host so the browser connects to the
-  // exact IPs the policy vetted — a DNS re-resolve mid-run can't swap in a
+  // exact IPs the policy vetted, a DNS re-resolve mid-run can't swap in a
   // private one (same defense the crawler applies).
   // Note: this re-resolves hosts that assertRecipeNavigationPolicy above
-  // already resolved — a second lookup and a small TOCTOU window between the
+  // already resolved, a second lookup and a small TOCTOU window between the
   // two. Deliberate: the assert is a pure yes/no policy check, the pin is the
   // one whose answer the browser actually connects to, and collapsing them
   // would couple the policy module to Chromium launch-arg formatting.
@@ -393,7 +393,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   let lastFrame: { hash: string; file: string } | undefined;
   // true while an inter-scene navigation is in flight: the page is blank/white
   // mid-reload, and capturing those frames makes the video FLASH at every scene
-  // change. Skip them — the renderer holds the last good frame across the gap.
+  // change. Skip them, the renderer holds the last good frame across the gap.
   let isNavigating = false;
   let writeErrors = 0;
   let lastWrite: Promise<void> = Promise.resolve();
@@ -410,7 +410,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   /**
    * Guard ON: after each action, refuse to keep filming if the action led the
-   * page somewhere the policy forbids — a click or submit whose navigation
+   * page somewhere the policy forbids, a click or submit whose navigation
    * (or any redirect hop of it) the gate blocked leaves an error page, and a
    * page that settled on a non-http(s) or private URL is not the product.
    * Throwing fails the scene through the normal scene-failure path.
@@ -505,7 +505,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     const alreadyInView =
       !!pre && pre.y >= 0 && pre.y + pre.height <= VIEWPORT.height && pre.x >= 0;
     if (!alreadyInView) {
-      // an eased page scroll that centres the target, filmed as motion — an
+      // an eased page scroll that centres the target, filmed as motion, an
       // instant scrollIntoView reads as a jump cut in the middle of a shot
       await loc
         .evaluate(async (el) => {
@@ -536,7 +536,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     // backstop (a target inside a nested scroll container the page scroll
     // cannot reach): a no-op when the eased scroll already revealed it
     await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS });
-    // settle ONLY when a scroll actually happened — an unconditional sleep adds
+    // settle ONLY when a scroll actually happened, an unconditional sleep adds
     // wall-time to every action, tipping in-view actions into the overrun path
     // and breaking the scheduled-timeline determinism contract on fixtures
     if (!alreadyInView) await sleep(150);
@@ -686,10 +686,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   /**
    * Attach the camera's result target to the event just emitted, by priority:
-   *   1. QC's patched zoom bbox (a verdict from real footage — always wins)
+   *   1. QC's patched zoom bbox (a verdict from real footage, always wins)
    *   2. the script's focus_selector, resolved post-action
    *   3. the changed-region union observed after the action (frame the result
-   *      by default — no LLM cooperation required)
+   *      by default, no LLM cooperation required)
    * Every miss falls through; focus_source records which path won.
    */
   async function resolveFocus(
@@ -764,7 +764,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       case "type": {
         if (!a.selector) throw new Error(`${a.kind} action requires selector`);
         let box = await targetBox(a.selector);
-        // targetBox burns unbounded wall time (waitFor + scroll + settle) —
+        // targetBox burns unbounded wall time (waitFor + scroll + settle),
         // rebase the action's timeline to observed NOW so cursor + events sit
         // where the footage actually shows the page reacting, not where the
         // schedule hoped it would.
@@ -839,7 +839,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           // human rhythm: a beat after the focusing click, log-normal gaps
           // around ~100ms (longer after spaces/punctuation, never under 45ms),
           // a beat before Enter. A slot too short for this overruns and the
-          // schedule shifts (timestamp canon) — never a pasted-in string.
+          // schedule shifts (timestamp canon), never a pasted-in string.
           const rhythm = typingPlan(text, remaining, rng);
           await sleep(rhythm.beforeFirstKey);
           const field = await prepareField(a.selector);
@@ -873,7 +873,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           if (a.submit) {
             // Many query inputs only reveal their payoff on submit (a form's
             // submit handler / an Enter keydown). Typing alone leaves the app in
-            // its idle state — the video would show a filled box and no result.
+            // its idle state, the video would show a filled box and no result.
             await sleep(rhythm.beforeEnter);
             await page.keyboard.press("Enter");
           }
@@ -924,7 +924,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   }
 
   try {
-    // guard ON: service workers are blocked — a registered worker's fetches
+    // guard ON: service workers are blocked, a registered worker's fetches
     // are not routed through the context, which would hand the page an
     // ungated network channel
     const context = await browser.newContext({
@@ -935,7 +935,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     });
     page = await context.newPage();
     // guard ON: gate EVERY in-flight request (clicked links, Enter submits,
-    // subresources) and every redirect hop of each — assertSafeNavigationUrl
+    // subresources) and every redirect hop of each, assertSafeNavigationUrl
     // only covers entry/goto URLs known from the recipe, but a click on an
     // a[href] or a submit navigates with no pre-check. Installed ONLY when the
     // guard is engaged: route interception funnels every request through
@@ -944,10 +944,10 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
     if (!allowPrivateNetwork) {
       gate = createRequestGate({ allowPrivateNetwork });
       gated = await installRequestGate(page.context(), gate);
-      // WebSocket upgrades bypass ctx.route — gate them separately
+      // WebSocket upgrades bypass ctx.route, gate them separately
       if (!(await gateWebSockets(page.context(), gate))) {
         console.error(
-          "warning: this Playwright build lacks routeWebSocket — WebSocket connections are NOT policy-checked",
+          "warning: this Playwright build lacks routeWebSocket, WebSocket connections are NOT policy-checked",
         );
       }
     }
@@ -998,7 +998,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
           await cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
           return;
         }
-        // a frame without a CDP timestamp cannot be placed on the timeline —
+        // a frame without a CDP timestamp cannot be placed on the timeline,
         // indexing it at 0 would poison t_source with an epoch-sized negative
         const stampMs = (ev.metadata.timestamp ?? 0) * 1000;
         if (!(stampMs > 0)) {
@@ -1065,7 +1065,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
       });
       // actions must not start before footage exists (frame-0 race)
       await Promise.race([firstFrameSeen, sleep(3000)]);
-      if (firstFrameStamp < 0) console.error("warning: no screencast frame within 3s — page may be fully static");
+      if (firstFrameStamp < 0) console.error("warning: no screencast frame within 3s, page may be fully static");
     }
     // one timeline for everything: frame t_source is (CDP timestamp − first
     // frame's CDP timestamp), so anchoring the observed clock to that same
@@ -1164,7 +1164,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   if (writeErrors > 0) {
     throw new Error(
-      `${writeErrors} frame write(s) failed — take is incomplete, refusing to emit a corrupt index`,
+      `${writeErrors} frame write(s) failed, take is incomplete, refusing to emit a corrupt index`,
     );
   }
 
@@ -1175,8 +1175,8 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
   const eventLog: EventLog = {
     version: 0,
     // clock declaration (schema): event `t` shares the frame t_source timeline.
-    // The render stage keys its skew/health gates off this marker — never off
-    // the capture's frame rate — so a starved take can't pass as "legacy".
+    // The render stage keys its skew/health gates off this marker, never off
+    // the capture's frame rate, so a starved take can't pass as "legacy".
     t_source_unified: true,
     // navigation declaration (schema): every page change while filming is a
     // `scene` event (scene entries) or a `navigation` event (everything
@@ -1199,7 +1199,7 @@ export async function record(opts: RecordOptions): Promise<RecordResult> {
 
   // capture-health telemetry: frames per second of take time. The span uses
   // BOTH clocks (last frame t_source and last event t) so a capture that
-  // stalled early — few frames, but a long event timeline — reads as sparse
+  // stalled early, few frames, but a long event timeline, reads as sparse
   // instead of hiding behind its own short frame span.
   let maxEventT = 0;
   for (const e of events) maxEventT = Math.max(maxEventT, e.t);

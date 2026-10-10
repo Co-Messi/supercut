@@ -158,10 +158,10 @@ async function resolvesPrivate(hostname: string): Promise<boolean> {
 }
 
 /** ENFORCEMENT-path resolver: a failed or empty lookup PROPAGATES so the
- *  caller fails closed. Swallowing it here was the rebinding window: an
- *  NXDOMAIN at check time read as "not private", the gate allowed (and
- *  cached) the host, and Chromium's own later resolution could then connect
- *  to a private address the policy never saw. On machines where a proxy/TUN
+ *  caller fails closed. Swallowing it here would open a rebinding window: an
+ *  NXDOMAIN at check time would read as "not private", the gate would allow
+ *  (and cache) the host, and Chromium's own later resolution could then
+ *  connect to a private address the policy never saw. On machines where a proxy/TUN
  *  does the real resolving, the request gate is the load-bearing SSRF
  *  defense (the --host-resolver-rules pin is bypassed inside the tunnel), so
  *  "can't verify" must mean "deny", not "shrug". */
@@ -195,7 +195,7 @@ async function checkOne(raw: string, opts: NavigationPolicyOptions, redirect: bo
       // whatever the browser's resolver returns later.
       throw new Error(
         `cannot verify ${raw} against the private-network policy (DNS lookup failed: ` +
-          `${err instanceof Error ? err.message : err}) — refusing while the guard is engaged`,
+          `${err instanceof Error ? err.message : err}), refusing while the guard is engaged`,
       );
     }
     if (priv) {
@@ -211,8 +211,8 @@ export async function assertSafeNavigationUrl(raw: string, opts: NavigationPolic
 
 /**
  * Route-decision for an IN-FLIGHT browser navigation request (Playwright route
- * handler): may this request leave the browser? Runs the full policy — scheme,
- * string/IP-literal private checks (synchronous), then DNS resolution — and
+ * handler): may this request leave the browser? Runs the full policy, scheme,
+ * string/IP-literal private checks (synchronous), then DNS resolution, and
  * never throws, because a route handler must always settle the request.
  * Post-settle URL checks only run AFTER Chromium fetched a redirect target;
  * this gate runs BEFORE.
@@ -229,7 +229,7 @@ export async function navigationRequestAllowed(
   }
 }
 
-/** Does this URL's host name/resolve to a private address? Never throws —
+/** Does this URL's host name/resolve to a private address? Never throws,
  *  used for advisory hints, not enforcement. */
 export async function urlResolvesPrivate(raw: string): Promise<boolean> {
   try {
@@ -245,11 +245,11 @@ const DEFAULT_ALLOW_TTL_MS = 5_000;
 
 /**
  * Per-run request gate for a Playwright route handler: decides whether ANY
- * in-flight browser request — navigation, fetch/XHR, <img>, <script>, <link>,
- * form POST — may leave the browser under the private-network policy. The
- * navigation-only check this replaces left every subresource free to reach
- * private hosts while the CLI reported the guard as engaged. (WebSocket
- * upgrades never reach a route handler — gateWebSockets below covers those
+ * in-flight browser request (navigation, fetch/XHR, <img>, <script>, <link>,
+ * form POST) may leave the browser under the private-network policy. A
+ * navigation-only check would leave every subresource free to reach private
+ * hosts while the CLI reports the guard as engaged. (WebSocket
+ * upgrades never reach a route handler, gateWebSockets below covers those
  * with the same gate.)
  *
  * DNS verdicts are cached per host so enforcing on every subresource doesn't
@@ -258,14 +258,14 @@ const DEFAULT_ALLOW_TTL_MS = 5_000;
  * rebinds to a private address mid-run is re-resolved and caught at the next
  * request after expiry instead of being trusted forever. Fail-closed: an
  * unparseable URL, a throwing check, or a FAILED LOOKUP blocks the request
- * while the guard is engaged — and a verdict born of a failed lookup is never
+ * while the guard is engaged, and a verdict born of a failed lookup is never
  * cached (see below). With the guard off it allows everything and resolves
  * nothing.
  *
  * Best-effort, not a rebinding proof: the verdict comes from one lookup and
  * the connection makes its own. A name that answers "public" to the check
  * and "private" to the connect, inside the TTL or between the two lookups,
- * is not caught — that needs enforcement at the connection (a filtering
+ * is not caught, that needs enforcement at the connection (a filtering
  * proxy), which this module does not provide.
  */
 export interface RequestGate {
@@ -311,7 +311,7 @@ export function createRequestGate(opts: {
         () => {
           // deny THIS request, but do not cache a verdict derived from a
           // failed lookup: the host was never actually validated. A later
-          // request re-resolves — if the name then points somewhere private
+          // request re-resolves, if the name then points somewhere private
           // the fresh lookup catches it; caching the failure would instead
           // freeze whatever the outage happened to look like.
           if (verdicts.get(host) === entry) verdicts.delete(host);
@@ -324,7 +324,7 @@ export function createRequestGate(opts: {
   };
 }
 
-/** structural slice of Playwright's WebSocketRoute — keeps this module free
+/** structural slice of Playwright's WebSocketRoute, keeps this module free
  *  of a hard playwright type dependency */
 interface WebSocketRouteLike {
   url(): string;
@@ -334,7 +334,7 @@ interface WebSocketRouteLike {
 
 /**
  * Gate WebSocket connections under the same policy as createRequestGate.
- * `ctx.route("**\/*")` cannot intercept WebSocket upgrades — Playwright's
+ * `ctx.route("**\/*")` cannot intercept WebSocket upgrades, Playwright's
  * routeWebSocket (shipped in 1.48) can, so without this a page could open a
  * socket to a private host with the guard nominally engaged. Allowed sockets
  * are connected straight through (`connectToServer()` with no message
@@ -409,7 +409,7 @@ export async function resolveAndPinHost(
 }
 
 /** Chromium `--host-resolver-rules` MAP entry. IPv6 replacement addresses
- *  must be bracketed — `MAP host ::1` is malformed and silently ignored. */
+ *  must be bracketed, `MAP host ::1` is malformed and silently ignored. */
 export function hostResolverRule(hostname: string, ip: string): string {
   return `MAP ${hostname} ${isIP(ip) === 6 ? `[${ip}]` : ip}`;
 }

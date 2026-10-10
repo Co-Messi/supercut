@@ -1,12 +1,12 @@
 /**
- * Source-code comprehension — read the app's routes and page components to
+ * Source-code comprehension, read the app's routes and page components to
  * understand what the product actually IS, then seed the crawl with those
  * routes so the director can drive INTO real panels (not just the landing).
  *
  * Why this exists: the crawler only sees the app's *initial* DOM, so the
  * director never discovers functional pages reachable by buttons/SPA nav and
  * tours the surface ("stayed on the home page, didn't go into the panel"). The
- * code is the ground truth of what every screen shows — reading it is cheaper
+ * code is the ground truth of what every screen shows, reading it is cheaper
  * and deeper than vision, and it tells us which routes exist so we can crawl
  * them and get their real selectors into the inventory.
  *
@@ -24,7 +24,7 @@ export interface SourceRoute {
   route: string;
   /** absolute file path of the page component */
   file: string;
-  /** true for dynamic routes like /items/[id] — NOT seeded into the crawl (no
+  /** true for dynamic routes like /items/[id], NOT seeded into the crawl (no
    *  concrete value), but still listed in the product summary */
   dynamic: boolean;
   /** extracted human-visible text (headings, labels, copy) for the LLM summary */
@@ -34,8 +34,8 @@ export interface SourceRoute {
 const SKIP_DIRS = new Set([
   "node_modules", ".next", ".git", "dist", "build", "out", ".turbo",
   "coverage", ".vercel", ".cache", "__tests__", "test", "tests",
-  // A5: test/spec/fixture/story dirs hold fake pages and sample data — never
-  // real product routes — so keep them out of the crawl seeds and LLM prompt.
+  // test/spec/fixture/story dirs hold fake pages and sample data, never
+  // real product routes, so keep them out of the crawl seeds and LLM prompt.
   "e2e", "__mocks__", "stories", ".storybook", "cypress", "playwright", "fixtures", "spec", "specs",
 ]);
 /** an app-router page: the only file that makes a segment a route */
@@ -52,7 +52,7 @@ const NEXT_CONFIG = /^next\.config\.(js|mjs|cjs|ts|mts)$/;
 const MAX_WALK_FILES = 10_000;
 /** absolute ceiling on directory entries VISITED. With --app, files outside
  *  the selected app cost nothing against the file budget (see extractAppRoutes)
- *  — this second bound keeps the traversal itself finite on a pathological
+ *  this second bound keeps the traversal itself finite on a pathological
  *  repo instead of re-opening the unbounded-enumeration hole the file budget
  *  closed. */
 const MAX_WALK_VISITED = 200_000;
@@ -243,7 +243,7 @@ export function extractAppRoutes(repoPath: string, opts: ExtractOptions = {}): S
     console.error(
       `[source] --repo walk stopped early (kept ${state.files.length} file(s)` +
         (appName ? ` matching --app ${appName}` : "") +
-        `, visited ${state.visited} entries) — routes beyond that are not seen. ` +
+        `, visited ${state.visited} entries), routes beyond that are not seen. ` +
         `Point --repo at the app directory to scope the scan.`,
     );
   }
@@ -288,10 +288,10 @@ export function routesToSeedAndNotes(
         /* skip */
       }
     }
-    lines.push(`  ${r.route}${r.dynamic ? " (dynamic)" : ""}${r.summary ? ` — ${r.summary}` : ""}`);
+    lines.push(`  ${r.route}${r.dynamic ? " (dynamic)" : ""}${r.summary ? `, ${r.summary}` : ""}`);
   }
   const notes =
-    `APP ROUTES (from source — these are the real pages this product has):\n` +
+    `APP ROUTES (from source, these are the real pages this product has):\n` +
     lines.join("\n");
   return { seedUrls, notes };
 }

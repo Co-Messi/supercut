@@ -1,5 +1,5 @@
 /**
- * Render plan — stage 5's brain, computed in tested TS before any pixel work.
+ * Render plan, stage 5's brain, computed in tested TS before any pixel work.
  *
  *   events.json + frames-index.json
  *        │
@@ -56,7 +56,7 @@ export interface BackgroundStyle {
 }
 
 /**
- * Curated palettes. "aurora" is the default — the soft blurred
+ * Curated palettes. "aurora" is the default, the soft blurred
  * pastel-mesh look of modern launch videos. Apple wallpapers cannot be
  * bundled (copyright); users get the
  * same vibe via --bg <their own image>.
@@ -129,7 +129,7 @@ export interface RenderPlan {
    *  (matches the music bed's afade in/out) */
   fade: { inFrames: number; outFrames: number };
   /** output frame → index into frameIndex (floor-hold: the last captured
-   *  frame at or before the output time is held — not the temporally nearest) */
+   *  frame at or before the output time is held, not the temporally nearest) */
   sourceByFrame: number[];
   /** flattened [srcB, k] per output frame: a second source index and its
    *  blend weight. The planner never blends (srcB = -1, k = 0 everywhere,
@@ -152,7 +152,7 @@ export interface CameraSegment {
   fy: number;
 }
 
-/** MAXIMUM punch-in, reached only for small widgets — a plain bbox is inflated
+/** MAXIMUM punch-in, reached only for small widgets, a plain bbox is inflated
  *  to a context region and fit-zoomed, so large targets zoom far less */
 export const ZOOM_TARGET = 1.42;
 /** camera starts moving this long before the click lands: the critically
@@ -165,27 +165,27 @@ export const ZOOM_LEAD_MS = 750;
 export const ARRIVE_MS = 600;
 export const ZOOM_DWELL_MS = 1200; // stays on target after the event
 /** a punch whose hold after the event would be shorter than this (the page
- *  navigates right after the click) is skipped — an in-out pump, not a shot */
+ *  navigates right after the click) is skipped, an in-out pump, not a shot */
 export const MIN_HOLD_AFTER_EVENT_MS = 300;
 /** each scene opens wide: this long at z=1 from the first frame of the new
  *  page, so the viewer reads the whole page before the first punch-in
  *  (Screen-Studio establishing shot) */
 export const ESTABLISH_MS = 800;
 /** a plain interaction bbox is inflated to at least this fraction of the
- *  viewport before fit-zooming — the framed shot always keeps page context,
+ *  viewport before fit-zooming, the framed shot always keeps page context,
  *  and a full-width hero gets no punch at all */
 const MIN_CONTEXT_FRAC = 0.55;
 /** bridge nearby punch-ins only when their targets are NEAR: beyond this
  *  fraction of the content diagonal the camera widens between beats instead
  *  of dragging a tight crop across the page */
 const MERGE_DIST_FRAC = 0.5;
-/** a framed RESULT (focus_bbox) is the payoff — hold on it longer than a plain
+/** a framed RESULT (focus_bbox) is the payoff, hold on it longer than a plain
  *  interaction so the viewer reads the graph/results before the camera moves */
 export const FOCUS_DWELL_MS = 2400;
 /** a result region should FILL the frame, not be punched-into and cropped:
  *  fit it to this fraction of the viewport (the rest is breathing room) */
 const FOCUS_FILL = 0.88;
-/** segments closer than this bridge into ONE held zoom — the camera glides
+/** segments closer than this bridge into ONE held zoom, the camera glides
  *  between targets instead of pumping out/in per click. */
 const MERGE_GAP_MS = 3400;
 /** between two punches of the SAME page (too far apart to merge) the camera
@@ -217,10 +217,10 @@ export const ZOOM_OUT_MS = 800;
 /** minimum picture after the last event's dwell */
 export const TAIL_MS = 1000;
 /** the take runs at least this long past the last punch's end, so the
- *  spring's zoom-out has fully settled (|Δz| < 1e-4/frame) before the end —
+ *  spring's zoom-out has fully settled (|Δz| < 1e-4/frame) before the end,
  *  never finishing mid-move */
 export const SETTLE_TAIL_MS = 1700;
-/** picture fade from / to black — the SAME lengths as the music bed's afade
+/** picture fade from / to black, the SAME lengths as the music bed's afade
  *  in/out (musicFilterChain), so picture and sound open and close together */
 export const FADE_IN_MS = 600;
 export const FADE_OUT_MS = 1800;
@@ -274,14 +274,14 @@ export function defaultLayout(viewport: EventLog["viewport"]): Layout {
  * The compositor's camera transform: canvas point p → z·p + [offX, offY] for
  * the spring state (z, focus fx/fy) over a W×H canvas whose content window is
  * `c`. Returns [z, offX, offY]. The host page embeds THIS function verbatim
- * (via toString — keep the body flat: no nested functions or outer
+ * (via toString, keep the body flat: no nested functions or outer
  * constants), so the plan-level framing tests score exactly what is drawn.
  *
  * Per axis:
  *  - the shot wants the focus at the canvas centre (offset size/2 − z·focus);
  *  - the offset is clamped to the window's legal range: while z·content is
  *    smaller than the canvas the window stays fully on canvas, and once it is
- *    larger the window covers the canvas — never wallpaper on one edge while
+ *    larger the window covers the canvas, never wallpaper on one edge while
  *    the opposite edge overflows (an unclamped offset shows hundreds of px of
  *    wallpaper on one side when the focus sits near an edge);
  *  - that range is narrowed toward the plain scale-about-centre offset by a
@@ -336,7 +336,7 @@ export function validateFrameIndex(frameIndex: FrameIndexEntry[]): void {
     if (typeof e?.file !== "string" || e.file.length === 0 || typeof e?.t_source !== "number") {
       throw new Error(`render plan: frames-index entry ${i} is malformed`);
     }
-    // the host page fetches `/take/${file}` — constrain it to the frames/
+    // the host page fetches `/take/${file}`, constrain it to the frames/
     // namespace (matching the server's sanitizer) so a hand-edited index can't
     // point the fetch at other take artifacts
     if (!/^frames\/[0-9a-zA-Z._-]+$/.test(e.file)) {
@@ -569,7 +569,7 @@ export function planPunches(
       dwell = FOCUS_DWELL_MS;
     } else {
       // size-aware punch for a plain interaction target: inflate the bbox to a
-      // context region, then fit — small widgets reach ZOOM_TARGET, big
+      // context region, then fit, small widgets reach ZOOM_TARGET, big
       // sections barely zoom, a full-viewport hero stays at z=1
       const regionW = Math.max(bw, MIN_CONTEXT_FRAC * layout.viewport.width);
       const regionH = Math.max(bh, MIN_CONTEXT_FRAC * layout.viewport.height);
@@ -684,7 +684,7 @@ export function takeDurationMs(log: EventLog, frameIndex: FrameIndexEntry[], seg
   }
   if (lastT > MAX_TAKE_MS) {
     throw new Error(
-      `render plan: take spans ${Math.round(lastT)}ms > ${MAX_TAKE_MS}ms cap — corrupt timestamp in events.json or frames-index.json?`,
+      `render plan: take spans ${Math.round(lastT)}ms > ${MAX_TAKE_MS}ms cap, corrupt timestamp in events.json or frames-index.json?`,
     );
   }
   let lastPunchEnd = 0;

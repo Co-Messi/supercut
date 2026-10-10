@@ -1,9 +1,9 @@
 import { z } from "zod";
 
 /**
- * Recipe Schema v0 — the filming script.
+ * Recipe Schema v0, the filming script.
  *
- * Produced by the script stage (LLM, validated here — invalid output fails
+ * Produced by the script stage (LLM, validated here, invalid output fails
  * loudly and never reaches capture) or written by hand (tape-file users).
  *
  *   recipe ──schedule(recipe, beatGrid)──▶ timed recipe ──▶ capture executor
@@ -13,9 +13,9 @@ import { z } from "zod";
  *    the take's fixed overhead (estimatedTakeMs)
  *  - every scene declares an entry navigation (URL or action prelude)
  *  - depends_on references must point at existing, EARLIER scenes
- *    (scene order is immutable — reorder is excluded from v1)
+ *    (scene order is immutable, reorder is excluded from v1)
  *  - QC may later patch ONLY: zoom bbox, dwell/hold durations, scene cut
- *    (the frozen patch surface — enforced in src/director, not here)
+ *    (the frozen patch surface, enforced in src/director, not here)
  */
 
 export const MAX_BUDGET_MS = 60_000;
@@ -72,7 +72,7 @@ export function minTypeActionMs(text: string, submit: boolean): number {
   return MIN_TYPE_ACTION_MS + MIN_KEY_GAP_MS * Math.max(0, keys - 1) + (submit ? ENTER_BEAT_MS : 0);
 }
 
-/** recipes drive a real local browser — never allow file:/javascript:/etc. */
+/** recipes drive a real local browser, never allow file:/javascript:/etc. */
 const finite = z.number().finite();
 const positiveFinite = finite.positive();
 
@@ -90,12 +90,12 @@ export const action = z
     url: httpUrl.optional(),
     text: z.string().max(MAX_TYPED_TEXT).optional(),
     /** type only: press Enter after typing. Many query/search inputs reveal
-     *  their payoff (results, a graph, a detail panel) only on submit — without
+     *  their payoff (results, a graph, a detail panel) only on submit, without
      *  this the robot types into a box and the product never actually runs. */
     submit: z.boolean().optional(),
     /** Camera target: a result region (from the page's framable regions) that
      *  this action produces. The renderer holds the camera HERE instead of on
-     *  the interaction bbox — cursor on the control, frame on the payoff.
+     *  the interaction bbox, cursor on the control, frame on the payoff.
      *  Resolved at capture time; ignored if it doesn't resolve. */
     focus_selector: z.string().min(1).optional(),
     /** Scheduled duration for this action, ms. The scheduler may re-place
@@ -107,7 +107,7 @@ export const action = z
   })
   .strict()
   .superRefine((a, ctx) => {
-    // per-kind requirements — fail at parse time, never mid-capture
+    // per-kind requirements, fail at parse time, never mid-capture
     if ((a.kind === "click" || a.kind === "hover" || a.kind === "type") && !a.selector) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${a.kind} action requires a selector` });
     }
@@ -216,7 +216,7 @@ export function parseRecipe(raw: unknown): Recipe {
   if (take > MAX_BUDGET_MS) {
     throw new RecipeValidationError(
       `recipe budgets ${budget}ms (~${take}ms of video with the pre-roll, scene changes and ending) > ` +
-        `hard ceiling ${MAX_BUDGET_MS}ms — cut scenes or shorten actions`,
+        `hard ceiling ${MAX_BUDGET_MS}ms, cut scenes or shorten actions`,
     );
   }
 
@@ -229,7 +229,7 @@ export function parseRecipe(raw: unknown): Recipe {
       if (!names.has(dep)) {
         throw new RecipeValidationError(
           `scene "${s.name}" depends_on "${dep}" which is not an earlier scene ` +
-            `(missing, later, or self — scene order is immutable in v1)`,
+            `(missing, later, or self, scene order is immutable in v1)`,
         );
       }
     }

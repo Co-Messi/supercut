@@ -9,13 +9,13 @@ import { afterAll, describe, expect, it } from "vitest";
 const exec = promisify(execFile);
 
 /**
- * The CLI must EXIT when it is done — through the real entry point, not the
- * library. `renderTake` used to leave its referenced watchdog timer (>= 5 min,
- * sized from the plan) running after a successful encode; the CLI sets
- * process.exitCode and relies on natural event-loop drain (an explicit
- * process.exit() can truncate piped stdout), so the surviving timer made
- * `supercut render` print its result and then hang for minutes. A library
- * test can't see this — only spawning the actual CLI and watching the process
+ * The CLI must EXIT when it is done, through the real entry point, not the
+ * library. The CLI sets process.exitCode and relies on natural event-loop
+ * drain (an explicit process.exit() can truncate piped stdout), so any
+ * referenced timer `renderTake` leaves running after a successful encode (its
+ * watchdog is >= 5 min, sized from the plan) would make `supercut render`
+ * print its result and then hang for minutes. A library
+ * test can't see this, only spawning the actual CLI and watching the process
  * end does.
  */
 
@@ -27,7 +27,7 @@ afterAll(() => {
 });
 
 /** tiny but VALID take (mirrors the badmux fixture in record.e2e): two real
- *  1x1 PNGs over a short timeline — encodes in seconds, watchdog floor is 5min */
+ *  1x1 PNGs over a short timeline, encodes in seconds, watchdog floor is 5min */
 function writeTinyTake(): string {
   const takeDir = mkdtempSync(join(tmpdir(), "supercut-cliexit-"));
   dirs.push(takeDir);
@@ -67,7 +67,7 @@ describe("CLI process exit", () => {
     const outFile = join(takeDir, "final.mp4");
     const tsx = join(root, "node_modules", ".bin", "tsx");
     const t0 = Date.now();
-    // execFile resolving IS the process exiting — the whole point of the test.
+    // execFile resolving IS the process exiting, the whole point of the test.
     // The 120s ceiling sits far below the 300s watchdog floor: with a leaked
     // timer the child survives past it, gets killed, and this rejects.
     const { stdout } = await exec(tsx, ["src/cli/index.ts", "render", "--take", takeDir, "--out", outFile], {

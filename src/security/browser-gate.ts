@@ -4,7 +4,7 @@
  * Why every request is fetched from Node instead of `route.continue()`d:
  * Playwright's Chromium backend auto-continues a REDIRECTED request without
  * ever handing it to a `route()` handler, so a handler that vets a URL and
- * then continues it only ever sees the first hop of a chain — a public URL
+ * then continues it only ever sees the first hop of a chain, a public URL
  * answering `302 Location: http://169.254.169.254/` sails through. Here the
  * handler performs the request itself with `maxRedirects: 0`, checks every
  * `Location` against the gate BEFORE requesting it, follows the chain
@@ -62,7 +62,7 @@ function redirectStub(target: string): string {
 
 export interface GatedContext {
   /** main-frame navigations the policy refused (the first hop or any
-   *  redirect hop), in order — the browser is left on an error page, which
+   *  redirect hop), in order, the browser is left on an error page, which
    *  the caller must not mistake for the product */
   blockedNavigations: string[];
 }
@@ -212,7 +212,7 @@ export async function installRequestGate(
 /**
  * After awaiting a navigation made under the gate: if the response is the
  * stub of a gated redirect, wait until the frame has replaced it with the
- * real document. Returns null in that case (the stub is not the document —
+ * real document. Returns null in that case (the stub is not the document,
  * callers fall back to page.url()); otherwise returns the response unchanged.
  */
 export async function settleGatedRedirect(

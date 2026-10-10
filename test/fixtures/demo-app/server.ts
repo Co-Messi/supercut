@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 
 /**
- * Fixture demo app — the app supercut films in tests and demos.
+ * Fixture demo app, the app supercut films in tests and demos.
  *
  * A fake SaaS ("Lumon Metrics") with two routes:
  *   /      landing: headline, CTA button, signup form
@@ -40,7 +40,7 @@ const LANDING = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon M
       <input id="email" type="email" placeholder="you@company.com" autocomplete="off">
       <button id="join">Join</button>
     </div>
-    <div id="joined">✓ You're in — check your inbox.</div>
+    <div id="joined">✓ You're in, check your inbox.</div>
   </main>
   <script>
     document.getElementById("cta").addEventListener("click", () => {
@@ -53,7 +53,7 @@ const LANDING = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon M
   </script>
 </body></html>`;
 
-const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Dashboard</title><style>
+const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Dashboard</title><style>
   :root { --ink:#16161a; --accent:#2563eb; --bg:#fafaf7 }
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
@@ -69,7 +69,7 @@ const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — 
   li:hover { border-color:var(--accent); transform:translateX(4px) }
   li .tag { color:var(--accent); font-weight:600; font-size:14px }
 </style></head><body>
-  <header>Lumon Metrics — Live Dashboard</header>
+  <header>Lumon Metrics, Live Dashboard</header>
   <div class="grid">
     <div class="card"><div class="label">Active users</div><div class="num" id="n1">0</div></div>
     <div class="card"><div class="label">Events / sec</div><div class="num" id="n2">0</div></div>
@@ -91,10 +91,10 @@ const DASH = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — 
 </body></html>`;
 
 /** third route: a query panel whose big result region is revealed only on
- *  click — exercises the changed-region (MutationObserver) focus fallback.
+ *  click, exercises the changed-region (MutationObserver) focus fallback.
  *  The click also fires a transient toast (bottom-right, auto-removed after
  *  400ms): a vanished overlay must never end up inside the framed result. */
-const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Query</title><style>
+const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Query</title><style>
   :root { --ink:#16161a; --accent:#2563eb; --bg:#fafaf7 }
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif; background:var(--bg); color:var(--ink) }
@@ -123,19 +123,19 @@ const PANEL = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
-/** fourth route: a DARK service-fleet dashboard shaped like real ops tools —
+/** fourth route: a DARK service-fleet dashboard shaped like real ops tools,
  *  six PASSIVE rows sharing one data-testid (each must survive as a distinct
  *  :nth-match entry), live-ticking latencies (text-based selectors self-
  *  invalidate), and destructive controls that must ALL be excluded: a <button>,
  *  an inline-onclick div, a bare <button>Delete-all</button>, a PASSIVE
- *  destructive-slug row (<li>delete-log-2024</li> — we can't prove it's inert,
+ *  destructive-slug row (<li>delete-log-2024</li>, we can't prove it's inert,
  *  so it's fail-safe excluded), and a framework-wired "danger-row" div whose
  *  click is bound via addEventListener with NO onclick attr and NO cursor/
- *  tabindex/role signal at all — excluded purely by its destructive label. The
- *  dark surface is painted on a #root wrapper while body/html stay transparent —
+ *  tabindex/role signal at all, excluded purely by its destructive label. The
+ *  dark surface is painted on a #root wrapper while body/html stay transparent,
  *  the React/Next shape a body-only theme probe misreads "light", so this
  *  exercises the largest-surface probe. */
-const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Fleet</title><style>
+const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Fleet</title><style>
   :root { --ink:#e8eaf2; --accent:#5b8cff; --surface:#0b0e14 }
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif }
@@ -182,9 +182,9 @@ const FLEET = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
 
 /** fifth route: a LIGHT app with a full-viewport translucent modal backdrop
  *  (rgba(0,0,0,.55) over ≥60% of the screen). The backdrop out-covers the body
- *  but is NOT the page ground — the theme probe must skip non-opaque layers and
+ *  but is NOT the page ground, the theme probe must skip non-opaque layers and
  *  still report "light", not be fooled "dark" by the overlay. */
-const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Overlay</title><style>
+const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Overlay</title><style>
   * { box-sizing:border-box; margin:0 }
   body { font-family:-apple-system,'Segoe UI',sans-serif; background:#fafaf7; color:#16161a }
   main { max-width:880px; margin:80px auto; padding:0 32px }
@@ -200,11 +200,11 @@ const OVERLAY = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon �
 </body></html>`;
 
 /** SSRF-probe page for the request-gate wiring tests: fires a fetch() and a
- *  WebSocket at attacker-chosen targets from the query string — exactly the
+ *  WebSocket at attacker-chosen targets from the query string, exactly the
  *  in-flight requests the guard must stop that no recipe URL check can see.
  *  `link` renders a clickable/crawlable <a id="hop"> to an attacker-chosen
  *  href (e.g. a same-origin /redirect that 302s somewhere private). */
-const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Probe</title></head><body>
+const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Probe</title></head><body>
   <h1 id="t">probe page</h1><div id="status">pending</div>
   <script>
     const qs = new URLSearchParams(location.search);
@@ -230,11 +230,11 @@ const PROBE = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon —
   </script>
 </body></html>`;
 
-/** sixth route: an input that reports how it was operated — pointer settle
- *  before the press, press hold, keystroke times, Enter — to POST /keylog,
+/** sixth route: an input that reports how it was operated, pointer settle
+ *  before the press, press hold, keystroke times, Enter, to POST /keylog,
  *  so the capture stage's human-timing behaviour is testable end to end.
  *  Placed below the fold so reaching it needs a scroll-into-view. */
-const KEYS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon — Keys</title>
+const KEYS = `<!doctype html><html><head><meta charset="utf-8"><title>Lumon, Keys</title>
 <style>body{margin:0;font:16px sans-serif} .spacer{height:1700px}
 input{font-size:20px;padding:10px;width:420px;margin:40px}</style></head><body>
 <div class="spacer"></div>
@@ -319,7 +319,7 @@ export interface DemoApp {
   close: () => Promise<void>;
   /** bodies POSTed to /keylog by the /keys page, oldest first */
   keylogs: unknown[];
-  /** GET count per path (query stripped) — proves whether a page reloaded */
+  /** GET count per path (query stripped), proves whether a page reloaded */
   hits: Map<string, number>;
 }
 

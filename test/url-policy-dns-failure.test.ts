@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
  * with --block-private-network engaged, a lookup that fails or NXDOMAINs must
  * DENY, not read as "not private". The old advisory resolver swallowed the
  * error into an allow, and the request gate then cached that allow for the
- * whole run — a rebinding window, because Chromium re-resolves on its own
+ * whole run, a rebinding window, because Chromium re-resolves on its own
  * once the hostname starts pointing somewhere private. Lives in its own file
  * because vi.mock of node:dns/promises is module-wide; the main url-policy
  * suite does real lookups.
@@ -49,7 +49,7 @@ describe("default resolvers under DNS failure (guard engaged = fail closed)", ()
     expect(await navigationRequestAllowed("http://nxdomain.example/")).toBe(false);
   });
 
-  it("with the guard OFF no lookup happens at all — an unresolvable host is not an error", async () => {
+  it("with the guard OFF no lookup happens at all, an unresolvable host is not an error", async () => {
     await expect(
       assertSafeNavigationUrl("http://nxdomain.example/", { allowPrivateNetwork: true }),
     ).resolves.toBeUndefined();

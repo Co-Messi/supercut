@@ -96,7 +96,7 @@ describe("prose style", () => {
   it.each(["README.md", "SECURITY.md", "CHANGELOG.md", "AGENTS.md", ".claude/skills/supercut/SKILL.md"])(
     "%s has no em or en dashes",
     (file) => {
-      expect(read(file)).not.toMatch(/[–—]/);
+      expect(read(file)).not.toMatch(/[\u2013\u2014]/);
     },
   );
 });

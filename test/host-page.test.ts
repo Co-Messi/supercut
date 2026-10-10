@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { blurPassCount, HOST_PAGE } from "../src/render/host-page.js";
 import { cameraTransform } from "../src/render/plan.js";
 
-/** a plain scale-about-point camera transform (canvas point p → z·p + off) —
+/** a plain scale-about-point camera transform (canvas point p → z·p + off),
  *  blurPassCount input fixtures; the real framing lives in cameraTransform */
 const offsets = (z: number, fx: number, fy: number, W = 1920, H = 1080) => {
   const cx = W / 2, cy = H / 2;
@@ -49,7 +49,7 @@ describe("compositor sharpness settings", () => {
     expect(cursorBlock).not.toMatch(/SUB - 1/);
   });
 
-  it("frames the camera with the plan's cameraTransform — no inline copy of an older formula", () => {
+  it("frames the camera with the plan's cameraTransform, no inline copy of an older formula", () => {
     expect(HOST_PAGE).toContain("function cameraTransform");
     expect(HOST_PAGE).toContain("cameraTransform(z, fx, fy, W, H, C)");
     expect(HOST_PAGE).not.toMatch(/1 - 1 \/ z/);
@@ -76,7 +76,7 @@ describe("camera framing ramp (cameraTransform)", () => {
     }
   });
 
-  it("a gentle z≈1.1 glide nudges the window toward the focus — never jams it against an edge", () => {
+  it("a gentle z≈1.1 glide nudges the window toward the focus, never jams it against an edge", () => {
     const z = 1.1;
     const centred = (W - z * C.w) / 2; // each side's margin when centred
     for (const [fx, fy] of edges) {

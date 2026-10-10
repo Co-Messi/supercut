@@ -9,7 +9,7 @@ import type { EventLog } from "../src/schema/index.js";
  * The deterministic capture-health gate. A capture that starved (repaint
  * beacon dead, page never committing frames) produces a clean event timeline
  * over almost no footage; rendering it yields a slideshow with a green run.
- * The gate must refuse it — and must NOT fire on healthy or merely-throttled
+ * The gate must refuse it, and must NOT fire on healthy or merely-throttled
  * captures, because a gate that fires on everything is as broken as one that
  * fires on nothing.
  */
@@ -68,7 +68,7 @@ describe("assessCaptureHealth", () => {
     expect(assessCaptureHealth(log, frames(4, 200)).action).toBe("ok");
   });
 
-  it("respects a lower declared fps — a 30fps third-party recorder at 30fps is healthy", () => {
+  it("respects a lower declared fps, a 30fps third-party recorder at 30fps is healthy", () => {
     const idx = frames(300, 1000 / 30);
     const log = makeLog([{ t: 9_800, type: "scene", name: "s1", priority: 1 }], { fps: 30 });
     expect(assessCaptureHealth(log, idx).action).toBe("ok");
@@ -76,7 +76,7 @@ describe("assessCaptureHealth", () => {
 
   it("counts cursor_path point timestamps: a take whose only late timeline is cursor points cannot dodge the gate", () => {
     // third-party take: every event `t` sits near 0 (a cursor_path container
-    // is stamped t=0), but the points run to 30s — and buildRenderPlan sizes
+    // is stamped t=0), but the points run to 30s, and buildRenderPlan sizes
     // the output off that final point. Duration must follow the points, or
     // this reads as a sub-2s take, skips the ratio gate, and renders 30s of
     // held stills.
@@ -92,7 +92,7 @@ describe("assessCaptureHealth", () => {
   });
 
   it("cursor points aligned with real footage do not fire the gate (built-in recorder shape)", () => {
-    // the built-in recorder's cursor points end where the frames end — the
+    // the built-in recorder's cursor points end where the frames end, the
     // fix must not reclassify healthy takes
     const idx = frames(600, 1000 / 60); // 10s at 60fps
     const log = makeLog([
@@ -115,10 +115,10 @@ describe("assessCaptureHealth", () => {
   });
 
   it("tolerates a slow navigation gap a healthy recorder can produce (~10s)", () => {
-    const before = frames(600, 1000 / 60); // 0–10s
+    const before = frames(600, 1000 / 60); // 0 to 10s
     const after = frames(600, 1000 / 60).map((f, i) => ({
       file: `frames/${String(600 + i).padStart(6, "0")}.png`,
-      t_source: f.t_source + 20_000, // 20–30s, after a 10s navigation
+      t_source: f.t_source + 20_000, // 20 to 30s, after a 10s navigation
     }));
     const log = makeLog([
       { t: 0, type: "scene", name: "s1", priority: 1 },
@@ -173,7 +173,7 @@ describe("renderTake capture-health gate", () => {
     ).rejects.toThrow(/sparse/i);
   });
 
-  it("a legacy sparse take (no clock declaration) is refused the same way — rendering one requires the explicit SUPERCUT_ALLOW_SPARSE opt-in", async () => {
+  it("a legacy sparse take (no clock declaration) is refused the same way, rendering one requires the explicit SUPERCUT_ALLOW_SPARSE opt-in", async () => {
     const takeDir = writeTake(
       makeLog(
         [

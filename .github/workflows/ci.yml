@@ -45,7 +45,7 @@ jobs:
       - run: npx vitest run --exclude '**/*.e2e.test.ts'
       # deliberately STRICT (no --omit=dev): dev-tree advisories must stay
       # visible. This is green because the lockfile is clean, not because the
-      # check was weakened — keep it that way.
+      # check was weakened, keep it that way.
       - run: npm audit --audit-level=moderate
 
   browser-e2e:
@@ -60,7 +60,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       # filter by the *.e2e.test.ts naming convention (not an explicit file
-      # list) so a new e2e file cannot be silently skipped here — the same
+      # list) so a new e2e file cannot be silently skipped here, the same
       # rule the unit job above already follows in the other direction
       - run: npm test -- --run e2e.test
 

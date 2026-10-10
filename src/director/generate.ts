@@ -1,5 +1,5 @@
 /**
- * Stage 0-5 orchestrator — `supercut generate`.
+ * Stage 0-5 orchestrator, `supercut generate`.
  *
  *   preflight ─▶ ① analyze ─▶ ② script ─▶ ③ record ─▶ ④ QC ─▶ ⑤ render
  *                  (LLM)        (LLM)      (pure)      │ patch/cut?
@@ -33,10 +33,10 @@ import { quoteForTerminal, terminalSafe } from "../security/terminal.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
-/** default token budget for a whole run — generous for a normal run
+/** default token budget for a whole run, generous for a normal run
  *  (~15 calls at 8k output max), fatal only to runaway retry loops */
 const DEFAULT_MAX_TOKENS = 300_000;
-// stage retry ceilings, mirrored from analyze.ts / script.ts / qc.ts — used
+// stage retry ceilings, mirrored from analyze.ts / script.ts / qc.ts, used
 // only for the advisory pre-flight call-count estimate
 const ANALYZE_ATTEMPTS = 3;
 const SCRIPT_ATTEMPTS = 4;
@@ -57,7 +57,7 @@ export interface GenerateOptions {
   music?: string;
   seed?: number;
   /** model can see images: drives screenshot capture, analyze images, and the
-   *  vision-QC pass. Off for text-only models (e.g. deepseek-chat) — the
+   *  vision-QC pass. Off for text-only models (e.g. deepseek-chat), the
    *  director then reads the DOM/inventory and QC uses deterministic checks. */
   vision?: boolean;
   /** @deprecated use vision:false */
@@ -69,14 +69,14 @@ export interface GenerateOptions {
    *  everything; false engages the guard for any target. */
   allowPrivateNetwork?: boolean;
   /** opt-in: let the director see (and therefore script) destructive controls
-   *  (Delete, Pay, …). OFF by default — fail-safe so a prompt-injected page
+   *  (Delete, Pay, …). OFF by default, fail-safe so a prompt-injected page
    *  can't steer a real harmful action on the live app. */
   allowDestructive?: boolean;
   /** cumulative token ceiling for the run's LLM calls (prompt+completion,
    *  provider-reported). 0 disables. Default: 300000. */
   maxTokens?: number;
   /** preview mode: run analyze + script, print the FULL action list (every
-   *  selector, every typed string), write recipe.json — and stop before the
+   *  selector, every typed string), write recipe.json, and stop before the
    *  capture browser ever touches the app. The recipe can be reviewed and then
    *  filmed with `supercut record --recipe <dir>/recipe.json`. */
   dryRun?: boolean;
@@ -114,7 +114,7 @@ export async function preflight(
   opts: { skipReachability?: boolean; skipRenderDeps?: boolean; log?: (msg: string) => void } = {},
 ): Promise<void> {
   const log = opts.log ?? ((m: string) => console.error(`[generate] ${m}`));
-  // app reachable — error in seconds, never after 10 minutes of work.
+  // app reachable, error in seconds, never after 10 minutes of work.
   // Follow redirects MANUALLY and validate EVERY hop BEFORE the request: a
   // default `fetch` follows 3xx automatically, so a public URL that 302s to
   // http://169.254.169.254/ (cloud metadata) or an RFC1918 host would already
@@ -136,7 +136,7 @@ export async function preflight(
           res = await fetch(current, { signal: ctrl.signal, redirect: "manual" });
         } catch (err) {
           throw new Error(
-            `preflight: cannot reach ${current} — is the app running? (${err instanceof Error ? err.message : err})`,
+            `preflight: cannot reach ${current}, is the app running? (${err instanceof Error ? err.message : err})`,
           );
         }
         status = res.status;
@@ -147,7 +147,7 @@ export async function preflight(
         }
         break;
       }
-      // 401/403 at the root is NORMAL for the "film your own dev app" case —
+      // 401/403 at the root is NORMAL for the "film your own dev app" case,
       // basic auth, a dev proxy, an SSO shim, an API-first backend. And this
       // probe is a bare Node fetch (no browser UA, no cookies) while the crawl
       // is Chromium, so a UA-gating edge can 403 a URL Chromium loads fine.
@@ -157,13 +157,13 @@ export async function preflight(
       // in the crawl, so fail here. --skip-preflight overrides the whole probe.
       if (status === 401 || status === 403) {
         log(
-          `preflight warning: ${url} responded ${status} — continuing (auth walls at the root are ` +
+          `preflight warning: ${url} responded ${status}, continuing (auth walls at the root are ` +
             `normal for private dev apps, and this probe carries no browser UA or cookies). ` +
             `If the whole app is behind that wall, the crawl will come back empty.`,
         );
       } else if (status >= 400) {
         throw new Error(
-          `app at ${url} responded ${status} — point --url at a page that loads, ` +
+          `app at ${url} responded ${status}, point --url at a page that loads, ` +
             `or pass --skip-preflight if you know better`,
         );
       }
@@ -180,7 +180,7 @@ export async function preflight(
   try {
     await exec("ffmpeg", ["-version"]);
   } catch {
-    throw new Error("preflight: ffmpeg not found on PATH — run `supercut doctor`");
+    throw new Error("preflight: ffmpeg not found on PATH, run `supercut doctor`");
   }
 }
 
@@ -196,7 +196,7 @@ export interface MusicChoice {
 /**
  * Music priority: explicit --music (validated at preflight) > the director's
  * recipe pick > silent. An unresolvable director track degrades to a warning
- * and a silent cut — a music nit must NEVER fail a run after LLM/capture spend.
+ * and a silent cut, a music nit must NEVER fail a run after LLM/capture spend.
  */
 export function pickMusic(
   cliMusic: string | undefined,
@@ -205,7 +205,7 @@ export function pickMusic(
 ): MusicChoice {
   if (cliMusic !== undefined) {
     // a bad --music is normally caught at preflight, but this exported function
-    // must never throw post-spend — mirror the director branch and degrade to a
+    // must never throw post-spend, mirror the director branch and degrade to a
     // warned silent cut if the resolver throws.
     try {
       return resolve(cliMusic)
@@ -216,7 +216,7 @@ export function pickMusic(
         spec: undefined,
         source: "none",
         label: "none",
-        warning: `--music "${cliMusic}" is not a bundled track or audio file — rendering silent`,
+        warning: `--music "${cliMusic}" is not a bundled track or audio file, rendering silent`,
       };
     }
   }
@@ -229,13 +229,13 @@ export function pickMusic(
       spec: undefined,
       source: "none",
       label: "none",
-      warning: `recipe music_track "${recipeTrack}" is not a bundled track or audio file — rendering silent`,
+      warning: `recipe music_track "${recipeTrack}" is not a bundled track or audio file, rendering silent`,
     };
   }
 }
 
 /**
- * Human-readable action list for a recipe — one line per action, including
+ * Human-readable action list for a recipe, one line per action, including
  * every `type` string and submit flag. Printed before capture on every run
  * (and as the payload of --dry-run) so the operator can see exactly what the
  * director is about to do to the live app; a prompt-injected `type` payload
@@ -289,7 +289,7 @@ export function shellQuote(arg: string): string {
  * The follow-up command a --dry-run tells the user to copy. Flags that set
  * record's SECURITY posture must survive the copy-paste: `record` allows
  * private networks by default, so a recipe generated under
- * --block-private-network must carry the flag into the suggested line — the
+ * --block-private-network must carry the flag into the suggested line, the
  * user who asked for the guard and then runs exactly what the tool printed
  * must not silently lose it.
  */
@@ -330,19 +330,19 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   const vision = opts.vision !== undefined ? opts.vision : !(opts.noVision ?? false);
   const budget = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
   // every LLM call in the run goes through the budget guard (analyze, script,
-  // and vision QC all receive this wrapper) — no stage can spend past the cap
+  // and vision QC all receive this wrapper), no stage can spend past the cap
   const llm = new BudgetedLlmClient(opts.llm, budget);
   // spend summary. The budget is ENFORCED against meteredTokens (provider-
   // reported where available, locally estimated where not), so that is the
   // headline number; on a mixed-reporting provider a diverging provider total
-  // is shown alongside instead of silently replacing the enforced one —
+  // is shown alongside instead of silently replacing the enforced one,
   // "unavailable" only when nothing was called at all.
   const usageLine = (): string => {
     const metered = llm.meteredTokens;
     const reported = llm.tokensUsed;
     if (metered <= 0) return reported !== undefined ? `~${reported} tokens (${llm.breakdown()})` : "unavailable";
     if (reported === undefined) {
-      return `~${metered} tokens (locally estimated — provider reported no usage; ${llm.breakdown()})`;
+      return `~${metered} tokens (locally estimated, provider reported no usage; ${llm.breakdown()})`;
     }
     if (reported === metered) return `~${reported} tokens (${llm.breakdown()})`;
     return `~${metered} tokens metered against the budget (provider reported ${reported}; ${llm.breakdown()})`;
@@ -357,14 +357,14 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   // a bad session file must die here too, before the crawl and any LLM call
   const storageState = opts.storageState ? assertStorageStateFile(opts.storageState) : undefined;
   if (storageState) log("   session: --storage-state is applied to the crawl and the capture");
-  if (opts.skipPreflight) log("   note: --skip-preflight — not probing the app URL before the crawl");
+  if (opts.skipPreflight) log("   note: --skip-preflight, not probing the app URL before the crawl");
   // one posture for the whole run (preflight, crawl, every take), decided
   // from the target when the caller did not choose
   const { allowPrivateNetwork, reason: networkReason } = await resolvePrivateNetworkPolicy(opts.url, opts.allowPrivateNetwork);
   if (networkReason === "public-target") log(`   ${publicTargetNote(opts.url)}`);
   await preflight(opts.url, allowPrivateNetwork, {
     ...(opts.skipPreflight ? { skipReachability: true } : {}),
-    // dry runs never render — don't fail the preview on a missing ffmpeg
+    // dry runs never render, don't fail the preview on a missing ffmpeg
     ...(opts.dryRun ? { skipRenderDeps: true } : {}),
     log: (m) => log(`   ${m}`),
   });
@@ -430,7 +430,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     log(`① analyze: crawling app…${vision ? "" : " (DOM-only, text model)"}`);
     // crawl the start page + every seeded route + a few link-discovered pages
     const maxPages = Math.min(3 + seedUrls.length, 12);
-    // pre-flight spend estimate — printed before any paid call so a runaway
+    // pre-flight spend estimate, printed before any paid call so a runaway
     // config is visible up front
     const callCeiling =
       ANALYZE_ATTEMPTS + SCRIPT_ATTEMPTS + (vision ? VISION_QC_ATTEMPTS * (MAX_RETAKES + 1) : 0);
@@ -447,11 +447,11 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       ...(storageState ? { storageState } : {}),
     }));
     log(`   crawled ${digests.length} page(s), ${digests.reduce((n, d) => n + d.inventory.length, 0)} interactable elements`);
-    // LOUD, never silent: if we excluded destructive controls, say which — so a
+    // LOUD, never silent: if we excluded destructive controls, say which, so a
     // user whose hero action got filtered knows why and can opt back in.
     const excluded = [...new Set(digests.flatMap((d) => d.excludedDestructive ?? []))];
     if (excluded.length) {
-      log(`   note: excluded ${excluded.length} destructive control(s) from filming — ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
+      log(`   note: excluded ${excluded.length} destructive control(s) from filming, ${excluded.slice(0, 5).map((s) => `"${s}"`).join(", ")}${excluded.length > 5 ? "…" : ""}. Pass --allow-destructive to include them.`);
     }
     const noSubmit = digests.reduce((n, d) => n + d.inventory.filter((i) => i.submitsDestructive).length, 0);
     if (noSubmit > 0) {
@@ -463,8 +463,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     if (unfilmable) throw new Error(`generate: ${unfilmable}`);
 
     // analyze notes = source routes/summary + README/package.json. Both come
-    // from the app's source (string literals, README, package.json) — exactly
-    // where hardcoded tokens / internal URLs live — so redact them before egress,
+    // from the app's source (string literals, README, package.json), exactly
+    // where hardcoded tokens / internal URLs live, so redact them before egress,
     // matching the redaction DOM text already gets (parity, no asymmetry).
     const readme = opts.repoPath ? repoNotes(opts.repoPath) : undefined;
     const notes =
@@ -483,7 +483,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     recipe = written.recipe;
     log(`   recipe valid after ${written.attempts} attempt(s): ${recipe.scenes.length} scenes`);
     if (written.warning) log(`   warning: ${written.warning}`);
-    // full action preview BEFORE the capture browser touches the app — every
+    // full action preview BEFORE the capture browser touches the app, every
     // selector and every typed string is on the record for the operator
     const tags = new Map(digests.flatMap((d) => d.inventory.map((i) => [`${d.url} ${i.selector}`, i.tag] as const)));
     for (const line of formatRecipePreview(recipe, (url, sel) => tags.get(`${url} ${sel}`))) log(`   ${line}`);
@@ -491,7 +491,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     if (opts.dryRun) {
       writeArtifacts({ dryRun: true });
       logUsage();
-      log(`dry run: recipe written to ${join(opts.outDir, "recipe.json")} — nothing was filmed`);
+      log(`dry run: recipe written to ${join(opts.outDir, "recipe.json")}, nothing was filmed`);
       return { outFile: "", recipe, analysis, retakes: 0, verdictLog: [] };
     }
 
@@ -502,7 +502,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     );
     if (opts.confirmCapture && !(await opts.confirmCapture({ maxPerformances }))) {
       throw new Error(
-        `capture cancelled — nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
+        `capture cancelled, nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
           `review or edit it, then film it with: ${dryRunFollowUpCommand(opts.outDir, {
             blockPrivateNetwork: opts.allowPrivateNetwork === false,
             allowPrivateNetwork: opts.allowPrivateNetwork === true,
@@ -525,17 +525,17 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
       if (result.aborted) {
         throw new Error(
-          `capture aborted: scenes failed [${result.failedScenes.join(", ")}] — app state may not match the recipe` +
+          `capture aborted: scenes failed [${result.failedScenes.join(", ")}], app state may not match the recipe` +
             formatSceneErrors(result.sceneErrors),
         );
       }
       // capture-health gate, BEFORE any QC spend: a starved capture (repaint
       // beacon dead, page never committing frames) renders as a slideshow no
-      // amount of QC patching can save — fail here, not after vision tokens.
+      // amount of QC patching can save, fail here, not after vision tokens.
       {
         const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
         // shape guard mirrors renderTake's: a non-array would make `.length`
-        // undefined and the sparse comparison silently false — gate passed.
+        // undefined and the sparse comparison silently false, gate passed.
         // record() just wrote this file, so today it can't happen; the guard is
         // for whatever writes it tomorrow.
         if (!Array.isArray(rawIndex)) throw new Error("generate: frames-index.json is not an array");
@@ -549,7 +549,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
           } else {
             throw new Error(
               `generate: ${health.reason}. The app may suspend rendering when headless, or the repaint ` +
-                `beacon failed to attach — try re-running; SUPERCUT_ALLOW_SPARSE=1 forces a render anyway.`,
+                `beacon failed to attach, try re-running; SUPERCUT_ALLOW_SPARSE=1 forces a render anyway.`,
             );
           }
         }
@@ -581,7 +581,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       // capture is not. The finalizer preserves every artifact; fail with the
       // way out.
       throw new Error(
-        `QC cut every scene (${err.cut.join(", ")}) — refusing to render an empty video. ` +
+        `QC cut every scene (${err.cut.join(", ")}), refusing to render an empty video. ` +
           `The recorded take is preserved at ${err.takeDir} (recipe.json and director-report.json ` +
           `sit beside it); inspect the verdicts, and render it anyway with: ` +
           `supercut render --take ${shellQuote(err.takeDir)}`,
@@ -602,7 +602,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     const outFile = join(opts.outDir, "final.mp4");
     const music = pickMusic(opts.music, recipe.music_track);
     if (music.warning) log(`   warning: ${music.warning}`);
-    // NO on-screen text. supercut is a pure product demo — the product is the
+    // NO on-screen text. supercut is a pure product demo, the product is the
     // whole story. The cinematic camera (zoom-to-action, frame-the-result) carries
     // it; nothing is ever drawn over the app. (The director still writes copy in
     // the report for reference, but it is deliberately NOT rendered.)

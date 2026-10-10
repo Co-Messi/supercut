@@ -6,7 +6,7 @@ import { chromiumInstallCommand } from "../capture/browser-install.js";
 const exec = promisify(execFile);
 
 /**
- * supercut doctor — fail-fast dependency checks.
+ * supercut doctor, fail-fast dependency checks.
  *
  * Mirrors the preflight that `generate` runs before any expensive work:
  * a bad environment must error in seconds, never after 10 minutes of capture.
@@ -99,7 +99,7 @@ const checks: Check[] = [
   },
   {
     // render needs the FULL chromium channel (the headless shell has no
-    // WebCodecs) — a doctor that only checks the shell passes while render
+    // WebCodecs), a doctor that only checks the shell passes while render
     // cannot launch.
     //
     // Launching is necessary but NOT sufficient: render encodes via the
@@ -111,12 +111,12 @@ const checks: Check[] = [
       let browser: import("playwright").Browser | undefined;
       try {
         // import INSIDE the try: a missing/broken playwright must surface as a
-        // FAILED check (doctor's whole job) — not throw past doctor() to the
+        // FAILED check (doctor's whole job), not throw past doctor() to the
         // top-level handler, which is exactly the dep-diagnosis path doctor exists for.
         const { chromium } = await import("playwright");
         const { createServer } = await import("node:http");
         // VideoEncoder is SecureContext-gated, so it's undefined on the opaque
-        // about:blank origin — evaluating there would falsely FAIL. Probe over a
+        // about:blank origin, evaluating there would falsely FAIL. Probe over a
         // real 127.0.0.1 origin, which Chromium treats as a secure context.
         server = createServer((_req, res) => res.end("<!doctype html>"));
         await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
@@ -137,11 +137,11 @@ const checks: Check[] = [
         });
         return supported
           ? { ok: true, detail: "ok" }
-          : { ok: false, detail: "FAIL — Chromium launched but WebCodecs H.264 (avc1.640028) is unsupported" };
+          : { ok: false, detail: "FAIL, Chromium launched but WebCodecs H.264 (avc1.640028) is unsupported" };
       } catch (err) {
         return {
           ok: false,
-          detail: `FAIL — ${err instanceof Error ? err.message : String(err)} (run \`${playwrightInstallHint()}\`)`,
+          detail: `FAIL, ${err instanceof Error ? err.message : String(err)} (run \`${playwrightInstallHint()}\`)`,
         };
       } finally {
         // always release the browser + server, even if import/launch threw mid-way
@@ -160,11 +160,11 @@ export async function doctor(): Promise<number> {
   let failures = 0;
   for (const check of checks) {
     const { ok, detail } = await check.run();
-    console.log(`${ok ? "✓" : "✗"} ${check.name} — ${detail}`);
+    console.log(`${ok ? "✓" : "✗"} ${check.name}, ${detail}`);
     if (!ok) failures++;
   }
   if (failures > 0) {
-    console.error(`\n${failures} check(s) failed — fix before running supercut generate.`);
+    console.error(`\n${failures} check(s) failed, fix before running supercut generate.`);
     return 1;
   }
   console.log("\nAll checks passed.");

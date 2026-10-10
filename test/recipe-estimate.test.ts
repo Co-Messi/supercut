@@ -21,7 +21,7 @@ import {
 } from "../src/schema/index.js";
 
 /**
- * M2: the recipe's video-length estimate must model what the take really
+ * the recipe's video-length estimate must model what the take really
  * adds around the scripted durations. Per later scene the executor reloads
  * the entry URL, settles, and pre-rolls the new page; at the end the render
  * runs past the last beat until its dwell and zoom-out have settled.

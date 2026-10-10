@@ -1,5 +1,5 @@
 /**
- * The render host page — a dumb, fast executor served on localhost
+ * The render host page, a dumb, fast executor served on localhost
  * (WebCodecs needs a secure context; the headless SHELL has no WebCodecs at
  * all, so this page runs in full Chromium).
  *
@@ -12,7 +12,7 @@
  * Plain JS in a template string: it is served as a real page, so no TS/esbuild
  * helper traps.
  */
-/** configured encoder bitrate — exported so the orchestrator can verify the
+/** configured encoder bitrate, exported so the orchestrator can verify the
  *  DELIVERED bitrate against it after the mux */
 import { cameraTransform } from "./plan.js";
 
@@ -32,7 +32,7 @@ export const BYTE_ACCUM_MAX_PASSES = 4;
  * Motion-blur pass count for one output frame: enough shutter samples that
  * consecutive copies of the content window sit ≤ 1px apart at the corner that
  * moves the MOST (a zoom about a point near one corner barely moves that
- * corner while the opposite one sweeps tens of px — sizing from the top-left
+ * corner while the opposite one sweeps tens of px, sizing from the top-left
  * alone left stepped "onion ring" ghosts on the far side). Rounded up to a
  * power of two: 1/n is then exact in the float16 accumulator, so the n
  * weights sum to exactly 1 (no dimming). `a`/`b` are the [z, offX, offY]
@@ -75,7 +75,7 @@ async function main() {
   };
 
   if (typeof VideoEncoder === "undefined") {
-    throw new Error("WebCodecs unavailable — render requires full Chromium on a secure (localhost) origin");
+    throw new Error("WebCodecs unavailable, render requires full Chromium on a secure (localhost) origin");
   }
 
   const plan = await (await fetchOk("/take/render-plan.json")).json();
@@ -93,7 +93,7 @@ async function main() {
   const canvas = new OffscreenCanvas(W, H);
   const ctx = canvas.getContext("2d");
   // motion-blur accumulator: 'lighter' (additive) at 1/n alpha per pass is a
-  // TRUE average — n × src-over at 1/n alpha only reaches ~66% opacity and
+  // TRUE average, n × src-over at 1/n alpha only reaches ~66% opacity and
   // washes the content dark. It accumulates in float16 where available: in
   // an 8-bit buffer every 1/n-weighted pass rounds, so many passes visibly
   // dim and band the picture during a zoom.
@@ -128,7 +128,7 @@ async function main() {
       totalEncodedBytes += buf.length;
       if (totalEncodedBytes > ENCODED_BYTES_CAP) {
         // a throw here vanishes inside the codec callback and the truncated
-        // stream would upload as a "success" — surface it via encodeError,
+        // stream would upload as a "success", surface it via encodeError,
         // which the encode loop checks every frame
         if (!encodeError) encodeError = new Error("encoded result exceeds " + ENCODED_BYTES_CAP + " byte cap");
         return;
@@ -153,13 +153,13 @@ async function main() {
   // mid-render encoder error.
   const support = await VideoEncoder.isConfigSupported(encoderConfig);
   if (!support.supported) {
-    throw new Error("H.264 (avc1.640028) encoding not supported by this Chromium — cannot render");
+    throw new Error("H.264 (avc1.640028) encoding not supported by this Chromium, cannot render");
   }
   encoder.configure(encoderConfig);
 
   // --- sequential source-frame cache (frames are consumed in order; a blended
   //     frame needs its NEXT source too, so cache by index and prune anything
-  //     behind the playhead — holds at most 2 decoded bitmaps) ---
+  //     behind the playhead, holds at most 2 decoded bitmaps) ---
   const bmpCache = new Map();
   async function sourceBitmap(idx) {
     let bmp = bmpCache.get(idx);
@@ -206,7 +206,7 @@ async function main() {
     c.save();
     c.translate(x, y);
     if (pulse > 0) {
-      // understated click ring — expands and fades
+      // understated click ring, expands and fades
       c.beginPath();
       c.arc(2, 2, 13 + 20 * (1 - pulse), 0, Math.PI * 2);
       c.strokeStyle = "rgba(120,150,255," + (0.35 * pulse).toFixed(3) + ")";
@@ -254,7 +254,7 @@ async function main() {
     actx.setTransform(1, 0, 0, 1, 0, 0);
     actx.clearRect(0, 0, W, H);
 
-    // camera transform at fractional shutter position p ∈ [0,1] — lerped
+    // camera transform at fractional shutter position p ∈ [0,1], lerped
     // between the plan's subframe samples so pass count is decoupled from
     // sample count
     const camAt = (p) => {
@@ -279,7 +279,7 @@ async function main() {
       const [z, offX, offY] = camAt(passes === 1 ? 0.5 : s / (passes - 1));
       actx.setTransform(z, 0, 0, z, offX, offY);
       actx.save();
-      // content clipped to rounded window — NO shadow in the blur loop
+      // content clipped to rounded window, NO shadow in the blur loop
       roundedPath(actx, C.x, C.y, C.w, C.h, layout.cornerRadius);
       actx.clip();
       if (bmpB) {
@@ -308,7 +308,7 @@ async function main() {
       ctx.drawImage(bgImage, (W - dw) / 2, (H - dh) / 2, dw, dh);
     } else {
       // procedural mesh: large soft color clouds with very slow drift
-      // (the OpenAI-launch-video look, generated — no asset, no license)
+      // (the OpenAI-launch-video look, generated, no asset, no license)
       const t = (f * 1000) / fps;
       for (const b of background.blobs) {
         const bx = b.cx + Math.sin(t * 0.00045 + b.phase) * b.amp;
@@ -329,7 +329,7 @@ async function main() {
         ctx.fillRect(0, 0, W, H);
       }
     }
-    // window shadow: drawn ONCE per frame at mid-shutter — it is already a
+    // window shadow: drawn ONCE per frame at mid-shutter, it is already a
     // 72px blur, so motion-blurring it is invisible, but stacking copies of
     // it creates concentric banding.
     {
@@ -345,7 +345,7 @@ async function main() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
     ctx.drawImage(accumCanvas, 0, 0);
-    // vignette pulls the eye to the window — fades out as the camera zooms in
+    // vignette pulls the eye to the window, fades out as the camera zooms in
     // (a fixed vignette grays the corners of bright content at zoom)
     const zNow = camera[(f * SUB + (SUB - 1)) * 3];
     const vigA = Math.max(0, Math.min(1, (1.55 - zNow) / 0.55)) * background.vignette;

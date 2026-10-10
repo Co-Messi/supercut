@@ -4,7 +4,7 @@
  * frame index and scores the plan with test/helpers/motion-metrics.ts:
  *
  *   - the camera is wide (z ≤ 1.05) at every scene marker and at the first
- *     frame of a new page after a navigation gap — never a zoomed stale page
+ *     frame of a new page after a navigation gap, never a zoomed stale page
  *   - each scene opens with ≥ 700ms of continuous wide rest (z ≤ 1.02)
  *   - a punch-in reaches ≥ 90% of its zoom by its click, type or hover (or
  *     is skipped), and never starts rising only after the event
@@ -140,7 +140,7 @@ function edgeTake(): { log: EventLog; index: FrameIndexEntry[] } {
 
 /** the shape of the real gen2 take's first beat: a hover punch on a nav link,
  *  the click 370ms later, and the logged navigation 80ms after that with NO
- *  source gap (paint holding) — the camera snaps wide from a full punch */
+ *  source gap (paint holding), the camera snaps wide from a full punch */
 function heldPunchNavTake(): { log: EventLog; index: FrameIndexEntry[] } {
   const events: EventLog["events"] = [
     { t: 1016.7, type: "scene", name: "s1", priority: 1 },

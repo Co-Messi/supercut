@@ -301,7 +301,7 @@ async function main(): Promise<number> {
       const storageState = values["storage-state"]
         ? await storageStateOrUsage(values["storage-state"], GENERATE_USAGE)
         : undefined;
-      const { loadDotEnv, resolveProvider } = await import("../director/config.js");
+      const { dotEnvWarnings, loadDotEnv, resolveProvider } = await import("../director/config.js");
       const { dryRunFollowUpCommand, generate } = await import("../director/generate.js");
       const envLoad = loadDotEnv(values["env-file"] ?? ".env");
       // a missing .env is fine (reason "not found"), but a file that EXISTED
@@ -312,6 +312,11 @@ async function main(): Promise<number> {
         if (process.env.SUPERCUT_VERBOSE) console.error(`env: ${envLoad.path} ${envLoad.reason}`);
       } else if (envLoad.reason) {
         console.error(`env: failed to parse ${envLoad.path}: ${envLoad.reason}`);
+      }
+      // a .env nobody named can redirect where the app's content goes, or
+      // lift the spend ceiling: say so loudly, every time (even with --yes)
+      for (const line of dotEnvWarnings(envLoad.path, envLoad.applied ?? [], process.env, { explicit: !!values["env-file"] })) {
+        console.error(terminalSafe(line));
       }
       // flag wins over env; 0 or "off" disables the cap (generate defaults to
       // 300000). An empty value is treated as unset: Number("") is 0, which

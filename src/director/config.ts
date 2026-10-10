@@ -200,6 +200,9 @@ export interface DotEnvLoadResult {
   path: string;
   loaded: boolean;
   reason?: string;
+  /** the variables the file supplied (ones the environment already had are
+   *  not overridden and not listed) */
+  applied?: string[];
 }
 
 /** Best-effort .env loader. Always uses the internal parser — NOT the native
@@ -209,11 +212,51 @@ export interface DotEnvLoadResult {
 export function loadDotEnv(path = ".env"): DotEnvLoadResult {
   if (!existsSync(path)) return { path, loaded: false, reason: "not found" };
   try {
-    parseDotEnvInto(readFileSync(path, "utf8"), process.env);
-    return { path, loaded: true };
+    const applied = parseDotEnvInto(readFileSync(path, "utf8"), process.env);
+    return { path, loaded: true, applied };
   } catch (err) {
     return { path, loaded: false, reason: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Warnings for a .env the user did not name. It is read from the current
+ * directory, usually the app being filmed, and a cloned repo can ship one: a
+ * file that points the LLM at another endpoint sends the crawled app there,
+ * and one that lifts the token ceiling removes the spend guard. Each warning
+ * names the file and the variable, and the endpoint's host; no value that can
+ * be a secret is ever printed.
+ */
+export function dotEnvWarnings(
+  path: string,
+  applied: string[],
+  env: Record<string, string | undefined>,
+  opts: { explicit: boolean },
+): string[] {
+  if (opts.explicit) return [];
+  const set = new Set(applied);
+  const out: string[] = [];
+  if (set.has("SUPERCUT_LLM_BASE_URL")) {
+    let host = "an unknown host";
+    try {
+      host = new URL(env.SUPERCUT_LLM_BASE_URL ?? "").host || host;
+    } catch {
+      /* unparseable: resolveProvider rejects it */
+    }
+    out.push(`${path} (in the current directory) sets SUPERCUT_LLM_BASE_URL: crawled app content will be sent to ${host}.`);
+  } else if (set.has("SUPERCUT_PROVIDER") && env.SUPERCUT_PROVIDER?.toLowerCase() === "custom") {
+    out.push(`${path} (in the current directory) sets SUPERCUT_PROVIDER=custom: crawled app content goes to a custom endpoint.`);
+  }
+  const budget = env.SUPERCUT_MAX_TOKENS?.trim().toLowerCase();
+  if (set.has("SUPERCUT_MAX_TOKENS") && (budget === "0" || budget === "off")) {
+    out.push(`${path} (in the current directory) sets SUPERCUT_MAX_TOKENS=${budget}: the LLM token ceiling is off.`);
+  }
+  if (out.length > 0) {
+    out.push(
+      "If you did not write that file (a cloned repo can ship one), stop now. Pass --env-file <file> to choose the file explicitly.",
+    );
+  }
+  return out.map((l) => `warning: ${l}`);
 }
 
 /** the only variables a .env may set: supercut's own. The file is read from
@@ -230,7 +273,8 @@ function isSupercutVar(key: string): boolean {
  *  preceded by whitespace), treats an empty value as unset, imports only
  *  supercut's own variables, and never overrides a non-empty real
  *  environment variable. */
-function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): void {
+function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): string[] {
+  const applied: string[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
@@ -245,6 +289,10 @@ function parseDotEnvInto(text: string, env: NodeJS.ProcessEnv): void {
     } else {
       val = val.replace(/\s+#.*$/, "");
     }
-    if (val && !env[key]) env[key] = val;
+    if (val && !env[key]) {
+      env[key] = val;
+      applied.push(key);
+    }
   }
+  return applied;
 }

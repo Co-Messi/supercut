@@ -13,7 +13,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import type { EventLog, Recipe } from "../schema/index.js";
+import { parseRecipe, type EventLog, type Recipe } from "../schema/index.js";
+import type { TakeAdjustments } from "../render/adjust.js";
 import { extractJson, type ChatPart, type LlmClient } from "./llm.js";
 import type { RecordResult } from "../capture/executor.js";
 
@@ -218,50 +219,173 @@ export class AllScenesCutError extends Error {
   }
 }
 
-/** Apply verdicts within the frozen patch surface. Cutting cascades to
- *  dependents. Throws AllScenesCutError when nothing survives. */
-export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): AppliedVerdicts {
-  const cutSet = new Set(verdicts.filter((v) => v.verdict === "cut").map((v) => v.scene));
+type Bbox = [number, number, number, number];
+
+/** the patches that actually change a value, per surviving scene */
+interface Patches {
+  cut: Set<string>;
+  /** scene → new hold_ms (differs from the recipe's) */
+  holds: Map<string, number>;
+  /** scene → action index → new zoom (differs from the action's) */
+  zooms: Map<string, Map<number, Bbox>>;
+}
+
+function collectPatches(recipe: Recipe, verdicts: SceneVerdict[]): Patches {
+  // a cut of a scene the recipe does not have changes nothing
+  const names = new Set(recipe.scenes.map((s) => s.name));
+  const cut = new Set(verdicts.filter((v) => v.verdict === "cut" && names.has(v.scene)).map((v) => v.scene));
   // dependency cascade
   let grew = true;
   while (grew) {
     grew = false;
     for (const s of recipe.scenes) {
-      if (!cutSet.has(s.name) && s.depends_on.some((d) => cutSet.has(d))) {
-        cutSet.add(s.name);
+      if (!cut.has(s.name) && s.depends_on.some((d) => cut.has(d))) {
+        cut.add(s.name);
         grew = true;
       }
     }
   }
-
-  let changed = cutSet.size > 0;
-  const scenes = recipe.scenes
-    .filter((s) => !cutSet.has(s.name))
-    .map((s) => {
-      const patches = verdicts.filter((v) => v.verdict === "patch" && v.scene === s.name && v.patch);
-      if (patches.length === 0) return s;
-      changed = true;
-      let out = { ...s };
-      for (const p of patches) {
-        if (p.patch?.hold_ms !== undefined) out = { ...out, hold_ms: p.patch.hold_ms };
-        if (p.patch?.zoom && p.patch.action_index !== undefined) {
-          // apply-time guard (schema already rejects these on the parse path,
-          // but applyVerdicts is public API): a degenerate bbox in the recipe
-          // would only explode much later, at render-time event validation
-          const [zx, zy, zw, zh] = p.patch.zoom;
-          const zoomValid =
-            [zx, zy, zw, zh].every(Number.isFinite) && zx >= 0 && zy >= 0 && zw > 0 && zh > 0;
-          const actions = [...out.actions];
-          const target = actions[p.patch.action_index];
-          if (target && zoomValid) {
-            actions[p.patch.action_index] = { ...target, zoom: p.patch.zoom };
-            out = { ...out, actions };
-          }
-        }
+  const holds = new Map<string, number>();
+  const zooms = new Map<string, Map<number, Bbox>>();
+  for (const v of verdicts) {
+    if (v.verdict !== "patch" || !v.patch) continue;
+    const scene = recipe.scenes.find((s) => s.name === v.scene);
+    if (!scene || cut.has(scene.name)) continue;
+    const { hold_ms, zoom, action_index } = v.patch;
+    if (hold_ms !== undefined) {
+      if (hold_ms !== scene.hold_ms) holds.set(scene.name, hold_ms);
+      else holds.delete(scene.name);
+    }
+    if (zoom && action_index !== undefined) {
+      // apply-time guard (the schema already rejects these on the parse path,
+      // but this is public API): a degenerate bbox in the recipe would only
+      // explode much later, at render-time event validation
+      const [zx, zy, zw, zh] = zoom;
+      const zoomValid = [zx, zy, zw, zh].every(Number.isFinite) && zx >= 0 && zy >= 0 && zw > 0 && zh > 0;
+      const action = scene.actions[action_index];
+      const same = !!action?.zoom && action.zoom.every((n, i) => n === zoom[i]);
+      if (action && zoomValid && !same) {
+        const forScene = zooms.get(scene.name) ?? new Map<number, Bbox>();
+        forScene.set(action_index, zoom);
+        zooms.set(scene.name, forScene);
       }
-      return out;
-    });
+    }
+  }
+  return { cut, holds, zooms };
+}
 
-  if (scenes.length === 0) throw new AllScenesCutError([...cutSet]);
-  return { recipe: { ...recipe, scenes }, changed, cut: [...cutSet] };
+function buildPatched(recipe: Recipe, p: Patches, withHolds: boolean): Recipe {
+  const scenes = recipe.scenes
+    .filter((s) => !p.cut.has(s.name))
+    .map((s) => {
+      const hold = withHolds ? p.holds.get(s.name) : undefined;
+      const z = p.zooms.get(s.name);
+      if (hold === undefined && !z) return s;
+      const actions = z ? s.actions.map((a, i) => (z.has(i) ? { ...a, zoom: z.get(i)! } : a)) : s.actions;
+      return { ...s, actions, ...(hold !== undefined ? { hold_ms: hold } : {}) };
+    });
+  return { ...recipe, scenes };
+}
+
+/** the patched recipe, held to the parser's rules (the 60s cap): holds are
+ *  dropped when they would break it, since cuts and zooms never lengthen */
+function validPatched(recipe: Recipe, p: Patches): { recipe: Recipe; holdsDropped: string | undefined } {
+  const scenes = recipe.scenes.filter((s) => !p.cut.has(s.name));
+  if (scenes.length === 0) throw new AllScenesCutError([...p.cut]);
+  const full = buildPatched(recipe, p, true);
+  try {
+    return { recipe: parseRecipe(full), holdsDropped: undefined };
+  } catch (err) {
+    if (p.holds.size === 0) throw err;
+    return {
+      recipe: parseRecipe(buildPatched(recipe, p, false)),
+      holdsDropped: `QC hold patches dropped: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/** Apply verdicts within the frozen patch surface. Cutting cascades to
+ *  dependents; `changed` is true only when a value actually differs. The
+ *  result always passes parseRecipe. Throws AllScenesCutError when nothing
+ *  survives. */
+export function applyVerdicts(recipe: Recipe, verdicts: SceneVerdict[]): AppliedVerdicts {
+  const p = collectPatches(recipe, verdicts);
+  const { recipe: patched, holdsDropped } = validPatched(recipe, p);
+  const changed = p.cut.size > 0 || p.zooms.size > 0 || (p.holds.size > 0 && !holdsDropped);
+  return { recipe: patched, changed, cut: [...p.cut] };
+}
+
+export interface QcDecision {
+  /** scenes to drop, cascade included; only a re-record removes them */
+  cut: string[];
+  /** the recipe a re-take films: present only when a scene is cut. It
+   *  carries the take's other patches, which the re-take films for real. */
+  retakeRecipe?: Recipe;
+  /** hold and zoom patches for the take as recorded, applied at render time:
+   *  they change how the footage is cut, never what the app is asked to do */
+  adjustments: TakeAdjustments;
+  /** patches that could not be honoured, and why */
+  notes: string[];
+}
+
+/** which interaction event (click, type or hover, in log order within the
+ *  scene) carries the camera focus of the scene's action `actionIndex`: the
+ *  recorder logs a click for a click, a click then a type for a type (the
+ *  focus rides the type), and a hover for a hover */
+function focusEventOf(scene: Recipe["scenes"][number], actionIndex: number): number | undefined {
+  const steps = [...scene.entry.prelude, ...scene.actions];
+  const target = scene.entry.prelude.length + actionIndex;
+  let n = 0;
+  for (let i = 0; i < steps.length; i++) {
+    const kind = steps[i]!.kind;
+    if (i === target) {
+      if (kind === "click" || kind === "hover") return n;
+      if (kind === "type") return n + 1;
+      return undefined;
+    }
+    if (kind === "click" || kind === "hover") n += 1;
+    else if (kind === "type") n += 2;
+  }
+  return undefined;
+}
+
+/**
+ * Decide what a QC round does. A cut needs a re-take (the scene is in the
+ * footage). A hold or zoom patch does not: it becomes a render-time
+ * adjustment of the take as recorded, so the app is not driven again. A
+ * patch that changes no value (`patch: {}`, a hold equal to the recorded one)
+ * does nothing. A shorter hold cannot be applied without re-recording, so it
+ * is noted and ignored.
+ */
+export function decideQc(recipe: Recipe, verdicts: SceneVerdict[]): QcDecision {
+  const p = collectPatches(recipe, verdicts);
+  const notes: string[] = [];
+  const shorter = [...p.holds].filter(([name, ms]) => ms < (recipe.scenes.find((s) => s.name === name)?.hold_ms ?? 0));
+  for (const [name] of shorter) {
+    notes.push(`a shorter hold on scene "${name}" needs a re-record; it is not applied`);
+    p.holds.delete(name);
+  }
+  const { recipe: patched, holdsDropped } = validPatched(recipe, p);
+  if (holdsDropped) {
+    notes.push(holdsDropped);
+    p.holds.clear();
+  }
+  const adjustments: TakeAdjustments = { holds: [], zooms: [] };
+  for (const [name, ms] of p.holds) {
+    adjustments.holds.push({ scene: name, extraMs: ms - recipe.scenes.find((s) => s.name === name)!.hold_ms });
+  }
+  for (const [name, byAction] of p.zooms) {
+    const scene = recipe.scenes.find((s) => s.name === name)!;
+    for (const [actionIndex, bbox] of byAction) {
+      const focusEvent = focusEventOf(scene, actionIndex);
+      if (focusEvent === undefined) notes.push(`a zoom on scene "${name}" action ${actionIndex} has no beat to frame`);
+      else adjustments.zooms.push({ scene: name, focusEvent, bbox });
+    }
+  }
+  return {
+    cut: [...p.cut],
+    ...(p.cut.size > 0 ? { retakeRecipe: patched } : {}),
+    adjustments,
+    notes,
+  };
 }

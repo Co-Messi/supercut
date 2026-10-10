@@ -225,6 +225,58 @@ describe("generate E2E (stubbed brain, real pipeline)", () => {
     expect(llm.calls).toBe(3); // analyze + script + vision QC — no silent extra spend
   }, 300_000);
 
+  it("a hold-only QC verdict is applied at render time: the app is filmed once, and consent states the bound", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-hold-"));
+    dirs.push(outDir);
+    const llm = new ScriptedLlm(() => [
+      JSON.stringify({
+        product_summary: "Lumon Metrics: a dashboard product with instant signup and live metrics.",
+        music_track: "daybreak",
+        money_moments: [
+          { title: "Zero-friction signup", why: "form appears instantly", page_url: `${app.url}/`, elements: ["#cta"] },
+          { title: "Live dashboard", why: "numbers count up live", page_url: `${app.url}/dash`, elements: ["#task-ship"] },
+        ],
+      }),
+      JSON.stringify({
+        version: 0, app_url: app.url, music_track: "off",
+        scenes: [
+          { name: "signup", priority: 1, entry: { url: `${app.url}/`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "click", selector: "#cta", duration_ms: 900 }], hold_ms: 200 },
+          { name: "dashboard", priority: 2, entry: { url: `${app.url}/dash`, prelude: [] }, depends_on: [],
+            actions: [{ kind: "hover", selector: "#task-ship", duration_ms: 900 }], hold_ms: 200 },
+        ],
+      }),
+      // QC asks only for breathing room on the first scene
+      JSON.stringify({
+        verdicts: [
+          { scene: "signup", verdict: "patch", reason: "needs air", patch: { hold_ms: 1400 } },
+          { scene: "dashboard", verdict: "ok", reason: "fine" },
+        ],
+      }),
+    ]);
+    const asked: { maxPerformances: number }[] = [];
+    const res = await generate({
+      llm, url: app.url, outDir, seed: 7, allowPrivateNetwork: true, log: () => {},
+      confirmCapture: async (info) => {
+        asked.push(info);
+        return true;
+      },
+    });
+    expect(asked).toEqual([{ maxPerformances: 2 }]);
+    expect(res.retakes).toBe(0);
+    expect(llm.calls).toBe(3); // no second QC pass: nothing was filmed again
+    expect(existsSync(join(outDir, "take-1"))).toBe(false);
+    const report = JSON.parse(readFileSync(join(outDir, "director-report.json"), "utf8"));
+    expect(report.renderAdjustments.holds).toEqual([{ scene: "signup", extraMs: 1200 }]);
+    expect(report.takes).toBe(1);
+    // the hold is in the video, not in the take: rendering the take as
+    // recorded comes out about 1.2s shorter
+    const render = JSON.parse(readFileSync(join(outDir, "render-report.json"), "utf8"));
+    const { renderTake } = await import("../src/render/index.js");
+    const plain = await renderTake({ takeDir: join(outDir, "take-0"), outFile: join(outDir, "plain", "final.mp4") });
+    expect(render.video.durationS * 1000).toBeGreaterThanOrEqual(plain.durationMs + 1000);
+  }, 300_000);
+
   it("--music off silences the cut even when the director picked a track", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "supercut-gen-silent-"));
     dirs.push(outDir);

@@ -20,14 +20,15 @@ import type { Recipe } from "../schema/index.js";
 import { analyzeApp, type AppAnalysis } from "./analyze.js";
 import { crawlApp, type PageDigest } from "./inventory.js";
 import { BudgetedLlmClient, type LlmClient } from "./llm.js";
-import { AllScenesCutError, applyVerdicts, deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
+import { deterministicChecks, visionQc, type SceneVerdict } from "./qc.js";
+import { AllScenesCutAfterTakeError, filmWithRetakes, MAX_RETAKES, type FilmResult } from "./retakes.js";
+import { hasAdjustments, NO_ADJUSTMENTS, type TakeAdjustments } from "../render/adjust.js";
 import { writeRecipe } from "./script.js";
 import { assertSafeNavigationUrl, urlResolvesPrivate } from "../security/url-policy.js";
 import { redactForPrompt } from "../security/redaction.js";
 import { extractAppRoutes, routesToSeedAndNotes } from "./sourceRoutes.js";
 
 const exec = promisify(execFile);
-const MAX_RETAKES = 3;
 /** default hard token budget for a whole run — generous for a normal run
  *  (~15 calls at 8k output max), fatal only to runaway retry loops */
 const DEFAULT_MAX_TOKENS = 300_000;
@@ -80,8 +81,10 @@ export interface GenerateOptions {
   /** asked once, after the action preview is printed and before the capture
    *  browser first touches the app; resolving false cancels the run (the
    *  recipe is still written). The CLI supplies it when a human can answer
-   *  (stdin is a TTY and --yes is absent). */
-  confirmCapture?: () => Promise<boolean>;
+   *  (stdin is a TTY and --yes is absent). `maxPerformances` is how many
+   *  times each action may run against the app under this one answer (the
+   *  first take plus the QC re-takes); the question must state it. */
+  confirmCapture?: (info: { maxPerformances: number }) => Promise<boolean>;
   log?: (msg: string) => void;
 }
 
@@ -343,6 +346,8 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
   let recipe: Recipe | undefined;
   let retakes = 0;
   const verdictLog: SceneVerdict[][] = [];
+  /** QC holds and zooms applied to the rendered take (never re-filmed) */
+  let renderAdjustments: TakeAdjustments = NO_ADJUSTMENTS;
   let usageLogged = false;
   const logUsage = (): void => {
     if (usageLogged) return;
@@ -353,7 +358,11 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
     if (recipe) writeFileSync(join(opts.outDir, "recipe.json"), JSON.stringify(recipe, null, 2));
     writeFileSync(
       join(opts.outDir, "director-report.json"),
-      JSON.stringify({ analysis, recipe, retakes, verdictLog, llm: opts.llm.label, ...extra }, null, 2),
+      JSON.stringify(
+        { analysis, recipe, retakes, takes: retakes + 1, verdictLog, renderAdjustments, llm: opts.llm.label, ...extra },
+        null,
+        2,
+      ),
     );
   };
 
@@ -436,7 +445,12 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       return { outFile: "", recipe, analysis, retakes: 0, verdictLog: [] };
     }
 
-    if (opts.confirmCapture && !(await opts.confirmCapture())) {
+    const maxPerformances = 1 + MAX_RETAKES;
+    log(
+      `   capture: each action runs once per take; a QC re-take (only to drop a scene) films the recipe again, ` +
+        `at most ${maxPerformances} take(s) in total`,
+    );
+    if (opts.confirmCapture && !(await opts.confirmCapture({ maxPerformances }))) {
       throw new Error(
         `capture cancelled — nothing was filmed. The recipe is at ${join(opts.outDir, "recipe.json")}; ` +
           `review or edit it, then film it with: ${dryRunFollowUpCommand(opts.outDir, {
@@ -445,14 +459,14 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       );
     }
 
-    let result: RecordResult;
-    let takeDir: string;
-
-    for (;;) {
-      takeDir = join(opts.outDir, `take-${retakes}`);
+    const recordTake = async (filming: Recipe, index: number): Promise<{ result: RecordResult; takeDir: string }> => {
+      // the report always describes the take being (or last) filmed
+      recipe = filming;
+      retakes = index;
+      const takeDir = join(opts.outDir, `take-${index}`);
       rmSync(takeDir, { recursive: true, force: true });
-      log(`③ record: take ${retakes} (${recipe.scenes.length} scenes)…`);
-      result = await record({ recipe, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
+      log(`③ record: take ${index} (${filming.scenes.length} scenes)…`);
+      const result = await record({ recipe: filming, outDir: takeDir, seed: opts.seed ?? 1, allowPrivateNetwork: opts.allowPrivateNetwork ?? true });
       log(`   captured ${result.frameCount} frames (avg ${result.avgSourceFps.toFixed(1)} fps source)`);
       if (result.aborted) {
         throw new Error(
@@ -485,7 +499,10 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
           }
         }
       }
+      return { result, takeDir };
+    };
 
+    const qcTake = async (result: RecordResult, takeDir: string): Promise<SceneVerdict[]> => {
       log("④ qc: deterministic checks…");
       const verdicts = deterministicChecks(result);
       if (vision) {
@@ -493,46 +510,29 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
         llm.stage = "qc";
         verdicts.push(...await visionQc(llm, takeDir, result.eventLog));
       }
-      verdictLog.push(verdicts);
-      const notOk = verdicts.filter((v) => v.verdict !== "ok");
-      if (notOk.length === 0) {
-        log("   QC clean");
-        break;
-      }
-      for (const v of notOk) log(`   ${v.verdict.toUpperCase()} "${v.scene}": ${v.reason}`);
+      return verdicts;
+    };
 
-      let applied: ReturnType<typeof applyVerdicts>;
-      try {
-        applied = applyVerdicts(recipe, verdicts);
-      } catch (err) {
-        if (!(err instanceof AllScenesCutError)) throw err;
-        // Refusing to render an empty video is right; discarding a recorded,
-        // renderable take after the full crawl + both LLM stages + a complete
-        // capture is not. The finalizer preserves every artifact; fail with the
-        // way out.
-        throw new Error(
-          `QC cut every scene (${err.cut.join(", ")}) — refusing to render an empty video. ` +
-            `The recorded take is preserved at ${takeDir} (recipe.json and director-report.json ` +
-            `sit beside it); inspect the verdicts, and render it anyway with: ` +
-            `supercut render --take ${shellQuote(takeDir)}`,
-        );
-      }
-      if (!applied.changed || retakes >= MAX_RETAKES) {
-        if (retakes >= MAX_RETAKES) {
-          log(`   re-take budget exhausted (${MAX_RETAKES}) — proceeding with the take as recorded`);
-        }
-        // Do NOT adopt the patched recipe here. `takeDir` was
-        // recorded from the CURRENT `recipe`; writing applied.recipe would make
-        // recipe.json/report describe scenes/holds that were never filmed (and
-        // for cuts, omit a scene that is still in the rendered video). The
-        // artifact must match the take. Render keys off events.json + frame
-        // index, so the video is whatever was recorded regardless.
-        break;
-      }
-      recipe = applied.recipe;
-      retakes++;
-      log(`   re-take ${retakes}/${MAX_RETAKES} with patched recipe${applied.cut.length ? ` (cut: ${applied.cut.join(", ")})` : ""}`);
+    let film: FilmResult;
+    try {
+      film = await filmWithRetakes({ recipe, maxRetakes: MAX_RETAKES, recordTake, qc: qcTake, log, verdictLog });
+    } catch (err) {
+      if (!(err instanceof AllScenesCutAfterTakeError)) throw err;
+      // Refusing to render an empty video is right; discarding a recorded,
+      // renderable take after the full crawl + both LLM stages + a complete
+      // capture is not. The finalizer preserves every artifact; fail with the
+      // way out.
+      throw new Error(
+        `QC cut every scene (${err.cut.join(", ")}) — refusing to render an empty video. ` +
+          `The recorded take is preserved at ${err.takeDir} (recipe.json and director-report.json ` +
+          `sit beside it); inspect the verdicts, and render it anyway with: ` +
+          `supercut render --take ${shellQuote(err.takeDir)}`,
+      );
     }
+    const { result, takeDir, adjustments } = film;
+    renderAdjustments = adjustments;
+    recipe = film.recipe;
+    retakes = film.retakes;
 
     // report + usage BEFORE render (the finalizer rewrites the report with
     // the error if render fails): the artifacts exist even if the process is
@@ -564,6 +564,7 @@ export async function generate(opts: GenerateOptions): Promise<GenerateResult> {
       ...(partial ? { allowPartial: true } : {}),
       ...(opts.background ? { background: opts.background } : {}),
       ...(music.spec ? { music: music.spec } : {}),
+      ...(hasAdjustments(adjustments) ? { adjust: adjustments } : {}),
     });
     log(`done: ${outFile} (${renderRes.frames} frames, ${(renderRes.encodedBytes / 1048576).toFixed(1)}MB, music ${music.label})`);
 

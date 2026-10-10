@@ -366,11 +366,12 @@ async function main(): Promise<number> {
 }
 
 /** y/N prompt on stderr (stdout stays clean for piping) */
-async function confirmOnTty(): Promise<boolean> {
+async function confirmOnTty(info: { maxPerformances: number }): Promise<boolean> {
   const { createInterface } = await import("node:readline/promises");
+  const { captureConsentPrompt } = await import("../director/retakes.js");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const answer = await rl.question("Film this recipe against the live app now? [y/N] ");
+    const answer = await rl.question(captureConsentPrompt(info.maxPerformances));
     return /^y(es)?$/i.test(answer.trim());
   } finally {
     rl.close();

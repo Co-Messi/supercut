@@ -21,7 +21,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { MAX_BUDGET_MS, parseEventLog, type EventLog } from "../schema/index.js";
-import { FADE_IN_MS, FADE_OUT_MS, planTake, type FrameIndexEntry } from "./plan.js";
+import { FADE_IN_MS, FADE_OUT_MS, planTake, validateFrameIndex, type FrameIndexEntry } from "./plan.js";
+import { applyTakeAdjustments, hasAdjustments, type TakeAdjustments } from "./adjust.js";
 import { chromiumInstallCommand } from "../capture/browser-install.js";
 import { ENCODER_BITRATE, HOST_PAGE } from "./host-page.js";
 import {
@@ -66,6 +67,9 @@ export interface RenderOptions {
   /** "8bit" forces the motion-blur accumulator's 8-bit fallback (diagnostics
    *  and tests); "auto" (the default) uses float16 where the browser has it */
   accumulator?: "auto" | "8bit";
+  /** QC holds and zooms applied to the take before planning; the take on
+   *  disk is not changed */
+  adjust?: TakeAdjustments;
 }
 
 export interface RenderResult {
@@ -346,10 +350,18 @@ export async function renderTake(opts: RenderOptions): Promise<RenderResult> {
 
   // Fail before expensive work: output dir + take shape.
   mkdirSync(dirname(outFile), { recursive: true });
-  const log = parseEventLog(JSON.parse(readFileSync(join(takeDir, "events.json"), "utf8")));
+  let log = parseEventLog(JSON.parse(readFileSync(join(takeDir, "events.json"), "utf8")));
   const rawIndex = JSON.parse(readFileSync(join(takeDir, "frames-index.json"), "utf8"));
   if (!Array.isArray(rawIndex)) throw new Error("frames-index.json is not an array");
-  const frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+  let frameIndex = rawIndex as FrameIndexEntry[]; // entries validated in buildRenderPlan
+  if (hasAdjustments(opts.adjust)) {
+    validateFrameIndex(frameIndex);
+    const adjusted = applyTakeAdjustments(log, frameIndex, opts.adjust);
+    log = parseEventLog(adjusted.log);
+    frameIndex = adjusted.frameIndex;
+    if (adjusted.applied.length) console.error(`[render] QC adjustments: ${adjusted.applied.join("; ")}`);
+    for (const s of adjusted.skipped) console.error(`[render] QC adjustment skipped: ${s}`);
+  }
 
   // Partial-take gate: the recorder lists the scenes it failed to perform.
   // Rendering such a take silently ships a video missing those beats.
